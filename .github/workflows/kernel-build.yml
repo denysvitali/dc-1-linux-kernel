@@ -36,9 +36,17 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v4
+      # fetch-depth: 1 is worth a comment because the obvious instinct is
+      # fetch-depth: 0 "so setlocalversion can see the tags". That cost ~14
+      # MINUTES per run here -- this repo is a fork of torvalds/linux, so depth
+      # 0 clones the ENTIRE kernel history on every build. We do not need it:
+      # jagar_defconfig has "# CONFIG_LOCALVERSION_AUTO is not set", so
+      # scripts/setlocalversion never invokes git describe. If LOCALVERSION_AUTO
+      # is ever turned on, add `fetch-tags: true` rather than depth 0.
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: 0   # EXTRAVERSION/scripts/setlocalversion wants the tags
+          fetch-depth: 1
+          show-progress: false
 
       - name: Install build dependencies
         run: |
@@ -64,7 +72,7 @@ jobs:
       # the defconfig, falling back to any arm64 entry.
       - name: Restore ccache
         id: ccache-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.ccache
           key: ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-${{ github.run_id }}
@@ -142,7 +150,7 @@ jobs:
       # the cache and that work is worth keeping.
       - name: Save ccache
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.ccache
           key: ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-${{ github.run_id }}
@@ -159,7 +167,7 @@ jobs:
           done
           ls -l "$Image" "$dtb"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: jagar-kernel-${{ github.sha }}
           if-no-files-found: error
