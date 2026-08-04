@@ -12,6 +12,9 @@
  */
 extern phys_addr_t __fdt_pointer __initdata;
 extern u64 __cacheline_aligned boot_args[4];
+void jagar_late_wdt_checkpoint(unsigned int seconds);
+extern unsigned int jagar_usb_probe_stage;
+extern unsigned int jagar_usb_phy_present;
 
 static inline bool arch_parse_debug_rodata(char *arg)
 {

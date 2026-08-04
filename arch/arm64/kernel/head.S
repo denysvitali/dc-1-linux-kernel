@@ -217,13 +217,26 @@ SYM_CODE_END(preserve_boot_args)
  *
  *   x0 = __pa(KERNEL_START)
  */
+	.macro	jagar_wdt_checkpoint value
+	// disabled: post-MMU writes to 0x10007000 fault and hang boot
+	.endm
+
 SYM_FUNC_START_LOCAL(__primary_switched)
+	/*
+	 * DC-1 virtual-address checkpoint. TTBR0 still carries the one-page
+	 * watchdog identity mapping. Reaching this store proves the branch from
+	 * the identity map into the final kernel mapping succeeded.
+	 */
+	jagar_wdt_checkpoint 0xa808		// 21 seconds
+
 	adr_l	x4, init_task
 	init_cpu_task x4, x5, x6
+	jagar_wdt_checkpoint 0xb008		// 22 seconds
 
 	adr_l	x8, vectors			// load VBAR_EL1 with virtual
 	msr	vbar_el1, x8			// vector table address
 	isb
+	jagar_wdt_checkpoint 0xb808		// 23 seconds
 
 	stp	x29, x30, [sp, #-16]!
 	mov	x29, sp
@@ -233,16 +246,20 @@ SYM_FUNC_START_LOCAL(__primary_switched)
 	adrp	x4, _text			// Save the offset between
 	sub	x4, x4, x0			// the kernel virtual and
 	str_l	x4, kimage_voffset, x5		// physical mappings
+	jagar_wdt_checkpoint 0xc008		// 24 seconds
 
 	mov	x0, x20
 	bl	set_cpu_boot_mode_flag
+	jagar_wdt_checkpoint 0xc808		// 25 seconds
 
 #if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
 	bl	kasan_early_init
 #endif
 	mov	x0, x20
 	bl	finalise_el2			// Prefer VHE if possible
+	jagar_wdt_checkpoint 0xd008		// 26 seconds
 	ldp	x29, x30, [sp], #16
+	jagar_wdt_checkpoint 0xd808		// 27 seconds
 	bl	start_kernel
 	ASM_BUG()
 SYM_FUNC_END(__primary_switched)
@@ -506,9 +523,40 @@ SYM_FUNC_START_LOCAL(__no_granule_support)
 SYM_FUNC_END(__no_granule_support)
 
 SYM_FUNC_START_LOCAL(__primary_switch)
+	/*
+	 * DC-1 finite handoff checkpoint: entry veneer selected ten seconds.
+	 * Reaching this point means boot arguments, ID map, EL setup and
+	 * __cpu_setup completed. Extend the enabled watchdog to twelve seconds
+	 * and reload it before turning on the MMU. x9/x10 are scratch; x0 is the
+	 * SCTLR value returned by __cpu_setup and must remain intact.
+	 */
+	mov	x9, #0x7000
+	movk	x9, #0x1000, lsl #16
+	mov	w10, #0x6008
+	str	w10, [x9, #4]
+	mov	w10, #0x1971
+	str	w10, [x9, #8]
+	dsb	sy
+	isb
+
 	adrp	x1, reserved_pg_dir
 	adrp	x2, __pi_init_idmap_pg_dir
 	bl	__enable_mmu
+
+	/*
+	 * DC-1 finite post-MMU checkpoint. create_init_idmap() maps only the
+	 * watchdog page as device memory for this store. If __enable_mmu
+	 * returns successfully, extend the timeout from twelve to fourteen
+	 * seconds; reset remains enabled.
+	 */
+	mov	x9, #0x7000
+	movk	x9, #0x1000, lsl #16
+	mov	w10, #0x7008
+	str	w10, [x9, #4]
+	mov	w10, #0x1971
+	str	w10, [x9, #8]
+	dsb	sy
+	isb
 
 	adrp	x1, early_init_stack
 	mov	sp, x1

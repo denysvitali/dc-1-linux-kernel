@@ -10,6 +10,8 @@
 #include <linux/fs_struct.h>
 #include <linux/file.h>
 #include <linux/init_syscalls.h>
+
+extern void jagar_late_wdt_checkpoint(unsigned int seconds);
 #include <linux/security.h>
 #include "internal.h"
 
@@ -132,11 +134,15 @@ int __init init_eaccess(const char *filename)
 	struct path path;
 	int error;
 
+	jagar_late_wdt_checkpoint(14);
 	error = kern_path(filename, LOOKUP_FOLLOW, &path);
 	if (error)
 		return error;
+	jagar_late_wdt_checkpoint(15);
 	error = path_permission(&path, MAY_ACCESS);
+	jagar_late_wdt_checkpoint(16);
 	path_put(&path);
+	jagar_late_wdt_checkpoint(17);
 	return error;
 }
 

@@ -11,6 +11,14 @@
 
 #include "pi.h"
 
+/*
+ * DC-1 diagnostic only: page-table storage for an identity mapping of the
+ * MediaTek watchdog page. Keeping it separate from INIT_IDMAP_DIR_SIZE avoids
+ * consuming space reserved for the kernel's normal initial ID map.
+ */
+static u8 jagar_wdt_ptes[IDMAP_LEVELS - 1][PAGE_SIZE]
+	__initdata __aligned(PAGE_SIZE);
+
 /**
  * map_range - Map a contiguous range of physical pages into virtual memory
  *
@@ -91,8 +99,10 @@ void __init map_range(phys_addr_t *pte, u64 start, u64 end, phys_addr_t pa,
 asmlinkage phys_addr_t __init create_init_idmap(pgd_t *pg_dir, ptval_t clrmask)
 {
 	phys_addr_t ptep = (phys_addr_t)pg_dir + PAGE_SIZE; /* MMU is off */
+	phys_addr_t wdt_ptep = (phys_addr_t)jagar_wdt_ptes;
 	pgprot_t text_prot = PAGE_KERNEL_ROX;
 	pgprot_t data_prot = PAGE_KERNEL;
+	pgprot_t device_prot = __pgprot(PROT_DEVICE_nGnRnE);
 
 	pgprot_val(text_prot) &= ~clrmask;
 	pgprot_val(data_prot) &= ~clrmask;
@@ -104,6 +114,13 @@ asmlinkage phys_addr_t __init create_init_idmap(pgd_t *pg_dir, ptval_t clrmask)
 	map_range(&ptep, (u64)__initdata_begin, (u64)_end,
 		  (phys_addr_t)__initdata_begin, data_prot, IDMAP_ROOT_LEVEL,
 		  (pte_t *)pg_dir, false, 0);
+
+	/*
+	 * Permit one observable write after SCTLR_EL1.M is set. This mapping is
+	 * device-nGnRnE and covers only the watchdog's 4 KiB register page.
+	 */
+	map_range(&wdt_ptep, 0x10007000, 0x10008000, 0x10007000,
+		  device_prot, IDMAP_ROOT_LEVEL, (pte_t *)pg_dir, false, 0);
 
 	return ptep;
 }

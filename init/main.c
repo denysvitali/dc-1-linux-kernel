@@ -95,6 +95,9 @@
 #include <linux/integrity.h>
 #include <linux/proc_ns.h>
 #include <linux/io.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/cache.h>
 #include <linux/rodata_test.h>
 #include <linux/jump_label.h>
@@ -673,6 +676,7 @@ static noinline void __ref __noreturn rest_init(void)
 	struct task_struct *tsk;
 	int pid;
 
+	jagar_late_wdt_checkpoint(22);
 	rcu_scheduler_starting();
 	/*
 	 * We need to spawn init first so that it obtains pid 1, however
@@ -680,6 +684,7 @@ static noinline void __ref __noreturn rest_init(void)
 	 * we schedule it before we create kthreadd, will OOPS.
 	 */
 	pid = user_mode_thread(kernel_init, NULL, CLONE_FS);
+	jagar_late_wdt_checkpoint(23);
 	/*
 	 * Pin init on the boot CPU. Task migration is not properly working
 	 * until sched_init_smp() has been run. It will set the allowed
@@ -696,6 +701,7 @@ static noinline void __ref __noreturn rest_init(void)
 	rcu_read_lock();
 	kthreadd_task = find_task_by_pid_ns(pid, &init_pid_ns);
 	rcu_read_unlock();
+	jagar_late_wdt_checkpoint(24);
 
 	/*
 	 * Enable might_sleep() and smp_processor_id() checks.
@@ -707,6 +713,7 @@ static noinline void __ref __noreturn rest_init(void)
 	system_state = SYSTEM_SCHEDULING;
 
 	complete(&kthreadd_done);
+	jagar_late_wdt_checkpoint(25);
 
 	/*
 	 * The boot idle thread must execute schedule()
@@ -974,6 +981,7 @@ void start_kernel(void)
 	char *command_line;
 	char *after_dashes;
 
+	jagar_late_wdt_checkpoint(14);
 	set_task_stack_end_magic(&init_task);
 	smp_setup_processor_id();
 	debug_objects_early_init();
@@ -991,7 +999,9 @@ void start_kernel(void)
 	boot_cpu_init();
 	page_address_init();
 	pr_notice("%s", linux_banner);
+	jagar_late_wdt_checkpoint(15);
 	setup_arch(&command_line);
+	jagar_late_wdt_checkpoint(18);
 	mm_core_init_early();
 	/* Static keys and static calls are needed by LSMs */
 	jump_label_init();
@@ -1004,6 +1014,7 @@ void start_kernel(void)
 	smp_prepare_boot_cpu();	/* arch-specific boot-cpu hooks */
 	early_numa_node_init();
 	boot_cpu_hotplug_init();
+	jagar_late_wdt_checkpoint(19);
 
 	print_kernel_cmdline(saved_command_line);
 	/* parameters may set static keys */
@@ -1019,9 +1030,11 @@ void start_kernel(void)
 	if (extra_init_args)
 		parse_args("Setting extra init args", extra_init_args,
 			   NULL, 0, -1, -1, NULL, set_init_arg);
+	jagar_late_wdt_checkpoint(20);
 
 	/* Architectural and non-timekeeping rng init, before allocator init */
 	random_init_early(command_line);
+	jagar_late_wdt_checkpoint(21);
 
 	/*
 	 * These use large bootmem allocations and must precede
@@ -1035,6 +1048,7 @@ void start_kernel(void)
 	maple_tree_init();
 	poking_init();
 	ftrace_init();
+	jagar_late_wdt_checkpoint(22);
 
 	/* trace_printk can be enabled here */
 	early_trace_init();
@@ -1045,6 +1059,7 @@ void start_kernel(void)
 	 * time - but meanwhile we still have a functioning scheduler.
 	 */
 	sched_init();
+	jagar_late_wdt_checkpoint(23);
 
 	if (WARN(!irqs_disabled(),
 		 "Interrupts were enabled *very* early, fixing it\n"))
@@ -1066,6 +1081,7 @@ void start_kernel(void)
 
 	rcu_init();
 	kvfree_rcu_init();
+	jagar_late_wdt_checkpoint(24);
 
 	/* Trace events are available after this */
 	trace_init();
@@ -1086,6 +1102,7 @@ void start_kernel(void)
 	vdso_setup_data_pages();
 	timekeeping_init();
 	time_init();
+	jagar_late_wdt_checkpoint(25);
 
 	/* This must be after timekeeping is initialized */
 	random_init();
@@ -1093,6 +1110,7 @@ void start_kernel(void)
 	/* These make use of the fully initialized rng */
 	kfence_init();
 	boot_init_stack_canary();
+	jagar_late_wdt_checkpoint(26);
 
 	perf_event_init();
 	profile_init();
@@ -1101,6 +1119,7 @@ void start_kernel(void)
 
 	early_boot_irqs_disabled = false;
 	local_irq_enable();
+	jagar_late_wdt_checkpoint(27);
 
 	kmem_cache_init_late();
 
@@ -1110,6 +1129,7 @@ void start_kernel(void)
 	 * this. But we do want output early, in case something goes wrong.
 	 */
 	console_init();
+	jagar_late_wdt_checkpoint(28);
 	if (panic_later)
 		panic("Too many boot %s vars at `%s'", panic_later,
 		      panic_param);
@@ -1122,6 +1142,7 @@ void start_kernel(void)
 	 * too:
 	 */
 	locking_selftest();
+	jagar_late_wdt_checkpoint(14);
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (initrd_start && !initrd_below_start_ok &&
@@ -1139,8 +1160,10 @@ void start_kernel(void)
 		late_time_init();
 	sched_clock_init();
 	calibrate_delay();
+	jagar_late_wdt_checkpoint(15);
 
 	arch_cpu_finalize_init();
+	jagar_late_wdt_checkpoint(16);
 
 	pid_idr_init();
 	anon_vma_init();
@@ -1153,6 +1176,7 @@ void start_kernel(void)
 	key_init();
 	security_init();
 	dbg_late_init();
+	jagar_late_wdt_checkpoint(17);
 	net_ns_init();
 	vfs_caches_init();
 	pagecache_init();
@@ -1161,17 +1185,21 @@ void start_kernel(void)
 	proc_root_init();
 	nsfs_init();
 	pidfs_init();
+	jagar_late_wdt_checkpoint(18);
 	cpuset_init();
 	mem_cgroup_init();
 	cgroup_init();
 	taskstats_init_early();
 	delayacct_init();
+	jagar_late_wdt_checkpoint(19);
 
 	acpi_subsystem_init();
 	arch_post_acpi_subsys_init();
 	kcsan_init();
+	jagar_late_wdt_checkpoint(20);
 
 	/* Do the rest non-__init'ed, we're now alive */
+	jagar_late_wdt_checkpoint(21);
 	rest_init();
 
 	/*
@@ -1423,6 +1451,7 @@ static void __init do_initcalls(void)
 		/* Parser modifies command_line, restore it each time */
 		strcpy(command_line, saved_command_line);
 		do_initcall_level(level, command_line);
+		jagar_late_wdt_checkpoint(20 + level);
 	}
 
 	kfree(command_line);
@@ -1443,6 +1472,27 @@ static void __init do_basic_setup(void)
 	init_irq_proc();
 	do_ctors();
 	do_initcalls();
+	if (!jagar_usb_probe_stage) {
+		struct device_node *usb_np;
+
+		usb_np = of_find_compatible_node(NULL, NULL,
+						"mediatek,mtk-musb");
+		if (usb_np) {
+			jagar_usb_probe_stage = 1;
+			if (of_device_is_available(usb_np))
+				jagar_usb_probe_stage = 2;
+			{
+				struct platform_device *usb_pdev;
+
+				usb_pdev = of_find_device_by_node(usb_np);
+				if (usb_pdev) {
+					jagar_usb_probe_stage = 3;
+					put_device(&usb_pdev->dev);
+				}
+			}
+			of_node_put(usb_np);
+		}
+	}
 }
 
 static void __init do_pre_smp_initcalls(void)
@@ -1457,6 +1507,7 @@ static void __init do_pre_smp_initcalls(void)
 static int run_init_process(const char *init_filename)
 {
 	const char *const *p;
+	int ret;
 
 	argv_init[0] = init_filename;
 	pr_info("Run %s as init process\n", init_filename);
@@ -1466,7 +1517,72 @@ static int run_init_process(const char *init_filename)
 	pr_debug("  with environment:\n");
 	for (p = envp_init; *p; p++)
 		pr_debug("    %s\n", *p);
-	return kernel_execve(init_filename, argv_init, envp_init);
+	jagar_late_wdt_checkpoint(22);
+	ret = kernel_execve(init_filename, argv_init, envp_init);
+	if (!ret) {
+		unsigned int usb_stage = jagar_usb_probe_stage;
+
+		/* 30 means UDC/no-PHY; 31 means UDC with a real T-PHY handle. */
+		jagar_late_wdt_checkpoint(19 + (usb_stage > 12 ? 12 : usb_stage));
+		return 0;
+	}
+	switch (ret) {
+	case -ENOENT:
+		jagar_late_wdt_checkpoint(14);
+		break;
+	case -EACCES:
+		jagar_late_wdt_checkpoint(15);
+		break;
+	case -ENOEXEC:
+		jagar_late_wdt_checkpoint(16);
+		break;
+	case -ENOMEM:
+		jagar_late_wdt_checkpoint(17);
+		break;
+	case -ELOOP:
+		jagar_late_wdt_checkpoint(18);
+		break;
+	case -E2BIG:
+		jagar_late_wdt_checkpoint(19);
+		break;
+	case -EFAULT:
+		jagar_late_wdt_checkpoint(20);
+		break;
+	case -EINVAL:
+		jagar_late_wdt_checkpoint(21);
+		break;
+	case -EIO:
+		jagar_late_wdt_checkpoint(22);
+		break;
+	case -EISDIR:
+		jagar_late_wdt_checkpoint(23);
+		break;
+	case -ELIBBAD:
+		jagar_late_wdt_checkpoint(24);
+		break;
+	case -EMFILE:
+		jagar_late_wdt_checkpoint(25);
+		break;
+	case -ENAMETOOLONG:
+		jagar_late_wdt_checkpoint(26);
+		break;
+	case -ENFILE:
+		jagar_late_wdt_checkpoint(27);
+		break;
+	case -ENOTDIR:
+		jagar_late_wdt_checkpoint(28);
+		break;
+	case -EPERM:
+		jagar_late_wdt_checkpoint(29);
+		break;
+	case -ETXTBSY:
+		jagar_late_wdt_checkpoint(30);
+		break;
+	default:
+		jagar_late_wdt_checkpoint(1 + ((unsigned int)-ret % 23));
+		break;
+	}
+	return ret;
 }
 
 static int try_to_run_init_process(const char *init_filename)
@@ -1544,10 +1660,13 @@ static int __ref kernel_init(void *unused)
 	 * Wait until kthreadd is all set-up.
 	 */
 	wait_for_completion(&kthreadd_done);
+	jagar_late_wdt_checkpoint(14);
 
 	kernel_init_freeable();
+	jagar_late_wdt_checkpoint(14);
 	/* need to finish all async __init code before freeing the memory */
 	async_synchronize_full();
+	jagar_late_wdt_checkpoint(15);
 
 	system_state = SYSTEM_FREEING_INITMEM;
 	kprobe_free_init_mem();
@@ -1555,20 +1674,26 @@ static int __ref kernel_init(void *unused)
 	kgdb_free_init_mem();
 	exit_boot_config();
 	free_initmem();
+	jagar_late_wdt_checkpoint(16);
 	mark_readonly();
+	jagar_late_wdt_checkpoint(17);
 
 	/*
 	 * Kernel mappings are now finalized - update the userspace page-table
 	 * to finalize PTI.
 	 */
 	pti_finalize();
+	jagar_late_wdt_checkpoint(18);
 
 	system_state = SYSTEM_RUNNING;
 	numa_default_policy();
+	jagar_late_wdt_checkpoint(19);
 
 	rcu_end_inkernel_boot();
+	jagar_late_wdt_checkpoint(20);
 
 	do_sysctl_args();
+	jagar_late_wdt_checkpoint(21);
 
 	if (ramdisk_execute_command) {
 		ret = run_init_process(ramdisk_execute_command);
@@ -1630,6 +1755,7 @@ static noinline void __init kernel_init_freeable(void)
 {
 	/* Now the scheduler is fully set up and can do blocking allocations */
 	gfp_allowed_mask = __GFP_BITS_MASK;
+	jagar_late_wdt_checkpoint(15);
 
 	/*
 	 * init can allocate pages on any node
@@ -1643,31 +1769,45 @@ static noinline void __init kernel_init_freeable(void)
 	workqueue_init();
 
 	init_mm_internals();
+	jagar_late_wdt_checkpoint(16);
 
 	do_pre_smp_initcalls();
 	lockup_detector_init();
+	jagar_late_wdt_checkpoint(17);
 
 	smp_init();
 	sched_init_smp();
+	jagar_late_wdt_checkpoint(18);
 
 	workqueue_init_topology();
 	async_init();
 	padata_init();
 	page_alloc_init_late();
+	jagar_late_wdt_checkpoint(19);
 
 	do_basic_setup();
+	jagar_late_wdt_checkpoint(28);
 
 	kunit_run_all_tests();
 
 	wait_for_initramfs();
+	jagar_late_wdt_checkpoint(29);
 	console_on_rootfs();
+	jagar_late_wdt_checkpoint(30);
 
 	/*
 	 * check if there is an early userspace init.  If yes, let it do all
 	 * the work
 	 */
 	int ramdisk_command_access;
-	ramdisk_command_access = init_eaccess(ramdisk_execute_command);
+	/*
+	 * DC-1 diagnostic: the direct call into init_eaccess() never reaches
+	 * its first instruction despite the preceding initramfs and console
+	 * stages completing. Let kernel_execve() perform the authoritative
+	 * existence/permission check instead.
+	 */
+	ramdisk_command_access = 0;
+	jagar_late_wdt_checkpoint(31);
 	if (ramdisk_command_access != 0) {
 		if (ramdisk_execute_command_set)
 			pr_warn("check access for rdinit=%s failed: %i, ignoring\n",
