@@ -4,6 +4,11 @@
 # into the kernel repo as .github/workflows/kernel-build.yml. Keep the two in
 # sync -- the same two-copies-of-rc.sh trap applies.
 #
+# TOOLCHAIN: LLVM=1 (clang + LLD), NOT GCC. This is not a preference -- a
+# GCC-built kernel from this exact tree was flashed to slot B on 2026-08-04 and
+# did not boot, while the clang-built #101 boots reliably. The working kernel
+# reports "Alpine clang 19.1.4, LLD 19.1.4". Do not "simplify" this to gcc.
+#
 # Runner choice: ubuntu-24.04-arm, NATIVE aarch64. The repo is public, so ARM
 # runners are free and unmetered. Native means no cross-compiler and no second
 # toolchain whose codegen differences we would have to reason about when a CI
@@ -38,7 +43,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             bc bison ccache flex libelf-dev libssl-dev lz4 \
-            device-tree-compiler kmod cpio
+            device-tree-compiler kmod cpio clang lld llvm
 
       # ccache is what makes this worth having: a cold build of this tree is
       # ~40 min, a warm one is a few minutes. The cache is keyed on the
@@ -61,7 +66,7 @@ jobs:
           ccache --zero-stats
 
       - name: Configure kernel
-        run: make ARCH=arm64 jagar_defconfig
+        run: make ARCH=arm64 LLVM=1 jagar_defconfig
 
       # The bug that cost a boot cycle on 2026-08-04: the running kernel had
       # been built without CONFIG_MULTIUSER, so dropbear died with "Failed to
@@ -83,7 +88,7 @@ jobs:
       - name: Build Image and DTBs
         run: |
           export PATH="/usr/lib/ccache:$PATH"
-          make ARCH=arm64 -j"$(nproc)" Image dtbs
+          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image dtbs
 
       - name: ccache statistics
         if: always()
