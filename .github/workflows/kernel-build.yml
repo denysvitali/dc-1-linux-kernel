@@ -4,7 +4,7 @@
 # into the kernel repo as .github/workflows/kernel-build.yml. Keep the two in
 # sync -- the same two-copies-of-rc.sh trap applies.
 #
-# TOOLCHAIN: LLVM=1 (clang + LLD), NOT GCC. This is not a preference -- a
+# TOOLCHAIN: clang + LLD (LLVM=-19), NOT GCC. This is not a preference -- a
 # GCC-built kernel from this exact tree was flashed to slot B on 2026-08-04 and
 # did not boot, while the clang-built #101 boots reliably. The working kernel
 # reports "Alpine clang 19.1.4, LLD 19.1.4". Do not "simplify" this to gcc.
@@ -58,8 +58,14 @@ jobs:
       # jagar_defconfig has "# CONFIG_LOCALVERSION_AUTO is not set", so
       # scripts/setlocalversion never invokes git describe. If LOCALVERSION_AUTO
       # is ever turned on, add `fetch-tags: true` rather than depth 0.
+      # ref: the PR HEAD, not the merge commit. On pull_request events
+      # actions/checkout defaults to refs/pull/N/merge -- jagar merged into the
+      # fork's master, which tracks upstream. That silently built a DIFFERENT
+      # tree than the branch: the artifact reported 7.2.0-rc6+ while the branch
+      # is based on v7.2-rc5. CI must build what we are actually shipping.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
           show-progress: false
 
@@ -68,7 +74,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             bc bison ccache flex libelf-dev libssl-dev lz4 \
-            device-tree-compiler kmod cpio clang lld llvm
+            device-tree-compiler kmod cpio
+          # Pin clang 19 to match the toolchain the device is KNOWN to boot
+          # (Alpine clang 19.1.4 / LLD 19.1.4). ubuntu-24.04 defaults to clang
+          # 18, and this project has already lost a boot cycle to a toolchain
+          # mismatch (a GCC build of this exact tree does not boot at all), so
+          # "a clang" is not good enough -- it has to be the same major.
+          sudo apt-get install -y --no-install-recommends clang-19 lld-19 llvm-19
+          clang-19 --version | head -1
 
       # CACHING. A cold build of this tree is ~40 min; a warm one should be a
       # few minutes. Everything below exists to keep the hit rate high --
@@ -116,7 +129,7 @@ jobs:
           ccache --show-config | head -20
 
       - name: Configure kernel
-        run: make ARCH=arm64 LLVM=1 jagar_defconfig
+        run: make ARCH=arm64 LLVM=-19 jagar_defconfig
 
       # The bug that cost a boot cycle on 2026-08-04: the running kernel had
       # been built without CONFIG_MULTIUSER, so dropbear died with "Failed to
@@ -151,8 +164,8 @@ jobs:
           KBUILD_BUILD_USER: ci
           KBUILD_BUILD_HOST: github
         run: |
-          make ARCH=arm64 LLVM=1 \
-            CC="ccache clang" HOSTCC="ccache gcc" \
+          make ARCH=arm64 LLVM=-19 \
+            CC="ccache clang-19" HOSTCC="ccache gcc" \
             -j"$(nproc)" Image dtbs
 
       # Reported so a collapsing hit rate is VISIBLE rather than showing up
@@ -203,7 +216,10 @@ jobs:
       # would be worse than none -- flashing a kernel you believe is current
       # but is not is exactly the failure this project keeps hitting.
       - name: Publish Image as rolling prerelease
-        if: github.ref == 'refs/heads/jagar'
+        # head_ref is set on pull_request events (github.ref is refs/pull/N/merge
+        # there, so the old refs/heads/jagar test silently skipped this step and
+        # the release was never published).
+        if: github.ref_name == 'jagar' || github.head_ref == 'jagar'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -216,7 +232,7 @@ jobs:
             --prerelease \
             --target "$GITHUB_SHA" \
             --title "jagar kernel (latest build)" \
-            --notes "Built from $GITHUB_SHA by run $GITHUB_RUN_ID. LLVM=1, jagar_defconfig. Rolling tag: contents change every push to jagar." \
+            --notes "Built from $GITHUB_SHA by run $GITHUB_RUN_ID. LLVM=-19 (clang 19), jagar_defconfig. Rolling tag: contents change every push to jagar." \
             Image *.dtb SHA256SUMS
 
       - name: Assert ccache was actually used
