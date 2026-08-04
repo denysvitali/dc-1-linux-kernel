@@ -47,25 +47,50 @@ jobs:
             bc bison ccache flex libelf-dev libssl-dev lz4 \
             device-tree-compiler kmod cpio clang lld llvm
 
-      # ccache is what makes this worth having: a cold build of this tree is
-      # ~40 min, a warm one is a few minutes. The cache is keyed on the
-      # defconfig, so a config change correctly forces a rebuild, while the
-      # restore-keys prefix still seeds it from the previous build instead of
-      # starting cold.
+      # CACHING. A cold build of this tree is ~40 min; a warm one should be a
+      # few minutes. Everything below exists to keep the hit rate high --
+      # ccache is only as good as the things that are ALLOWED to vary between
+      # runs, and a kernel build has several that will silently poison it.
+      #
+      # RESTORE/SAVE ARE SPLIT DELIBERATELY. actions/cache only saves on a
+      # SUCCESSFUL job, which is precisely backwards: a build that failed
+      # halfway still compiled thousands of objects, and throwing those away
+      # means the next attempt pays full price again. The save step below runs
+      # with if: always().
+      #
+      # The key carries github.run_id so every run writes a NEW entry (cache
+      # entries are immutable -- reusing a key makes the save a silent no-op).
+      # The restore-keys prefixes then pick the most recent entry that shares
+      # the defconfig, falling back to any arm64 entry.
       - name: Restore ccache
-        uses: actions/cache@v4
+        id: ccache-restore
+        uses: actions/cache/restore@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-arm64-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-${{ github.sha }}
+          key: ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-${{ github.run_id }}
           restore-keys: |
-            ccache-${{ runner.os }}-arm64-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-
-            ccache-${{ runner.os }}-arm64-
+            ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-
+            ccache-arm64-llvm-
 
       - name: Configure ccache
         run: |
-          ccache --set-config max_size=2G
+          # 8G: the repo-wide GitHub cache budget is 10G and this is the only
+          # thing we cache. Too small is the classic way to get a 20% hit rate.
+          ccache --set-config max_size=8G
           ccache --set-config compression=true
+          ccache --set-config compression_level=1
+          # Hash the compiler by CONTENT, not mtime -- apt can reinstall an
+          # identical clang and invalidate the entire cache on mtime alone.
+          ccache --set-config compiler_check=content
+          # Kernel-specific poison, all of it safe to ignore here:
+          #   time_macros        __DATE__/__TIME__ (we pin the timestamp below)
+          #   include_file_mtime the checkout has fresh mtimes EVERY run, so
+          #                      without this literally nothing ever hits
+          #   include_file_ctime same, for ctime
+          #   file_stat_matches  compare content, not stat
+          ccache --set-config sloppiness=time_macros,include_file_mtime,include_file_ctime,file_stat_matches,pch_defines,system_headers
           ccache --zero-stats
+          ccache --show-config | head -20
 
       - name: Configure kernel
         run: make ARCH=arm64 LLVM=1 jagar_defconfig
@@ -87,14 +112,40 @@ jobs:
           done
           exit $fail
 
+      # CC="ccache clang" rather than the /usr/lib/ccache PATH trick: that
+      # directory ships gcc/g++ symlinks and does NOT reliably contain clang,
+      # so the PATH approach silently builds WITHOUT ccache and every run looks
+      # like a cold cache for no visible reason.
+      #
+      # KBUILD_BUILD_TIMESTAMP/USER/HOST are pinned because they land in the
+      # kernel via __DATE__-style macros; letting them float changes compiler
+      # input on every single run and defeats the cache no matter how it is
+      # keyed. This is also why the running kernel's version string shows a
+      # fixed build identity rather than the wall clock.
       - name: Build Image and DTBs
+        env:
+          KBUILD_BUILD_TIMESTAMP: '@0'
+          KBUILD_BUILD_USER: ci
+          KBUILD_BUILD_HOST: github
         run: |
-          export PATH="/usr/lib/ccache:$PATH"
-          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image dtbs
+          make ARCH=arm64 LLVM=1 \
+            CC="ccache clang" HOSTCC="ccache gcc" \
+            -j"$(nproc)" Image dtbs
 
+      # Reported so a collapsing hit rate is VISIBLE rather than showing up
+      # only as "CI got slower". A healthy warm run is >90% direct hits.
       - name: ccache statistics
         if: always()
-        run: ccache --show-stats
+        run: ccache --show-stats --verbose || ccache --show-stats
+
+      # if: always() -- see the restore step. A failed build still populated
+      # the cache and that work is worth keeping.
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-${{ github.run_id }}
 
       # Assert the artifacts exist and are non-trivial. A make that "succeeded"
       # while producing no Image has happened often enough elsewhere in this
