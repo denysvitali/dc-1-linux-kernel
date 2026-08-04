@@ -19,7 +19,9 @@ name: kernel
 
 on:
   push:
-    branches: ['**']
+    # Only master on push: any other branch that matters is in a PR, and
+    # 'push' + 'pull_request' together build every PR branch twice.
+    branches: ['master']
   pull_request:
   workflow_dispatch:
 
