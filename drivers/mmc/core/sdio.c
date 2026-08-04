@@ -1218,6 +1218,8 @@ int mmc_attach_sdio(struct mmc_host *host)
 	WARN_ON(!host->claimed);
 
 	err = mmc_send_io_op_cond(host, 0, &ocr);
+	pr_info("JAGAR: mmc_attach_sdio CMD5 err=%d card_ocr=0x%08x host_ocr_avail=0x%08x ocr_avail_sdio=0x%08x\n",
+		err, ocr, host->ocr_avail, host->ocr_avail_sdio);
 	if (err)
 		return err;
 
@@ -1227,6 +1229,8 @@ int mmc_attach_sdio(struct mmc_host *host)
 
 
 	rocr = mmc_select_voltage(host, ocr);
+	pr_info("JAGAR: mmc_select_voltage -> rocr=0x%08x (ocr_avail=0x%08x)\n",
+		rocr, host->ocr_avail);
 
 	/*
 	 * Can we support the voltage(s) of the card(s)?

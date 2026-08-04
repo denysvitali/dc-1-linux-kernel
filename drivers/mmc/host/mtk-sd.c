@@ -1396,6 +1396,15 @@ static bool msdc_cmd_done(struct msdc_host *host, int events,
 	}
 
 	if (!sbc_error && !(events & MSDC_INT_CMDRDY)) {
+		/* Dump the raw response BEFORE msdc_reset_hw() clobbers it, so a
+		 * corrupt frame can be told apart from a dead CMD line. */
+		dev_info(host->dev,
+			 "JAGAR cmd%d events=%08x resp=%08x %08x %08x %08x ps=%08x cfg=%08x iocon=%08x actual_clk=%u\n",
+			 cmd->opcode, events,
+			 readl(host->base + SDC_RESP0), readl(host->base + SDC_RESP1),
+			 readl(host->base + SDC_RESP2), readl(host->base + SDC_RESP3),
+			 readl(host->base + MSDC_PS), readl(host->base + MSDC_CFG),
+			 readl(host->base + MSDC_IOCON), mmc_from_priv(host)->actual_clock);
 		if ((events & MSDC_INT_CMDTMO && !host->hs400_tuning) ||
 		    (!mmc_op_tuning(cmd->opcode) && !host->hs400_tuning))
 			/*
@@ -2984,6 +2993,8 @@ static int msdc_drv_probe(struct platform_device *pdev)
 	struct mmc_host *mmc;
 	struct msdc_host *host;
 	int ret;
+	dev_err(&pdev->dev, "JAGAR: msdc_drv_probe ENTERED np=%pOF\n", pdev->dev.of_node);
+
 
 	if (!pdev->dev.of_node) {
 		dev_err(&pdev->dev, "No DT found\n");
