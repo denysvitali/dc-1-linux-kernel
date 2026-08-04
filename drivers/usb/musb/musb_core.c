@@ -80,6 +80,7 @@
 #include <linux/usb/of.h>
 
 #include "musb_core.h"
+#include <asm/setup.h>
 #include "musb_trace.h"
 
 #define TA_WAIT_BCON(m) max_t(int, (m)->a_wait_bcon, OTG_TIME_A_WAIT_BCON)
@@ -2354,9 +2355,11 @@ musb_init_controller(struct device *dev, int nIrq, void __iomem *ctrl)
 	 * external/discrete ones in various flavors (twl4030 family,
 	 * isp1504, non-OTG, etc) mostly hooking up through ULPI.
 	 */
+	jagar_late_wdt_checkpoint(17);
 	status = musb_platform_init(musb);
 	if (status < 0)
 		goto fail1;
+	jagar_late_wdt_checkpoint(18);
 
 	if (!musb->isr) {
 		status = -ENODEV;
@@ -2493,21 +2496,25 @@ musb_init_controller(struct device *dev, int nIrq, void __iomem *ctrl)
 	INIT_DELAYED_WORK(&musb->finish_resume_work, musb_host_finish_resume);
 
 	/* setup musb parts of the core (especially endpoints) */
+	jagar_late_wdt_checkpoint(19);
 	status = musb_core_init(plat->config->multipoint
 			? MUSB_CONTROLLER_MHDRC
 			: MUSB_CONTROLLER_HDRC, musb);
 	if (status < 0)
 		goto fail3;
+	jagar_late_wdt_checkpoint(20);
 
 	timer_setup(&musb->otg_timer, musb_otg_timer_func, 0);
 
 	/* attach to the IRQ */
+	jagar_late_wdt_checkpoint(21);
 	if (request_irq(nIrq, musb->isr, IRQF_SHARED, dev_name(dev), musb)) {
 		dev_err(dev, "request_irq %d failed!\n", nIrq);
 		status = -ENODEV;
 		goto fail3;
 	}
 	musb->nIrq = nIrq;
+	jagar_late_wdt_checkpoint(22);
 	/* FIXME this handles wakeup irqs wrong */
 	if (enable_irq_wake(nIrq) == 0) {
 		musb->irq_wake = 1;
@@ -2534,9 +2541,11 @@ musb_init_controller(struct device *dev, int nIrq, void __iomem *ctrl)
 		status = musb_platform_set_mode(musb, MUSB_HOST);
 		break;
 	case MUSB_PERIPHERAL:
+		jagar_late_wdt_checkpoint(23);
 		status = musb_gadget_setup(musb);
 		if (status < 0)
 			goto fail3;
+		jagar_late_wdt_checkpoint(24);
 		status = musb_platform_set_mode(musb, MUSB_PERIPHERAL);
 		break;
 	case MUSB_OTG:
@@ -2601,20 +2610,34 @@ fail0:
 /* all implementations (PCI bridge to FPGA, VLYNQ, etc) should just
  * bridge to a platform device; this driver then suffices.
  */
-static int musb_probe(struct platform_device *pdev)
+int musb_probe(struct platform_device *pdev)
 {
 	struct device	*dev = &pdev->dev;
 	int		irq = platform_get_irq_byname(pdev, "mc");
+	int		ret;
 	void __iomem	*base;
 
+	jagar_late_wdt_checkpoint(14);
 	if (irq < 0)
 		return irq;
+	jagar_late_wdt_checkpoint(15);
 
 	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
+	jagar_late_wdt_checkpoint(16);
 
-	return musb_init_controller(dev, irq, base);
+	ret = musb_init_controller(dev, irq, base);
+	if (ret == -ENODEV)
+		jagar_usb_probe_stage = 4;
+	else if (ret == -EBUSY)
+		jagar_usb_probe_stage = 5;
+	else if (ret == -EINVAL)
+		jagar_usb_probe_stage = 6;
+	else if (ret)
+		jagar_usb_probe_stage = 7;
+
+	return ret;
 }
 
 static void musb_remove(struct platform_device *pdev)

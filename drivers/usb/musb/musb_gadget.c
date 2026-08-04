@@ -20,6 +20,7 @@
 #include <linux/slab.h>
 
 #include "musb_core.h"
+#include <asm/setup.h>
 #include "musb_trace.h"
 
 
@@ -1795,6 +1796,7 @@ int musb_gadget_setup(struct musb *musb)
 	status = usb_add_gadget_udc(musb->controller, &musb->g);
 	if (status)
 		goto err;
+	jagar_usb_probe_stage = jagar_usb_phy_present ? 12 : 11;
 
 	return 0;
 err:
