@@ -1,0 +1,111 @@
+# Kernel CI for denysvitali/dc-1-linux-kernel.
+#
+# Lives here in the firmware repo as the tracked master copy; it is installed
+# into the kernel repo as .github/workflows/kernel-build.yml. Keep the two in
+# sync -- the same two-copies-of-rc.sh trap applies.
+#
+# Runner choice: ubuntu-24.04-arm, NATIVE aarch64. The repo is public, so ARM
+# runners are free and unmetered. Native means no cross-compiler and no second
+# toolchain whose codegen differences we would have to reason about when a CI
+# kernel behaves differently from a locally built one. To move to x86 instead,
+# set runs-on: ubuntu-latest, install gcc-aarch64-linux-gnu and pass
+# CROSS_COMPILE=aarch64-linux-gnu- -- nothing else changes.
+name: kernel
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A new push makes an in-flight build of the same branch pointless.
+concurrency:
+  group: kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # EXTRAVERSION/scripts/setlocalversion wants the tags
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison ccache flex libelf-dev libssl-dev lz4 \
+            device-tree-compiler kmod cpio
+
+      # ccache is what makes this worth having: a cold build of this tree is
+      # ~40 min, a warm one is a few minutes. The cache is keyed on the
+      # defconfig, so a config change correctly forces a rebuild, while the
+      # restore-keys prefix still seeds it from the previous build instead of
+      # starting cold.
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-arm64-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-arm64-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-
+            ccache-${{ runner.os }}-arm64-
+
+      - name: Configure ccache
+        run: |
+          ccache --set-config max_size=2G
+          ccache --set-config compression=true
+          ccache --zero-stats
+
+      - name: Configure kernel
+        run: make ARCH=arm64 jagar_defconfig
+
+      # The bug that cost a boot cycle on 2026-08-04: the running kernel had
+      # been built without CONFIG_MULTIUSER, so dropbear died with "Failed to
+      # set euid" straight after key exchange -- indistinguishable from an auth
+      # failure. olddefconfig can silently drop a symbol when its dependencies
+      # change, so assert the ones we cannot afford to lose RATHER than trust
+      # that the defconfig still implies them.
+      - name: Assert load-bearing config symbols
+        run: |
+          fail=0
+          for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD; do
+            if ! grep -q "^${sym}=y" .config; then
+              echo "::error::${sym} is not =y in the generated .config"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Build Image and DTBs
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          make ARCH=arm64 -j"$(nproc)" Image dtbs
+
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats
+
+      # Assert the artifacts exist and are non-trivial. A make that "succeeded"
+      # while producing no Image has happened often enough elsewhere in this
+      # project that it is not worth assuming.
+      - name: Verify artifacts
+        run: |
+          Image=arch/arm64/boot/Image
+          dtb=arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar.dtb
+          for f in "$Image" "$dtb"; do
+            [ -s "$f" ] || { echo "::error::missing or empty: $f"; exit 1; }
+          done
+          ls -l "$Image" "$dtb"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jagar-kernel-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            arch/arm64/boot/Image
+            arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar*.dtb
+            .config
