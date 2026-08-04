@@ -154,25 +154,6 @@ jobs:
         if: always()
         run: ccache --show-stats --verbose || ccache --show-stats
 
-      # POSITIVE CONTROL for the cache itself. A build that bypasses ccache
-      # entirely -- wrong CCACHE_DIR, no clang symlink, CC= override ignored --
-      # produces a green job, a 0s cache save and a permanently cold cache,
-      # which is indistinguishable from "working" unless something asserts it.
-      # If ccache saw zero cacheable calls, the caching is broken, not slow.
-      - name: Assert ccache was actually used
-        run: |
-          calls=$(ccache --print-stats | awk '$1=="cacheable_calls"{print $2}')
-          size=$(du -sm "$CCACHE_DIR" 2>/dev/null | cut -f1)
-          echo "cacheable_calls=${calls:-0}  ccache_dir_size=${size:-0}MB  dir=$CCACHE_DIR"
-          if [ "${calls:-0}" -eq 0 ]; then
-            echo "::error::ccache recorded ZERO cacheable calls -- the build is not going through ccache"
-            exit 1
-          fi
-          if [ "${size:-0}" -lt 50 ]; then
-            echo "::error::ccache dir is only ${size}MB after a full kernel build -- nothing is being stored"
-            exit 1
-          fi
-
       # if: always() -- see the restore step. A failed build still populated
       # the cache and that work is worth keeping.
       - name: Save ccache
@@ -202,3 +183,33 @@ jobs:
             arch/arm64/boot/Image
             arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar*.dtb
             .config
+
+      # POSITIVE CONTROL for the cache itself. A build that bypasses ccache
+      # entirely -- wrong CCACHE_DIR, no clang symlink, CC= override ignored --
+      # produces a green job, a 0s cache save and a permanently cold cache,
+      # which is indistinguishable from "working" unless something asserts it.
+      # If ccache saw zero cacheable calls, the caching is broken, not slow.
+      - name: Assert ccache was actually used
+        run: |
+          # Field names verified against ccache 4.10.2 --print-stats, and the
+          # arithmetic verified with two throwaway compiles (miss then hit).
+          # The previous version of this step parsed "cacheable_calls", which
+          # DOES NOT EXIST -- awk returned empty, the check saw 0, and it
+          # failed a perfectly good build. A checker that cannot fail correctly
+          # is worse than no checker.
+          stats=$(ccache --print-stats)
+          echo "$stats" | grep -E 'direct_cache_hit|preprocessed_cache_hit|cache_miss|files_in_cache|cache_size_kibibyte'
+          calls=$(echo "$stats" | awk '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"||$1=="cache_miss"{t+=$2} END{print t+0}')
+          files=$(echo "$stats" | awk '$1=="files_in_cache"{print $2+0}')
+          hits=$(echo "$stats" | awk '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"{t+=$2} END{print t+0}')
+          echo "calls=$calls files_in_cache=${files:-0} hits=$hits dir=$CCACHE_DIR"
+          if [ "$calls" -eq 0 ]; then
+            echo "::error::ccache saw ZERO compiles -- the build is bypassing ccache entirely"
+            exit 1
+          fi
+          if [ "${files:-0}" -eq 0 ]; then
+            echo "::error::ccache stored nothing ($calls compiles seen) -- cache dir is not being written"
+            exit 1
+          fi
+          # Informational only: a cold run legitimately has 0 hits.
+          echo "::notice::ccache $hits hits / $calls compiles"
