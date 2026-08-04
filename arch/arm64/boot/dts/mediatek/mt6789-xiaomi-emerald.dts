@@ -1,0 +1,948 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Device Tree Source for Xiaomi Redmi Note 13 Pro 4G (emerald)
+ *
+ * Copyright (c) 2025 Arseniy Velikanov <me@adomerle.pw>
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/regulator/mediatek,mt6397-regulator.h>
+#include <dt-bindings/pinctrl/mediatek,mt6789-pinfunc.h>
+
+#include "mt6789.dtsi"
+
+/ {
+	chassis-type = "handset";
+	compatible = "xiaomi,emerald", "mediatek,mt6789";
+	model = "Xiaomi Redmi Note 13 Pro 4G";
+
+	aliases {
+		mmc1 = &mmc1;
+	};
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		simplefb: framebuffer@fe0d0000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0xfe0d0000 0x0 ((1080 + 8) * 2400 * 4)>;
+			width = <1080>;
+			height = <2400>;
+			stride = <((1080 + 8) * 4)>;
+			format = "a8r8g8b8";
+
+			power-domains = <&spm MT6789_POWER_DOMAIN_DISP>;
+
+			panel = <&panel>;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		key-volume-down {
+			gpios = <&pio 66 GPIO_ACTIVE_LOW>;
+			label = "volume_down";
+			linux,code = <KEY_VOLUMEDOWN>;
+			wakeup-source;
+			debounce-interval = <100>;
+		};
+	};
+
+	irled {
+		compatible = "pwm-ir-tx";
+		pwms = <&pwm0 1 1000000>;
+	};
+
+	battery: battery {
+		/* dual-cell battery */
+		compatible = "simple-battery";
+
+		device-chemistry = "lithium-ion-polymer";
+
+		voltage-min-design-microvolt = <3890000>;
+		voltage-max-design-microvolt = <4450000>;
+
+		energy-full-design-microwatt-hours = <19400000>;
+		charge-full-design-microamp-hours = <5000000>;
+
+		constant-charge-current-max-microamp = <16000000>;
+		constant-charge-voltage-max-microvolt = <4740000>;
+	};
+
+	avdd_ts: regulator-avdd-ts {
+		compatible = "regulator-fixed";
+		regulator-name = "vreg_avdd_ts";
+
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+
+		gpio = <&pio 53 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	iovdd_ts: regulator-iovdd-ts {
+		compatible = "regulator-fixed";
+		regulator-name = "vreg_iovdd_ts";
+
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+
+		gpio = <&pio 157 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	disp_vddi: regulator-disp-vddi {
+		compatible = "regulator-fixed";
+		regulator-name = "vreg_disp_vddi";
+
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+
+		gpio = <&pio 156 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on; /* until panel bringup */
+	};
+
+	disp_vdd: regulator-disp-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "vreg_disp_vdd";
+
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+
+		gpio = <&pio 14 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on; /* until panel bringup */
+	};
+
+	disp_vci: regulator-disp-vci {
+		compatible = "regulator-fixed";
+		regulator-name = "vreg_disp_vci";
+
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3000000>;
+
+		gpio = <&pio 155 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on; /* until panel bringup */
+	};
+
+	reg_vsys: regulator-vsys {
+		compatible = "regulator-fixed";
+		regulator-name = "vsys";
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/*
+	 * These sensors are connected to SCP (System Companion Processor)
+	 * They work via sensorhub ipi (same way as Qualcomm SSC).
+	 *
+	 * We don't have drivers for sensorhub yet, so we bitbanging scp pins
+	 * to get access to sensors bypassing sensorhub.
+	 *
+	 * TODO: Figure out how to get eints for sensors without RE
+	 * scp firmware.
+	 *
+	 * MT6789 uses MDSP RV55 SCP, which is based on rv32imafc ISA.
+	 * Ghidra generates some nosense code, so we can't RE
+	 * it's firmware for now.
+	 */
+
+	i2c_scp0: i2c-gpio-0 {
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c0_scp_pins>;
+		compatible = "i2c-gpio";
+		sda-gpios = <&pio 133 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&pio 132 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* qmc6308-magnetic @ 2c */
+		/* tsl2522-light @ 39 */
+	};
+
+	i2c_scp1: i2c-gpio-1 {
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c1_scp_pins>;
+		compatible = "i2c-gpio";
+		sda-gpios = <&pio 131 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&pio 130 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* tyhx,hx9034-sar @ 1b */
+	};
+
+	spi_scp1: spi-gpio-scp-1 {
+		compatible = "spi-gpio";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&spi1_scp_pins>;
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		sck-gpios = <&pio 38 GPIO_ACTIVE_HIGH>;
+		miso-gpios = <&pio 41 GPIO_ACTIVE_HIGH>;
+		mosi-gpios = <&pio 40 GPIO_ACTIVE_HIGH>;
+		cs-gpios = <&pio 39 GPIO_ACTIVE_LOW>;
+		num-chipselects = <1>;
+
+		lsm6dso@0 {
+			compatible = "st,lsm6dso";
+			reg = <0>;
+
+			vdd-supply = <&mt6366_vio18_reg>;
+			vddio-supply = <&mt6366_vio28_reg>;
+
+			mount-matrix = "0", "1", "0",
+				       "-1", "0", "0",
+				       "0", "0", "-1";
+		};
+	};
+};
+
+&fhctl {
+	clocks = <&apmixedsys CLK_APMIXED_MFGPLL>,
+		 <&apmixedsys CLK_APMIXED_MMPLL>,
+		 <&apmixedsys CLK_APMIXED_MAINPLL>,
+		 <&apmixedsys CLK_APMIXED_MSDCPLL>,
+		 <&apmixedsys CLK_APMIXED_TVDPLL>;
+	mediatek,hopping-ssc-percent = <2>,
+				       <2>,
+				       <8>,
+				       <8>,
+				       <2>;
+	status = "okay";
+};
+
+/* FIXME: Enabling more than 4 CPUs causes weird hangs at boot,
+ * CPU4 and CPU5 can be enabled after boot by writing 1 to:
+ * /sys/devices/system/cpu/cpu4/online
+ * /sys/devices/system/cpu/cpu5/online
+ * CPU6 and CPU7 are fails to boot due some capability conflicts
+ */
+
+&cpu0 {
+	cpu-supply = <&mt6366_vproc11_reg>;
+};
+
+&cpu1 {
+	cpu-supply = <&mt6366_vproc11_reg>;
+};
+
+&cpu2 {
+	cpu-supply = <&mt6366_vproc11_reg>;
+};
+
+&cpu3 {
+	cpu-supply = <&mt6366_vproc11_reg>;
+};
+
+&cpu4 {
+	cpu-supply = <&mt6366_vproc11_reg>;
+};
+
+&cpu5 {
+	cpu-supply = <&mt6366_vproc11_reg>;
+};
+
+&cpu6 {
+	cpu-supply = <&mt6366_vproc12_reg>;
+};
+
+&cpu7 {
+	cpu-supply = <&mt6366_vproc12_reg>;
+};
+
+&mfg0 {
+	domain-supply = <&mt6366_vgpu_reg>;
+};
+
+&mfg1 {
+	domain-supply = <&mt6366_vsram_gpu_reg>;
+};
+
+&gpu {
+	status = "okay";
+
+	mali-supply = <&mt6366_vgpu_reg>;
+};
+
+&dsi0 {
+	status = "disabled";
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	panel: panel@0 {
+		compatible = "xiaomi,emerald-ft3683g-csot";
+		reg = <0>;
+
+		reset-gpios = <&pio 85 GPIO_ACTIVE_HIGH>;
+
+		vddi-supply = <&disp_vddi>;
+		vdd-supply = <&disp_vdd>;
+		vci-supply = <&disp_vci>;
+
+		width-mm = <70>;
+		height-mm = <155>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&dsi0_out>;
+			};
+		};
+	};
+};
+
+&dsi0_out {
+	remote-endpoint = <&panel_in>;
+};
+
+&spi1 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi1_pins>;
+
+	/* There are two variants of touchscreen
+	 * focaltech found in CSOT panel variant (42)
+	 * goodix found in Visionox panel variant (41) */
+
+	touchscreen@0 {
+		/* ft3683g */
+		compatible = "focaltech,ft3680";
+		reg = <0x0>;
+
+		spi-max-frequency = <6000000>;
+
+		interrupt-parent = <&pio>;
+		interrupts = <9 0x2001>;
+		reset-gpios = <&pio 152 GPIO_ACTIVE_HIGH>;
+		focaltech,irq-gpio = <&pio 9 0x2001>;
+		focaltech,display-coords = <0 0 (1080*16) (2400*16)>;
+		focaltech,max-touch-number = <10>;
+
+		vdd-supply = <&avdd_ts>;
+		iovdd-supply = <&iovdd_ts>;
+
+		firmware-name = "focaltech/ft3683g_emerald.bin";
+	};
+
+	/* goodix,9916r */
+};
+
+&i2c2 {
+	status = "okay";
+
+	/* camera main @ 1a */
+	/* camera eeprom @ 50 */
+};
+
+&i2c3 {
+	status = "okay";
+
+	nfc@28 {
+		compatible = "nxp,pn557",
+		             "nxp,nxp-nci-i2c";
+		reg = <0x28>;
+
+		interrupts-extended = <&pio 1 IRQ_TYPE_LEVEL_HIGH>;
+
+		enable-gpios = <&pio 100 GPIO_ACTIVE_HIGH>;
+		firmware-gpios = <&pio 108 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&i2c4 {
+	status = "okay";
+
+	/* camera eeprom1 @ 51 */
+	/* camera eeprom2 @ 52 */
+
+	/* camera sub @ 20 */
+	/* camera main two @ 6c */
+};
+
+&i2c5 {
+	status = "okay";
+	
+	subpmic: sc6601@61 {
+		compatible = "southchip,sc6601";
+		reg = <0x61>;
+		interrupts-extended = <&pio 4 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		wakeup-source;
+
+		sc6601_charger: sc6601-charger {
+			compatible = "southchip,sc6601-charger";
+
+			monitored-battery = <&battery>;
+
+			interrupts = <0>, <6>;
+			interrupt-names = "charger", "hourse_keeping";
+
+			sc6601_otg_vbus_vreg: usb-otg-vbus-regulator {
+				regulator-name = "sc6601-otg-vbus";
+				regulator-min-microvolt = <5000000>;
+				regulator-max-microvolt = <5000000>;
+				regulator-min-microamp = <1500000>;
+				regulator-max-microamp = <1500000>;
+			};
+		};
+	};
+	
+	/* flashlight,lm3643 @ 63 */
+};
+
+&i2c6 {
+	status = "okay";
+	/* wl2866 camera ldo @ 28 */
+	/* haptic,aw86224 @ 58 */
+
+	/* southchip,sc8541-master @ 6a */
+};
+
+&i2c7 {
+	status = "okay";
+
+	bq28z610: fuel-gauge@55 {
+		compatible = "ti,bq28z610";
+		reg = <0x55>;
+		monitored-battery = <&battery>;
+	};
+
+	/* southchip,sc8541-slave @ 6a */
+
+};
+
+&i2c8 {
+	status = "okay";
+
+	/* camera eeprom 3 @ 53 */
+	/* camera sub two @ 78 */
+};
+
+&usb2 {
+	status = "okay";
+
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+
+	// TODO: Add workaround for broken dual-role controller
+	//usb-role-switch;
+	//role-switch-default-mode = "peripheral";
+};
+
+&u2phy {
+	status = "okay";
+};
+
+&mmc1 {
+	status = "okay";
+
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc1_pins_default>;
+	pinctrl-1 = <&mmc1_pins_default>;
+
+	bus-width = <1>;
+
+	max-frequency = <200000000>;
+
+	cap-sd-highspeed;
+	sd-uhs-sdr12;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+	sd-uhs-ddr50;
+
+	cd-debounce-delay-ms = <0>;
+	cd-gpios = <&pio 7 GPIO_ACTIVE_HIGH>;
+
+	vmmc-supply = <&mt6366_vmch_reg>;
+	vqmmc-supply = <&mt6366_vmc_reg>;
+};
+
+&ufsphy {
+	status = "okay";
+};
+
+&ufs {
+	status = "okay";
+
+	vcc-supply = <&mt6366_vemc_reg>;
+};
+
+&pio {
+
+	mmc1_pins_default: mmc1-pins-default-state {
+		pins-clk {
+			pinmux = <PINMUX_GPIO71__FUNC_MSDC1_CLK>;
+			drive-strength = <3>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins-cmd-dat {
+			pinmux = <PINMUX_GPIO73__FUNC_MSDC1_DAT0>,
+					 <PINMUX_GPIO74__FUNC_MSDC1_DAT1>,
+					 <PINMUX_GPIO75__FUNC_MSDC1_DAT2>,
+					 <PINMUX_GPIO76__FUNC_MSDC1_DAT3>,
+					 <PINMUX_GPIO72__FUNC_MSDC1_CMD>;
+			input-enable;
+			drive-strength = <3>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+		};
+	};
+
+	spi1_pins: spi1-pins {
+		pins-spi {
+			pinmux = <PINMUX_GPIO35__FUNC_SPI1_CSB>,
+					 <PINMUX_GPIO34__FUNC_SPI1_CLK>,
+					 <PINMUX_GPIO36__FUNC_SPI1_MO>,
+					 <PINMUX_GPIO37__FUNC_SPI1_MI>;
+			bias-disable;
+		};
+	};
+
+	i2c0_scp_pins: i2c0-scp-pins {
+		pinmux = <PINMUX_GPIO133__FUNC_SCP_SDA0>,
+				 <PINMUX_GPIO132__FUNC_SCP_SCL0>;
+	};
+
+	i2c1_scp_pins: i2c1-scp-pins {
+		pinmux = <PINMUX_GPIO131__FUNC_SCP_SDA1>,
+				 <PINMUX_GPIO130__FUNC_SCP_SCL1>;
+	};
+
+	spi1_scp_pins: spi1-scp-pins {
+		pinmux = <PINMUX_GPIO38__FUNC_SCP_SPI1_CK>,
+				 <PINMUX_GPIO39__FUNC_SCP_SPI1_CS>,
+				 <PINMUX_GPIO40__FUNC_SCP_SPI1_MO>,
+				 <PINMUX_GPIO41__FUNC_SCP_SPI1_MI>;
+	};
+};
+
+&pwrap {
+	status = "okay";
+
+	pmic: pmic {
+		compatible = "mediatek,mt6358";
+		interrupt-controller;
+		interrupts-extended = <&pio 137 IRQ_TYPE_LEVEL_HIGH>;
+		#interrupt-cells = <2>;
+
+		mt6366_regulator: mt6366-regulator {
+			compatible = "mediatek,mt6366-regulator", "mediatek,mt6358-regulator";
+
+			vsys-ldo1-supply = <&reg_vsys>;
+			vsys-ldo2-supply = <&reg_vsys>;
+			vsys-ldo3-supply = <&reg_vsys>;
+			vsys-vs1-supply = <&reg_vsys>;
+			vsys-vs2-supply = <&reg_vsys>;
+			vsys-vdram1-supply = <&reg_vsys>;
+			vsys-vcore-supply = <&reg_vsys>;
+			vsys-vpa-supply = <&reg_vsys>;
+			vsys-vproc11-supply = <&reg_vsys>;
+			vsys-vproc12-supply = <&reg_vsys>;
+			vsys-vgpu-supply = <&reg_vsys>;
+			vsys-vmodem-supply = <&reg_vsys>;
+			vs1-ldo1-supply = <&mt6366_vs1_reg>;
+			vs2-ldo1-supply = <&mt6366_vdram1_reg>;
+			vs2-ldo2-supply = <&mt6366_vs2_reg>;
+			vs2-ldo3-supply = <&mt6366_vs2_reg>;
+
+			mt6366_vdram1_reg: vdram1 {
+				regulator-name = "vdram1";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <2087500>;
+				regulator-ramp-delay = <12500>;
+				regulator-enable-ramp-delay = <0>;
+				regulator-always-on;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+				                           MT6397_BUCK_MODE_FORCE_PWM>;
+			};
+
+			mt6366_vcore_reg: vcore {
+				regulator-name = "vcore";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <200>;
+				regulator-always-on;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+				                           MT6397_BUCK_MODE_FORCE_PWM>;
+			};
+
+			mt6366_vpa_reg: vpa {
+				regulator-name = "vpa";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <3650000>;
+				regulator-ramp-delay = <50000>;
+				regulator-enable-ramp-delay = <250>;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+				                           MT6397_BUCK_MODE_FORCE_PWM>;
+			};
+
+			mt6366_vproc11_reg: vproc11 {
+				regulator-name = "vproc11";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <200>;
+				regulator-always-on;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+				                           MT6397_BUCK_MODE_FORCE_PWM>;
+			};
+
+			mt6366_vproc12_reg: vproc12 {
+				regulator-name = "vproc12";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <200>;
+				regulator-always-on;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+				                           MT6397_BUCK_MODE_FORCE_PWM>;
+			};
+
+			mt6366_vgpu_reg: vgpu {
+				regulator-name = "vgpu";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <900000>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <200>;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+				                           MT6397_BUCK_MODE_FORCE_PWM>;
+
+				regulator-coupled-with = <&mt6366_vsram_gpu_reg>;
+				regulator-coupled-max-spread = <100000>;
+			};
+
+			mt6366_vs2_reg: vs2 {
+				regulator-name = "vs2";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <2087500>;
+				regulator-ramp-delay = <12500>;
+				regulator-enable-ramp-delay = <0>;
+				regulator-always-on;
+			};
+
+			mt6366_vmodem_reg: vmodem {
+				regulator-name = "vmodem";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <900>;
+				regulator-always-on;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+				                           MT6397_BUCK_MODE_FORCE_PWM>;
+			};
+
+			mt6366_vs1_reg: vs1 {
+				regulator-name = "vs1";
+				regulator-min-microvolt = <1000000>;
+				regulator-max-microvolt = <2587500>;
+				regulator-ramp-delay = <12500>;
+				regulator-enable-ramp-delay = <0>;
+				regulator-always-on;
+			};
+
+			/* LPDDR4X, always on */
+			mt6366_vdram2_reg: vdram2 {
+				regulator-name = "vdram2";
+				regulator-min-microvolt = <600000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <3300>;
+				regulator-always-on;
+			};
+
+			mt6366_vsim1_reg: vsim1 {
+				regulator-name = "vsim1";
+				regulator-min-microvolt = <1700000>;
+				regulator-max-microvolt = <3100000>;
+				regulator-enable-ramp-delay = <540>;
+			};
+
+			mt6366_vibr_reg: vibr {
+				regulator-name = "vibr";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-enable-ramp-delay = <60>;
+			};
+
+			mt6366_vrf12_reg: vrf12 {
+				regulator-name = "vrf12";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-enable-ramp-delay = <120>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			mt6366_vio18_reg: vio18 {
+				regulator-name = "vio18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <2700>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			mt6366_vusb_reg: vusb {
+				regulator-name = "vusb";
+				regulator-min-microvolt = <3000000>;
+				regulator-max-microvolt = <3100000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-always-on;
+			};
+
+			mt6366_vcamio_reg: vcamio {
+				regulator-name = "vcamio";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <325>;
+			};
+
+			mt6366_vcamd_reg: vcamd {
+				regulator-name = "vcamd";
+				regulator-min-microvolt = <900000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <325>;
+			};
+
+			mt6366_vcn18_reg: vcn18 {
+				regulator-name = "vcn18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+
+			mt6366_vfe28_reg: vfe28 {
+				regulator-name = "vfe28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+
+			mt6366_vsram_proc11_reg: vsram-proc11 {
+				regulator-name = "vsram_proc11";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <240>;
+				regulator-always-on;
+			};
+
+			mt6366_vcn28_reg: vcn28 {
+				regulator-name = "vcn28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+
+			mt6366_vsram_others_reg: vsram-others {
+				regulator-name = "vsram_others";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <240>;
+				regulator-always-on;
+			};
+
+			mt6366_vsram_core_reg: vsram-core {
+				regulator-name = "vsram_core";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-enable-ramp-delay = <240>;
+				regulator-always-on;
+			};
+
+			mt6366_vsram_gpu_reg: vsram-gpu {
+				regulator-name = "vsram_gpu";
+				regulator-min-microvolt = <750000>;
+				regulator-max-microvolt = <950000>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <240>;
+
+				regulator-coupled-with = <&mt6366_vgpu_reg>;
+				regulator-coupled-max-spread = <100000>;
+			};
+
+			mt6366_vxo22_reg: vxo22 {
+				regulator-name = "vxo22";
+				regulator-min-microvolt = <2200000>;
+				regulator-max-microvolt = <2200000>;
+				regulator-enable-ramp-delay = <120>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			mt6366_vefuse_reg: vefuse {
+				regulator-name = "vefuse";
+				regulator-min-microvolt = <1700000>;
+				regulator-max-microvolt = <1900000>;
+				regulator-enable-ramp-delay = <270>;
+			};
+
+			mt6366_vaux18_reg: vaux18 {
+				regulator-name = "vaux18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			mt6366_vmch_reg: vmch {
+				regulator-name = "vmch";
+				regulator-min-microvolt = <2900000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-enable-ramp-delay = <60>;
+				regulator-always-on;
+			};
+
+			mt6366_vbif28_reg: vbif28 {
+				regulator-name = "vbif28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-enable-ramp-delay = <270>;
+			};
+
+			mt6366_vsram_proc12_reg: vsram-proc12 {
+				regulator-name = "vsram_proc12";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <240>;
+				regulator-always-on;
+			};
+
+			mt6366_vcama1_reg: vcama1 {
+				regulator-name = "vcama1";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <3000000>;
+				regulator-enable-ramp-delay = <325>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+
+			mt6366_vemc_reg: vemc {
+				regulator-name = "vemc";
+				regulator-min-microvolt = <2900000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-enable-ramp-delay = <60>;
+			};
+
+			mt6366_vio28_reg: vio28 {
+				regulator-name = "vio28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+
+			mt6366_va12_reg: va12 {
+				regulator-name = "va12";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-always-on;
+			};
+
+			mt6366_vrf18_reg: vrf18 {
+				regulator-name = "vrf18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <120>;
+			};
+
+			mt6366_vcn33_reg: vcn33 {
+				regulator-name = "vcn33";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3500000>;
+				regulator-enable-ramp-delay = <270>;
+			};
+
+			mt6366_vcama2_reg: vcama2 {
+				regulator-name = "vcama2";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <3000000>;
+				regulator-enable-ramp-delay = <325>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+
+			mt6366_vmc_reg: vmc {
+				regulator-name = "vmc";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-enable-ramp-delay = <60>;
+				regulator-always-on;
+			};
+
+			mt6366_vldo28_reg: vldo28 {
+				regulator-name = "vldo28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <3000000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+
+			mt6366_vaud28_reg: vaud28 {
+				regulator-name = "vaud28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+
+			mt6366_vsim2_reg: vsim2 {
+				regulator-name = "vsim2";
+				regulator-min-microvolt = <1700000>;
+				regulator-max-microvolt = <3100000>;
+				regulator-enable-ramp-delay = <540>;
+			};
+		};
+
+		mt6358_rtc: rtc {
+			compatible = "mediatek,mt6358-rtc";
+		};
+
+		mt6358_keys: keys {
+			compatible = "mediatek,mt6358-keys";
+
+			power-off-time-sec = <10>;
+			mediatek,long-press-mode = <1>;
+
+			power {
+				linux,keycodes = <KEY_POWER>;
+				wakeup-source;
+			};
+
+			home {
+				linux,keycodes = <KEY_VOLUMEUP>;
+			};
+		};
+	};
+};
+

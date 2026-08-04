@@ -1,0 +1,75 @@
+/*
+ * Label stubs so LK can apply the STOCK dtbo to our MAINLINE base DTB.
+ *
+ * LK's boot_linux_fdt applies the dtbo partition via libufdt. That overlay's
+ * __fixups__ demands 78 labels resolve in the base DTB's __symbols__; a mainline
+ * DTB has none, ufdt_apply_overlay fails, and LK hits the fatal
+ * ASSERT(err == NO_ERROR) at app/mt_boot/mt_boot.c:377 (observed as a fixed
+ * ~22.1s bootloop). LK also rejects any REPLACEMENT dtbo we supply (erased,
+ * empty, or a target-path no-op all give a fixed ~24.6s reject), so satisfying
+ * the stock overlay is the only route.
+ *
+ * 25 of the 78 labels already exist in mt6789.dtsi / our board DTS. The 53
+ * below do not: they name DOWNSTREAM-only nodes (MT6358 PMIC regulators -- note
+ * this device actually has an MT6366 -- accdet, mtkfb, charger/PE nodes, etc).
+ * They are inert, status=disabled placeholders that exist purely so the fixups
+ * resolve. Nothing should ever bind to them.
+ */
+/ {
+	jagar-overlay-stubs {
+		compatible = "jagar,overlay-stubs";
+		status = "disabled";
+		accdet: accdet-stub { };
+		android: android-stub { };
+		auxadc: auxadc-stub { };
+		backlight_cooler: backlight-cooler-stub { };
+		bp_thl: bp-thl-stub { };
+		charger: charger-stub { };
+		disp_aal0: disp-aal0-stub { };
+		disp_pwm: disp-pwm-stub { };
+		dispsys_config: dispsys-config-stub { };
+		dsi_te: dsi-te-stub { };
+		extcon_usb: extcon-usb-stub { };
+		gce: gce-stub { };
+		gpio: gpio-stub { };
+		gpio_usage_mapping: gpio-usage-mapping-stub { };
+		gps: gps-stub { };
+		infracfg_rst: infracfg-rst-stub { };
+		keypad: keypad-stub { };
+		lk_charger: lk-charger-stub { };
+		lvts: lvts-stub { };
+		md_auxadc: md-auxadc-stub { };
+		mrdump_ext_rst: mrdump-ext-rst-stub { };
+		mt6358_vaux18_reg: mt6358-vaux18-reg-stub { };
+		mt6358_vbif28_reg: mt6358-vbif28-reg-stub { };
+		mt6358_vcn18_reg: mt6358-vcn18-reg-stub { };
+		mt6358_vcn33_wifi_reg: mt6358-vcn33-wifi-reg-stub { };
+		mt6358_vcore_reg: mt6358-vcore-reg-stub { };
+		mt6358_vdram1_reg: mt6358-vdram1-reg-stub { };
+		mt6358_vdram2_reg: mt6358-vdram2-reg-stub { };
+		mt6358_vibr_reg: mt6358-vibr-reg-stub { };
+		mt6358_vio28_reg: mt6358-vio28-reg-stub { };
+		mt6358_vmc_reg: mt6358-vmc-reg-stub { };
+		mt6358_vmch_eint_high: mt6358-vmch-eint-high-stub { };
+		mt6358_vrf18_reg: mt6358-vrf18-reg-stub { };
+		mt6358_vsim1_reg: mt6358-vsim1-reg-stub { };
+		mt6358_vsim2_reg: mt6358-vsim2-reg-stub { };
+		mt6358codec: mt6358codec-stub { };
+		mt6358rtc: mt6358rtc-stub { };
+		mt6375_chg: mt6375-chg-stub { };
+		mt6375_typec: mt6375-typec-stub { };
+		mt6375_typec_pd_data: mt6375-typec-pd-data-stub { };
+		mtk_gauge: mtk-gauge-stub { };
+		mtkfb: mtkfb-stub { };
+		odm: odm-stub { };
+		pdc: pdc-stub { };
+		pe: pe-stub { };
+		pe2: pe2-stub { };
+		pe45: pe45-stub { };
+		pe5: pe5-stub { };
+		pwm: pwm-stub { };
+		regulator_vibrator: regulator-vibrator-stub { };
+		sound: sound-stub { };
+		subpmic_pmu_eint: subpmic-pmu-eint-stub { };
+	};
+};
