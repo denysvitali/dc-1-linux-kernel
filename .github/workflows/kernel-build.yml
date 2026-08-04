@@ -148,6 +148,11 @@ jobs:
           done
           exit $fail
 
+      # HOSTCC is clang too, NOT gcc: LLVM=-19 switches the host toolchain to
+      # LLVM as well, so a gcc HOSTCC ends up driving lld and dies with
+      # "collect2: fatal error: cannot find 'ld'" while building fixdep --
+      # before a single kernel object is compiled.
+      #
       # CC="ccache clang" rather than the /usr/lib/ccache PATH trick: that
       # directory ships gcc/g++ symlinks and does NOT reliably contain clang,
       # so the PATH approach silently builds WITHOUT ccache and every run looks
@@ -165,7 +170,7 @@ jobs:
           KBUILD_BUILD_HOST: github
         run: |
           make ARCH=arm64 LLVM=-19 \
-            CC="ccache clang-19" HOSTCC="ccache gcc" \
+            CC="ccache clang-19" HOSTCC="ccache clang-19" \
             -j"$(nproc)" Image dtbs
 
       # Reported so a collapsing hit rate is VISIBLE rather than showing up
