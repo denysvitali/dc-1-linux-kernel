@@ -1271,6 +1271,17 @@ static void mtk_dsi_remove(struct platform_device *pdev)
 	mipi_dsi_host_unregister(&dsi->host);
 }
 
+static const struct mtk_dsi_driver_data mt6789_dsi_driver_data = {
+	.reg_cmdq_off = 0xd00,
+	/* donor omitted these two: reg_vm_cmd_off defaulting to 0 makes
+	 * mtk_dsi_set_vm_cmd() write DSI_START during poweron. */
+	.reg_vm_cmd_off = 0x200,
+	.reg_shadow_dbg_off = 0xc00,
+	.has_shadow_ctl = false,
+	.has_size_ctl = true,
+	.support_per_frame_lp = true,
+};
+
 static const struct mtk_dsi_driver_data mt8173_dsi_driver_data = {
 	.reg_cmdq_off = 0x200,
 	.reg_vm_cmd_off = 0x130,
@@ -1312,6 +1323,7 @@ static const struct mtk_dsi_driver_data mt8188_dsi_driver_data = {
 static const struct of_device_id mtk_dsi_of_match[] = {
 	{ .compatible = "mediatek,mt2701-dsi", .data = &mt2701_dsi_driver_data },
 	{ .compatible = "mediatek,mt8167-dsi", .data = &mt2701_dsi_driver_data },
+	{ .compatible = "mediatek,mt6789-dsi", .data = &mt6789_dsi_driver_data },
 	{ .compatible = "mediatek,mt8173-dsi", .data = &mt8173_dsi_driver_data },
 	{ .compatible = "mediatek,mt8183-dsi", .data = &mt8183_dsi_driver_data },
 	{ .compatible = "mediatek,mt8186-dsi", .data = &mt8186_dsi_driver_data },
