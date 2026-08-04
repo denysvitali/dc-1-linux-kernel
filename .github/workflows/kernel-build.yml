@@ -35,6 +35,14 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
 
+    # CCACHE_DIR is set EXPLICITLY and used by both cache steps. ccache >= 4.0
+    # defaults to the XDG path ~/.cache/ccache, NOT ~/.ccache -- so caching
+    # ~/.ccache silently archived an empty directory. The symptom was a "Save
+    # ccache" step completing in 0s while the build stayed cold, which reads
+    # like a working cache right up until you look at the timings.
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+
     steps:
       # fetch-depth: 1 is worth a comment because the obvious instinct is
       # fetch-depth: 0 "so setlocalversion can see the tags". That cost ~14
@@ -74,7 +82,7 @@ jobs:
         id: ccache-restore
         uses: actions/cache/restore@v6
         with:
-          path: ~/.ccache
+          path: ${{ github.workspace }}/.ccache
           key: ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-${{ github.run_id }}
           restore-keys: |
             ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-
@@ -146,13 +154,32 @@ jobs:
         if: always()
         run: ccache --show-stats --verbose || ccache --show-stats
 
+      # POSITIVE CONTROL for the cache itself. A build that bypasses ccache
+      # entirely -- wrong CCACHE_DIR, no clang symlink, CC= override ignored --
+      # produces a green job, a 0s cache save and a permanently cold cache,
+      # which is indistinguishable from "working" unless something asserts it.
+      # If ccache saw zero cacheable calls, the caching is broken, not slow.
+      - name: Assert ccache was actually used
+        run: |
+          calls=$(ccache --print-stats | awk '$1=="cacheable_calls"{print $2}')
+          size=$(du -sm "$CCACHE_DIR" 2>/dev/null | cut -f1)
+          echo "cacheable_calls=${calls:-0}  ccache_dir_size=${size:-0}MB  dir=$CCACHE_DIR"
+          if [ "${calls:-0}" -eq 0 ]; then
+            echo "::error::ccache recorded ZERO cacheable calls -- the build is not going through ccache"
+            exit 1
+          fi
+          if [ "${size:-0}" -lt 50 ]; then
+            echo "::error::ccache dir is only ${size}MB after a full kernel build -- nothing is being stored"
+            exit 1
+          fi
+
       # if: always() -- see the restore step. A failed build still populated
       # the cache and that work is worth keeping.
       - name: Save ccache
         if: always()
         uses: actions/cache/save@v6
         with:
-          path: ~/.ccache
+          path: ${{ github.workspace }}/.ccache
           key: ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-${{ github.run_id }}
 
       # Assert the artifacts exist and are non-trivial. A make that "succeeded"
