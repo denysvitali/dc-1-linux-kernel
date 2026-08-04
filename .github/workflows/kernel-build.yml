@@ -140,7 +140,13 @@ jobs:
       - name: Assert load-bearing config symbols
         run: |
           fail=0
-          for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD; do
+          # FILE_LOCKING: without it flock/fcntl return ENOSYS and apk fails with
+          # "Unable to lock database: Function not implemented" -- which reads as a
+          # broken package manager, not a missing kernel option.
+          # ADVISE_SYSCALLS: madvise/fadvise ENOSYS breaks userspace equally opaquely.
+          for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD \
+                     CONFIG_FILE_LOCKING CONFIG_ADVISE_SYSCALLS \
+                     CONFIG_USB_CONFIGFS_ECM; do
             if ! grep -q "^${sym}=y" .config; then
               echo "::error::${sym} is not =y in the generated .config"
               fail=1
