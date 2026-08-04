@@ -35,6 +35,13 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
 
+    # contents: write is needed for the rolling prerelease below. Actions
+    # ARTIFACTS require an authenticated API call to download (anonymous GET
+    # returns 401), which makes them useless to anything that just wants to
+    # fetch the kernel and flash it. Release assets are plain public URLs.
+    permissions:
+      contents: write
+
     # CCACHE_DIR is set EXPLICITLY and used by both cache steps. ccache >= 4.0
     # defaults to the XDG path ~/.cache/ccache, NOT ~/.ccache -- so caching
     # ~/.ccache silently archived an empty directory. The symptom was a "Save
@@ -189,6 +196,29 @@ jobs:
       # produces a green job, a 0s cache save and a permanently cold cache,
       # which is indistinguishable from "working" unless something asserts it.
       # If ccache saw zero cacheable calls, the caching is broken, not slow.
+      # Rolling prerelease so the built kernel is fetchable WITHOUT a token:
+      #   curl -sL https://github.com/denysvitali/dc-1-linux-kernel/releases/download/jagar-latest/Image
+      # The tag is deleted and recreated each run: this is explicitly a
+      # "latest build" pointer, not a version history, and a stale asset here
+      # would be worse than none -- flashing a kernel you believe is current
+      # but is not is exactly the failure this project keeps hitting.
+      - name: Publish Image as rolling prerelease
+        if: github.ref == 'refs/heads/jagar'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp arch/arm64/boot/Image Image
+          cp arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar.dtb . || true
+          sha256sum Image *.dtb > SHA256SUMS
+          cat SHA256SUMS
+          gh release delete jagar-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create jagar-latest \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "jagar kernel (latest build)" \
+            --notes "Built from $GITHUB_SHA by run $GITHUB_RUN_ID. LLVM=1, jagar_defconfig. Rolling tag: contents change every push to jagar." \
+            Image *.dtb SHA256SUMS
+
       - name: Assert ccache was actually used
         run: |
           # Field names verified against ccache 4.10.2 --print-stats, and the
