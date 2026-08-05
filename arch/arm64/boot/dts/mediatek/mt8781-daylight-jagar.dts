@@ -73,7 +73,34 @@
 		 * - arm64.nomte mirrors stock; stock has a reason to set it and we
 		 *   have no way to know what it is.
 		 */
-		bootargs = "earlycon keep_bootcon console=tty0 console=ttyS0,921600n1 loglevel=8 clk_ignore_unused regulator_ignore_unused pd_ignore_unused nokaslr maxcpus=1 arm64.nomte";
+		/*
+		 * NO earlycon, and NO console=ttyS0. Both were actively dangerous here.
+		 *
+		 * earlycon resolves through stdout-path to the 8250 at 0x11002000 and
+		 * writes SYNCHRONOUSLY, spinning on the TX FIFO. This board has no UART
+		 * header; if the boot chain left UART0's bus clock gated the FIFO never
+		 * drains and the kernel hangs before anything reaches pstore -- a
+		 * completely silent failure, and the hardest kind to tell apart from
+		 * "the kernel never started". It buys us nothing on a headerless device.
+		 *
+		 * The justification previously given for earlycon -- that clk-mt6789 is
+		 * a module so mtk8250_probe returns -EPROBE_DEFER -- is stale:
+		 * COMMON_CLK_MT6789 is "default ARCH_MEDIATEK && ARM64"
+		 * (drivers/clk/mediatek/Kconfig), so the provider is built in and is
+		 * simply omitted from a savedefconfig-style jagar_defconfig.
+		 *
+		 * console=ttyS0 was LAST, and the last console= becomes /dev/console --
+		 * i.e. /dev/console was the headerless UART. console=tty0 is not a
+		 * fallback either: this defconfig has neither DRM_SIMPLEDRM nor
+		 * FB_SIMPLE, so the simple-framebuffer node has no driver at all.
+		 *
+		 * What actually works with no console= token whatsoever:
+		 * pstore_register_console() sets CON_PRINTBUFFER|CON_ENABLED|CON_ANYTIME
+		 * with no cmdline opt-in, so ramoops replays the whole log buffer once
+		 * pstore_ram probes. That plus the USB gadget (ttyGS0) are the real
+		 * channels, and neither needs a console= here.
+		 */
+		bootargs = "loglevel=8 clk_ignore_unused regulator_ignore_unused pd_ignore_unused nokaslr maxcpus=1 arm64.nomte";
 
 		/*
 		 * LK initialises the panel itself and leaves a live scanout in DRAM.
