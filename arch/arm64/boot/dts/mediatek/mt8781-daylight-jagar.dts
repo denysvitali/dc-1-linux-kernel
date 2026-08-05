@@ -1131,3 +1131,45 @@
  * If classic cpufreq is ever wanted: cpu0..cpu5 -> mt6366_vproc11_reg,
  * cpu6..cpu7 -> mt6366_vproc12_reg (as on emerald).
  */
+
+/*
+ * ---------------------------------------------------------------------------
+ * EMI stubs — required by LK, inert to Linux
+ * ---------------------------------------------------------------------------
+ * LK panics if these are absent from the device tree it is handed. Established
+ * by disassembly, not guesswork: emi_info_v2.c looks up "/soc/emicen" (string
+ * at lk payload 0x7f7d9, with a bare "/emicen" fallback at 0x7f7dd) and the
+ * miss path at 0x16e88 branches to panic() at 0x1732c with
+ * "ASSERT FAILED at (%s:%d): %s", line 154; the emimpu and emiisu siblings do
+ * the same at lines 38 and 81. fdt_path_offset matches a unit-address suffix,
+ * so "/soc/emicen" resolves to emicen@10219000.
+ *
+ * Mainline has NO driver for mediatek,common-emi* — nothing binds to these and
+ * they cost three unused nodes. They exist purely so the bootloader's mandatory
+ * fixups find what they expect. Values copied from the stock tree
+ * (work/dtmerge/vendor-base.dts:2088-2115), not invented.
+ *
+ * Reopened by path because mt6789.dtsi's soc node carries no label.
+ */
+/ {
+	soc {
+		emicen@10219000 {
+			compatible = "mediatek,common-emicen";
+			reg = <0 0x10219000 0 0x1000>;
+			mediatek,emi-reg = <0x4c>;
+		};
+
+		emimpu@10226000 {
+			compatible = "mediatek,common-emimpu";
+			reg = <0 0x10226000 0 0x1000>;
+			mediatek,emi-reg = <0x4d>;
+			region_cnt = <0x20>;
+			domain_cnt = <0x10>;
+		};
+
+		emiisu {
+			compatible = "mediatek,common-emiisu";
+			ctrl_intf = <1>;
+		};
+	};
+};
