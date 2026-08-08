@@ -242,6 +242,8 @@ struct mtk_iommu_plat_data {
 	};
 
 	unsigned char       larbid_remap[MTK_LARB_COM_MAX][MTK_LARB_SUBCOM_MAX];
+	/* Probe every DT larb when zero, otherwise only the selected larbs. */
+	u32                 probe_larb_mask;
 };
 
 struct mtk_iommu_bank_data {
@@ -1249,6 +1251,11 @@ static int mtk_iommu_mm_dts_parse(struct device *dev, struct component_match **m
 			ret = -EINVAL;
 			goto err_larbdev_put;
 		}
+		if (data->plat_data->probe_larb_mask &&
+		    !(data->plat_data->probe_larb_mask & BIT(id))) {
+			of_node_put(larbnode);
+			continue;
+		}
 
 		plarbdev = of_find_device_by_node(larbnode);
 		of_node_put(larbnode);
@@ -1678,6 +1685,8 @@ static const struct mtk_iommu_plat_data mt6789_data_mm = {
 	.iova_region    = mt6789_multi_dom,
 	.iova_region_nr = ARRAY_SIZE(mt6789_multi_dom),
 	.iova_region_larb_msk = mt6789_larb_region_msk,
+	/* The legacy firmware handoff currently powers display larbs only. */
+	.probe_larb_mask = BIT(0) | BIT(1),
 	/*
 	 * PARTIALLY GUESSED. larbid_remap is used *only* to pretty-print the
 	 * larb id in a translation-fault message (mtk_iommu_isr()); a wrong
