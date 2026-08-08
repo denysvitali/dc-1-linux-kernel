@@ -194,6 +194,7 @@ struct mtk_dsi_driver_data {
 	bool has_size_ctl;
 	bool cmdq_long_packet_ctl;
 	bool support_per_frame_lp;
+	bool needs_cmd_mode_init;
 };
 
 struct mtk_dsi {
@@ -737,6 +738,19 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		       dsi->regs + dsi->driver_data->reg_shadow_dbg_off);
 
 	mtk_dsi_reset_engine(dsi);
+
+	/*
+	 * LK leaves MT6789 DSI running in video mode.  An engine reset does not
+	 * reset DSI_MODE_CTRL on this SoC, so the first panel command otherwise
+	 * tries to wait for a VM_DONE transition from bootloader-owned state and
+	 * times out.  Stop that inherited transfer and establish command mode;
+	 * atomic_enable() selects and starts the requested video mode later.
+	 */
+	if (dsi->driver_data->needs_cmd_mode_init) {
+		mtk_dsi_stop(dsi);
+		mtk_dsi_set_cmd_mode(dsi);
+	}
+
 	mtk_dsi_phy_timconfig(dsi);
 
 	mtk_dsi_ps_control(dsi, true);
@@ -1280,6 +1294,7 @@ static const struct mtk_dsi_driver_data mt6789_dsi_driver_data = {
 	.has_shadow_ctl = false,
 	.has_size_ctl = true,
 	.support_per_frame_lp = true,
+	.needs_cmd_mode_init = true,
 };
 
 static const struct mtk_dsi_driver_data mt8173_dsi_driver_data = {
