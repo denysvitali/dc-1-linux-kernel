@@ -78,6 +78,8 @@ static const struct of_device_id of_match_clk_mt6789_imp_iic_wrap[] = {
 	{ .compatible = "mediatek,mt6789-imp-iic-wrap-c", .data = &imp_iic_wrap_c_desc },
 	{ .compatible = "mediatek,mt6789-imp-iic-wrap-w", .data = &imp_iic_wrap_w_desc },
 	{ .compatible = "mediatek,mt6789-imp-iic-wrap-n", .data = &imp_iic_wrap_n_desc },
+	/* Compatible used by the MT8781 vendor DT shipped on jagar. */
+	{ .compatible = "mediatek,mt6789-imp_iic_wrap_n", .data = &imp_iic_wrap_n_desc },
 	{ .compatible = "mediatek,mt6789-imp-iic-wrap-en", .data = &imp_iic_wrap_en_desc },
 	{ /* sentinel */ }
 };

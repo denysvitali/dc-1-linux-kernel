@@ -1423,7 +1423,22 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 {
 	int ret = 0;
 	struct mtk_i2c *i2c;
+	struct resource *mem;
 	int i, irq, speed_clk;
+
+	/*
+	 * Diagnostic split for jagar's previously non-booting i2c7 clock test.
+	 * Let the north-wrapper clock provider bind, but stop before mapping or
+	 * touching the controller/APDMA windows. If this image boots, the provider
+	 * is innocent and the failure is below this boundary. Remove this guard
+	 * before testing the adapter itself.
+	 */
+	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (mem && mem->start == 0x11f00000) {
+		dev_info(&pdev->dev,
+			 "jagar diagnostic: i2c7 held before MMIO; clock provider only\n");
+		return -ENODEV;
+	}
 
 	i2c = devm_kzalloc(&pdev->dev, sizeof(*i2c), GFP_KERNEL);
 	if (!i2c)
