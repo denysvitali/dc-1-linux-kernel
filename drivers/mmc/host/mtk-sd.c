@@ -3094,8 +3094,12 @@ static int msdc_drv_probe(struct platform_device *pdev)
 				     "Cannot find pinctrl");
 
 	host->pins_default = pinctrl_lookup_state(host->pinctrl, "default");
+	if (IS_ERR(host->pins_default))
+		host->pins_default = pinctrl_lookup_state(host->pinctrl,
+							  "state_normal");
 	if (IS_ERR(host->pins_default)) {
-		dev_err(&pdev->dev, "Cannot find pinctrl default!\n");
+		dev_err(&pdev->dev,
+			"Cannot find pinctrl default or state_normal!\n");
 		return PTR_ERR(host->pins_default);
 	}
 
