@@ -615,11 +615,7 @@ static const struct of_device_id mtk_smi_larb_of_ids[] = {
 	{.compatible = "mediatek,mt2701-smi-larb", .data = &mtk_smi_larb_mt2701},
 	{.compatible = "mediatek,mt2712-smi-larb", .data = &mtk_smi_larb_mt2712},
 	{.compatible = "mediatek,mt6779-smi-larb", .data = &mtk_smi_larb_mt6779},
-	/* JAGAR-STAGED-OUT: re-enable together with the IOMMU DT wiring.
-	 * The vendor DT ALREADY carries "mediatek,mt6789-smi-larb", so enabling
-	 * this alone makes the larb driver bind with no DT change -- a real
-	 * behavioural change that would confound the IIO-only test build.
-	{.compatible = "mediatek,mt6789-smi-larb", .data = &mtk_smi_larb_mt6789}, */
+	{.compatible = "mediatek,mt6789-smi-larb", .data = &mtk_smi_larb_mt6789},
 	{.compatible = "mediatek,mt6795-smi-larb", .data = &mtk_smi_larb_mt8173},
 	{.compatible = "mediatek,mt6893-smi-larb", .data = &mtk_smi_larb_mt6893},
 	{.compatible = "mediatek,mt8167-smi-larb", .data = &mtk_smi_larb_mt8167},
@@ -957,10 +953,8 @@ static const struct of_device_id mtk_smi_common_of_ids[] = {
 	{.compatible = "mediatek,mt2701-smi-common", .data = &mtk_smi_common_gen1},
 	{.compatible = "mediatek,mt2712-smi-common", .data = &mtk_smi_common_gen2},
 	{.compatible = "mediatek,mt6779-smi-common", .data = &mtk_smi_common_mt6779},
-	/* JAGAR-STAGED-OUT
-	{.compatible = "mediatek,mt6789-smi-common", .data = &mtk_smi_common_mt6789}, */
-	/* JAGAR-STAGED-OUT
-	{.compatible = "mediatek,mt6789-smi-sub-common", .data = &mtk_smi_sub_common_mt6789}, */
+	{.compatible = "mediatek,mt6789-smi-common", .data = &mtk_smi_common_mt6789},
+	{.compatible = "mediatek,mt6789-smi-sub-common", .data = &mtk_smi_sub_common_mt6789},
 	{.compatible = "mediatek,mt6795-smi-common", .data = &mtk_smi_common_mt6795},
 	{.compatible = "mediatek,mt6893-smi-common", .data = &mtk_smi_common_mt6893},
 	{.compatible = "mediatek,mt8167-smi-common", .data = &mtk_smi_common_gen2},

@@ -2021,8 +2021,7 @@ static const struct mtk_iommu_plat_data mt8365_data = {
 static const struct of_device_id mtk_iommu_of_ids[] = {
 	{ .compatible = "mediatek,mt2712-m4u", .data = &mt2712_data},
 	{ .compatible = "mediatek,mt6779-m4u", .data = &mt6779_data},
-	/* JAGAR-STAGED-OUT: re-enable with the DT wiring.
-	{ .compatible = "mediatek,mt6789-iommu-mm", .data = &mt6789_data_mm}, */
+	{ .compatible = "mediatek,mt6789-disp-iommu", .data = &mt6789_data_mm},
 	{ .compatible = "mediatek,mt6795-m4u", .data = &mt6795_data},
 	{ .compatible = "mediatek,mt6893-iommu-mm", .data = &mt6893_data},
 	{ .compatible = "mediatek,mt8167-m4u", .data = &mt8167_data},
