@@ -10,10 +10,10 @@ CONFIG_EXPERT=y
 # CONFIG_POSIX_TIMERS is not set
 # CONFIG_BUG is not set
 # CONFIG_FUTEX is not set
-# CONFIG_EPOLL is not set
-# CONFIG_SIGNALFD is not set
-# CONFIG_TIMERFD is not set
-# CONFIG_EVENTFD is not set
+CONFIG_EPOLL=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_EVENTFD=y
 # CONFIG_SHMEM is not set
 # CONFIG_AIO is not set
 # CONFIG_IO_URING is not set

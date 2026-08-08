@@ -148,6 +148,7 @@ jobs:
           # without it udhcpc obtains a lease but silently fails to apply it.
           for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD \
                      CONFIG_BINFMT_SCRIPT \
+                     CONFIG_EPOLL CONFIG_SIGNALFD CONFIG_TIMERFD CONFIG_EVENTFD \
                      CONFIG_FILE_LOCKING CONFIG_ADVISE_SYSCALLS \
                      CONFIG_USB_CONFIGFS_ECM; do
             if ! grep -q "^${sym}=y" .config; then
