@@ -1079,103 +1079,6 @@ static int mtk_iommu_of_xlate(struct device *dev,
 	return iommu_fwspec_add_ids(dev, args->args, 1);
 }
 
-static int mtk_iommu_mt6789_add_display_iommus(struct mtk_iommu_data *data)
-{
-	struct property *prop;
-	struct device_node *node;
-	__be32 *cells;
-	int ret;
-
-	/*
-	 * The production DT predates the upstream IOMMU binding and omits the
-	 * OVL0 iommus property. OVL0 is the DMA device used by MediaTek DRM, so
-	 * add its two authoritative larb0 port IDs before KMS allocates buffers.
-	 * This boot-time fixup intentionally persists in the live DT.
-	 */
-	node = of_find_compatible_node(NULL, NULL,
-				       "mediatek,mt6789-disp-ovl");
-	if (!node)
-		return -ENODEV;
-	if (of_property_present(node, "iommus")) {
-		of_node_put(node);
-		return 0;
-	}
-
-	prop = kzalloc(sizeof(*prop), GFP_KERNEL);
-	if (!prop) {
-		ret = -ENOMEM;
-		goto out_put_node;
-	}
-
-	prop->name = kstrdup("iommus", GFP_KERNEL);
-	cells = kmalloc_array(4, sizeof(*cells), GFP_KERNEL);
-	if (!prop->name || !cells) {
-		ret = -ENOMEM;
-		goto out_free_prop;
-	}
-
-	cells[0] = cpu_to_be32(data->dev->of_node->phandle);
-	cells[1] = cpu_to_be32(MTK_M4U_ID(0, 1));
-	cells[2] = cpu_to_be32(data->dev->of_node->phandle);
-	cells[3] = cpu_to_be32(MTK_M4U_ID(0, 2));
-	prop->value = cells;
-	prop->length = 4 * sizeof(*cells);
-
-	ret = of_add_property(node, prop);
-	if (ret)
-		goto out_free_prop;
-
-	dev_info(data->dev, "added legacy OVL0 display IOMMU ports\n");
-	of_node_put(node);
-	return 0;
-
-out_free_prop:
-	kfree(cells);
-	kfree(prop->name);
-	kfree(prop);
-out_put_node:
-	of_node_put(node);
-	return ret;
-}
-
-static int mtk_iommu_mt6789_configure_display(struct mtk_iommu_data *data)
-{
-	struct device_node *node;
-	struct platform_device *pdev;
-	struct device *dev;
-	int ret;
-
-	node = of_find_compatible_node(NULL, NULL,
-				       "mediatek,mt6789-disp-ovl");
-	if (!node)
-		return -ENODEV;
-
-	pdev = of_find_device_by_node(node);
-	of_node_put(node);
-	if (!pdev)
-		return -EPROBE_DEFER;
-
-	dev = &pdev->dev;
-	if (!dev_iommu_fwspec_get(dev)) {
-		if (!dev->bus || !dev->bus->dma_configure) {
-			ret = -ENODEV;
-			goto out_put_device;
-		}
-
-		ret = dev->bus->dma_configure(dev);
-		if (ret)
-			goto out_put_device;
-	}
-
-	ret = dev->iommu_group ? 0 : -ENODEV;
-	if (!ret)
-		dev_info(data->dev, "configured OVL0 display IOMMU ports\n");
-
-out_put_device:
-	platform_device_put(pdev);
-	return ret;
-}
-
 static void mtk_iommu_get_resv_regions(struct device *dev,
 				       struct list_head *head)
 {
@@ -1587,21 +1490,10 @@ static int mtk_iommu_probe(struct platform_device *pdev)
 				     "mtk-iommu.%pa", &ioaddr);
 	if (ret)
 		goto out_list_del;
-	if (data->plat_data->m4u_plat == M4U_MT6789) {
-		ret = mtk_iommu_mt6789_add_display_iommus(data);
-		if (ret)
-			goto out_sysfs_remove;
-	}
 
 	ret = iommu_device_register(&data->iommu, &mtk_iommu_ops, dev);
 	if (ret)
 		goto out_sysfs_remove;
-
-	if (data->plat_data->m4u_plat == M4U_MT6789) {
-		ret = mtk_iommu_mt6789_configure_display(data);
-		if (ret)
-			goto out_device_unregister;
-	}
 
 	if (MTK_IOMMU_IS_TYPE(data->plat_data, MTK_IOMMU_TYPE_MM)) {
 		ret = component_master_add_with_match(dev, &mtk_iommu_com_ops, match);
