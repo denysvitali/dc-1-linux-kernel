@@ -942,11 +942,19 @@ static struct iommu_device *mtk_iommu_probe_device(struct device *dev)
 	larbid = MTK_M4U_TO_LARB(fwspec->ids[0]);
 	if (larbid >= MTK_LARB_NR_MAX)
 		return ERR_PTR(-EINVAL);
+	if (data->plat_data->probe_larb_mask &&
+	    !(data->plat_data->probe_larb_mask & BIT(larbid)))
+		return ERR_PTR(-ENODEV);
 
 	larbid_msk |= BIT(larbid);
 
 	for (i = 1; i < fwspec->num_ids; i++) {
 		larbidx = MTK_M4U_TO_LARB(fwspec->ids[i]);
+		if (larbidx >= MTK_LARB_NR_MAX)
+			return ERR_PTR(-EINVAL);
+		if (data->plat_data->probe_larb_mask &&
+		    !(data->plat_data->probe_larb_mask & BIT(larbidx)))
+			return ERR_PTR(-ENODEV);
 		if (MTK_IOMMU_HAS_FLAG(data->plat_data, DL_WITH_MULTI_LARB)) {
 			larbid_msk |= BIT(larbidx);
 		} else if (larbid != larbidx) {
