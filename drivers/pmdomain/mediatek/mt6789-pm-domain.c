@@ -45,7 +45,9 @@ static struct property mt6789_ovl_iommus = {
 
 static int __init mt6789_legacy_display_iommu_fixup(void)
 {
+	struct property *mmsys_iommus;
 	struct device_node *iommu_node;
+	struct device_node *mmsys_node;
 	struct device_node *ovl_node;
 	int ret;
 
@@ -55,21 +57,36 @@ static int __init mt6789_legacy_display_iommu_fixup(void)
 	 * MediaTek DRM, so the omission makes framebuffer allocation bypass
 	 * the IOMMU and fail above the 32-bit DMA aperture.
 	 *
-	 * Apply the firmware compatibility fix before the generic OF platform
-	 * population arch_initcall.  The normal driver core can then defer OVL0
-	 * until the IOMMU provider is ready and attach it exactly once.  Do not
-	 * try to reconfigure an already-bound DMA device here.
+	 * The same DT incorrectly makes MMSYS an IOMMU client even though the
+	 * upstream MMSYS driver performs no DMA.  Since MMSYS creates the display
+	 * clock provider needed by the IOMMU, that property creates a dependency
+	 * cycle.  Remove it before adding OVL0's real ports.
+	 *
+	 * Apply both firmware compatibility fixes before generic OF platform
+	 * population.  Do not reconfigure an already-bound DMA device here.
 	 */
 	if (!of_machine_is_compatible("mediatek,MT6789"))
 		return 0;
 
 	iommu_node = of_find_compatible_node(NULL, NULL,
 					     "mediatek,mt6789-disp-iommu");
+	mmsys_node = of_find_compatible_node(NULL, NULL, "mediatek,mt6789-mmsys");
 	ovl_node = of_find_compatible_node(NULL, NULL, "mediatek,disp_ovl0");
-	if (!iommu_node || !ovl_node) {
+	if (!iommu_node || !mmsys_node || !ovl_node) {
 		pr_warn("MT6789: cannot find legacy display IOMMU nodes\n");
 		ret = 0;
 		goto out_put_nodes;
+	}
+
+	mmsys_iommus = of_find_property(mmsys_node, "iommus", NULL);
+	if (mmsys_iommus) {
+		ret = of_remove_property(mmsys_node, mmsys_iommus);
+		if (ret) {
+			pr_warn("MT6789: failed to remove circular MMSYS IOMMU client: %d\n",
+				ret);
+			goto out_put_nodes;
+		}
+		pr_info("MT6789: removed circular MMSYS IOMMU client\n");
 	}
 
 	if (of_property_present(ovl_node, "iommus")) {
@@ -96,6 +113,7 @@ static int __init mt6789_legacy_display_iommu_fixup(void)
 
 out_put_nodes:
 	of_node_put(ovl_node);
+	of_node_put(mmsys_node);
 	of_node_put(iommu_node);
 	return ret;
 }

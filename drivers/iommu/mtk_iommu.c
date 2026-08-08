@@ -1278,7 +1278,16 @@ static int mtk_iommu_mm_dts_parse(struct device *dev, struct component_match **m
 		}
 		data->larb_imu[id].dev = &plarbdev->dev;
 
-		if (!plarbdev->dev.driver) {
+		/*
+		 * MT6789's component framework can wait for its display larbs.
+		 * Requiring them to be bound here delays IOMMU registration until
+		 * the late deferred-probe sweep, after OVL has already fallen back
+		 * to direct DMA.  Keep the platform-device reference and let
+		 * component_master_add_with_match() complete when the SMI driver
+		 * registers the larb components.
+		 */
+		if (!plarbdev->dev.driver &&
+		    data->plat_data->m4u_plat != M4U_MT6789) {
 			ret = -EPROBE_DEFER;
 			goto err_larbdev_put;
 		}

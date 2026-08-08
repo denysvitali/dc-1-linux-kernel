@@ -339,24 +339,13 @@ void deferred_probe_extend_timeout(void)
  */
 static int deferred_probe_initcall(void)
 {
-	int trigger_count;
-
 	debugfs_create_file("devices_deferred", 0444, NULL, NULL,
 			    &deferred_devs_fops);
 
 	driver_deferred_probe_enable = true;
-	/*
-	 * Sort dependency chains before initcalls_done makes built-in consumers
-	 * treat a missing supplier as permanently absent. A supplier that binds
-	 * while deferred_probe_work is running can requeue the same work after
-	 * flush_work() has selected the instance it is waiting for. Keep draining
-	 * while a pass causes at least one additional probe trigger.
-	 */
-	do {
-		trigger_count = atomic_read(&deferred_trigger_count);
-		driver_deferred_probe_trigger();
-		flush_work(&deferred_probe_work);
-	} while (atomic_read(&deferred_trigger_count) != trigger_count + 1);
+	driver_deferred_probe_trigger();
+	/* Sort as many dependencies as possible before exiting initcalls */
+	flush_work(&deferred_probe_work);
 	initcalls_done = true;
 
 	if (!IS_ENABLED(CONFIG_MODULES))
