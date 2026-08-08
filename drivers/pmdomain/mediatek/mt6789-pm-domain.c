@@ -15,19 +15,25 @@
 
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/platform_device.h>
 #include <linux/pm_domain.h>
-#include <linux/slab.h>
 
 #include <dt-bindings/memory/mtk-memory-port.h>
 #include <dt-bindings/power/mediatek,mt6789-power.h>
 
 #define MT6789_POWER_DOMAIN_NR	(MT6789_POWER_DOMAIN_CAM_RAWB + 1)
 
-struct mt6789_pm_domain {
-	struct generic_pm_domain display;
-	struct generic_pm_domain *domains[MT6789_POWER_DOMAIN_NR];
-	struct genpd_onecell_data onecell;
+static struct generic_pm_domain mt6789_display_domain = {
+	.name = "disp",
+	.flags = GENPD_FLAG_ALWAYS_ON,
+};
+
+static struct generic_pm_domain *mt6789_domains[MT6789_POWER_DOMAIN_NR] = {
+	[MT6789_POWER_DOMAIN_DISP] = &mt6789_display_domain,
+};
+
+static struct genpd_onecell_data mt6789_onecell = {
+	.domains = mt6789_domains,
+	.num_domains = ARRAY_SIZE(mt6789_domains),
 };
 
 static __be32 mt6789_ovl_iommus_cells[4];
@@ -95,66 +101,41 @@ out_put_nodes:
 }
 core_initcall(mt6789_legacy_display_iommu_fixup);
 
-static int mt6789_pm_domain_probe(struct platform_device *pdev)
+static int __init mt6789_pm_domain_init(void)
 {
-	struct mt6789_pm_domain *priv;
+	struct device_node *node;
 	int ret;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
-	if (!priv)
-		return -ENOMEM;
+	if (!of_machine_is_compatible("mediatek,MT6789"))
+		return 0;
 
-	priv->display.name = "disp";
-	priv->display.flags = GENPD_FLAG_ALWAYS_ON;
-
-	/* The display domain is handed over by the boot firmware in the on state. */
-	ret = pm_genpd_init(&priv->display, NULL, false);
-	if (ret)
-		return ret;
-
-	priv->domains[MT6789_POWER_DOMAIN_DISP] = &priv->display;
-	priv->onecell.domains = priv->domains;
-	priv->onecell.num_domains = ARRAY_SIZE(priv->domains);
-
-	ret = of_genpd_add_provider_onecell(pdev->dev.of_node,
-					    &priv->onecell);
-	if (ret) {
-		pm_genpd_remove(&priv->display);
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to register display power domain\n");
+	node = of_find_compatible_node(NULL, NULL, "mediatek,mt6789-scpsys");
+	if (!node) {
+		pr_warn("MT6789: cannot find legacy power-domain node\n");
+		return 0;
 	}
 
-	platform_set_drvdata(pdev, priv);
-	dev_info(&pdev->dev,
-		 "registered bootloader-owned display power domain\n");
+	/* The display domain is handed over by the boot firmware in the on state. */
+	ret = pm_genpd_init(&mt6789_display_domain, NULL, false);
+	if (ret)
+		goto out_put_node;
 
+	ret = of_genpd_add_provider_onecell(node, &mt6789_onecell);
+	if (ret) {
+		pm_genpd_remove(&mt6789_display_domain);
+		goto out_put_node;
+	}
+
+	/* The provider retains its own node reference for the boot lifetime. */
+	pr_info("MT6789: registered bootloader-owned display power domain early\n");
+	of_node_put(node);
 	return 0;
+
+out_put_node:
+	of_node_put(node);
+	return ret;
 }
-
-static void mt6789_pm_domain_remove(struct platform_device *pdev)
-{
-	struct mt6789_pm_domain *priv = platform_get_drvdata(pdev);
-
-	of_genpd_del_provider(pdev->dev.of_node);
-	pm_genpd_remove(&priv->display);
-}
-
-static const struct of_device_id mt6789_pm_domain_of_match[] = {
-	{ .compatible = "mediatek,mt6789-scpsys" },
-	{ }
-};
-MODULE_DEVICE_TABLE(of, mt6789_pm_domain_of_match);
-
-static struct platform_driver mt6789_pm_domain_driver = {
-	.probe = mt6789_pm_domain_probe,
-	.remove = mt6789_pm_domain_remove,
-	.driver = {
-		.name = "mt6789-pm-domain",
-		.suppress_bind_attrs = true,
-		.of_match_table = mt6789_pm_domain_of_match,
-	},
-};
-builtin_platform_driver(mt6789_pm_domain_driver);
+postcore_initcall(mt6789_pm_domain_init);
 
 MODULE_DESCRIPTION("MediaTek MT6789 legacy power-domain handoff");
 MODULE_LICENSE("GPL");
