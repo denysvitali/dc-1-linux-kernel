@@ -13,8 +13,11 @@
  * have been validated against the generic MediaTek PM-domain framework.
  */
 
+#include <linux/device.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 
 #include <dt-bindings/memory/mtk-memory-port.h>
@@ -136,6 +139,61 @@ out_put_node:
 	return ret;
 }
 postcore_initcall(mt6789_pm_domain_init);
+
+static int __init mt6789_attach_legacy_supplier(const char *path)
+{
+	struct platform_device *pdev;
+	struct device_node *node;
+	int ret;
+
+	node = of_find_node_by_path(path);
+	if (!node)
+		return -ENODEV;
+
+	pdev = of_find_device_by_node(node);
+	of_node_put(node);
+	if (!pdev)
+		return -ENODEV;
+
+	ret = pdev->dev.driver ? 1 : device_attach(&pdev->dev);
+	platform_device_put(pdev);
+	return ret > 0 ? 0 : ret ?: -ENODEV;
+}
+
+static int __init mt6789_legacy_display_supplier_init(void)
+{
+	static const char * const paths[] = {
+		"/soc/smi_disp_comm@14002000",
+		"/soc/smi_larb0@14003000",
+		"/soc/smi_larb1@14004000",
+		"/soc/iommu@14016000",
+	};
+	int i, ret;
+
+	if (!of_machine_is_compatible("mediatek,MT6789"))
+		return 0;
+
+	/*
+	 * The production DT's display supplier chain is deeper than the single
+	 * pass made before built-in deferred probing gives up on missing drivers.
+	 * At this point all ordinary device initcalls (including MMSYS clocks and
+	 * SMI) have run, but initcalls_done is still false.  Probe the chain in
+	 * dependency order so the generic late deferred sweep sees a registered
+	 * IOMMU when it retries OVL0.
+	 */
+	for (i = 0; i < ARRAY_SIZE(paths); i++) {
+		ret = mt6789_attach_legacy_supplier(paths[i]);
+		if (ret) {
+			pr_warn("MT6789: failed to attach display supplier %s: %d\n",
+				paths[i], ret);
+			return 0;
+		}
+	}
+
+	pr_info("MT6789: attached legacy display suppliers before deferred probe\n");
+	return 0;
+}
+late_initcall(mt6789_legacy_display_supplier_init);
 
 MODULE_DESCRIPTION("MediaTek MT6789 legacy power-domain handoff");
 MODULE_LICENSE("GPL");

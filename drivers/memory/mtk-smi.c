@@ -1090,9 +1090,7 @@ static int __init mtk_smi_init(void)
 {
 	return platform_register_drivers(smidrivers, ARRAY_SIZE(smidrivers));
 }
-
-/* IOMMU and display drivers consume SMI larbs during their device initcalls. */
-subsys_initcall(mtk_smi_init);
+module_init(mtk_smi_init);
 
 static void __exit mtk_smi_exit(void)
 {
