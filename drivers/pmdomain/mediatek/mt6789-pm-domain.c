@@ -163,6 +163,7 @@ static int __init mt6789_attach_legacy_supplier(const char *path)
 static int __init mt6789_legacy_display_supplier_init(void)
 {
 	static const char * const paths[] = {
+		"/soc/dispsys_config@14000000",
 		"/soc/smi_disp_comm@14002000",
 		"/soc/smi_larb0@14003000",
 		"/soc/smi_larb1@14004000",
