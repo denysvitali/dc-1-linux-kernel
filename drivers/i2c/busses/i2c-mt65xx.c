@@ -1423,20 +1423,7 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 {
 	int ret = 0;
 	struct mtk_i2c *i2c;
-	struct resource *mem;
-	bool jagar_i2c7;
 	int i, irq, speed_clk;
-
-	/*
-	 * Stage markers for jagar's i2c7. The preceding provider-only test booted,
-	 * so the remaining failure is at or below controller/APDMA setup. Keep the
-	 * markers local to the exact controller resource and bracket every operation
-	 * that can touch hardware or synchronously instantiate a child.
-	 */
-	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	jagar_i2c7 = mem && mem->start == 0x11f00000;
-	if (jagar_i2c7)
-		dev_info(&pdev->dev, "jagar i2c7 stage 01: probe entry\n");
 
 	i2c = devm_kzalloc(&pdev->dev, sizeof(*i2c), GFP_KERNEL);
 	if (!i2c)
@@ -1445,14 +1432,10 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 	i2c->base = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
 	if (IS_ERR(i2c->base))
 		return PTR_ERR(i2c->base);
-	if (jagar_i2c7)
-		dev_info(&pdev->dev, "jagar i2c7 stage 02: controller mapped\n");
 
 	i2c->pdmabase = devm_platform_get_and_ioremap_resource(pdev, 1, NULL);
 	if (IS_ERR(i2c->pdmabase))
 		return PTR_ERR(i2c->pdmabase);
-	if (jagar_i2c7)
-		dev_info(&pdev->dev, "jagar i2c7 stage 03: APDMA mapped\n");
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
@@ -1480,8 +1463,6 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 	ret = mtk_i2c_parse_dt(pdev->dev.of_node, i2c);
 	if (ret)
 		return -EINVAL;
-	if (jagar_i2c7)
-		dev_info(&pdev->dev, "jagar i2c7 stage 04: DT parsed\n");
 
 	if (i2c->have_pmic && !i2c->dev_comp->pmic_i2c)
 		return -EINVAL;
@@ -1502,11 +1483,6 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "cannot get dma clock\n");
 		return PTR_ERR(i2c->clocks[I2C_MT65XX_CLK_DMA].clk);
 	}
-	if (jagar_i2c7)
-		dev_info(&pdev->dev,
-			 "jagar i2c7 stage 05: clocks acquired main=%lu dma=%lu\n",
-			 clk_get_rate(i2c->clocks[I2C_MT65XX_CLK_MAIN].clk),
-			 clk_get_rate(i2c->clocks[I2C_MT65XX_CLK_DMA].clk));
 
 	i2c->clocks[I2C_MT65XX_CLK_ARB].clk = devm_clk_get_optional(&pdev->dev, "arb");
 	if (IS_ERR(i2c->clocks[I2C_MT65XX_CLK_ARB].clk))
@@ -1546,11 +1522,7 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "clock enable failed!\n");
 		return ret;
 	}
-	if (jagar_i2c7)
-		dev_info(&pdev->dev, "jagar i2c7 stage 06: clocks enabled\n");
 	mtk_i2c_init_hw(i2c);
-	if (jagar_i2c7)
-		dev_info(&pdev->dev, "jagar i2c7 stage 07: controller initialized\n");
 	clk_bulk_disable(I2C_MT65XX_CLK_MAX, i2c->clocks);
 
 	ret = devm_request_irq(&pdev->dev, irq, mtk_i2c_irq,
@@ -1563,13 +1535,9 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 	}
 
 	i2c_set_adapdata(&i2c->adap, i2c);
-	if (jagar_i2c7)
-		dev_info(&pdev->dev, "jagar i2c7 stage 08: adding adapter\n");
 	ret = i2c_add_adapter(&i2c->adap);
 	if (ret)
 		goto err_bulk_unprepare;
-	if (jagar_i2c7)
-		dev_info(&pdev->dev, "jagar i2c7 stage 09: adapter registered\n");
 
 	platform_set_drvdata(pdev, i2c);
 
