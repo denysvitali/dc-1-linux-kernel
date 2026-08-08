@@ -346,6 +346,14 @@ static int deferred_probe_initcall(void)
 	driver_deferred_probe_trigger();
 	/* Sort as many dependencies as possible before exiting initcalls */
 	flush_work(&deferred_probe_work);
+	/*
+	 * A successful supplier probe can requeue deferred_probe_work while the
+	 * first flush is already waiting on it.  Drain that chained retry before
+	 * initcalls_done makes built-in consumers treat a missing supplier as
+	 * permanently absent.
+	 */
+	driver_deferred_probe_trigger();
+	flush_work(&deferred_probe_work);
 	initcalls_done = true;
 
 	if (!IS_ENABLED(CONFIG_MODULES))
