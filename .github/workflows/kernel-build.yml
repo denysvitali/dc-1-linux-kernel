@@ -144,7 +144,10 @@ jobs:
           # "Unable to lock database: Function not implemented" -- which reads as a
           # broken package manager, not a missing kernel option.
           # ADVISE_SYSCALLS: madvise/fadvise ENOSYS breaks userspace equally opaquely.
+          # BINFMT_SCRIPT: DHCP and normal Alpine hooks are shebang scripts;
+          # without it udhcpc obtains a lease but silently fails to apply it.
           for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD \
+                     CONFIG_BINFMT_SCRIPT \
                      CONFIG_FILE_LOCKING CONFIG_ADVISE_SYSCALLS \
                      CONFIG_USB_CONFIGFS_ECM; do
             if ! grep -q "^${sym}=y" .config; then
