@@ -56,7 +56,7 @@ struct panel_desc {
 	bool has_jagar_power_sequence;
 };
 
-static bool sharp_nt36523n_production_sequence = true;
+static bool sharp_nt36523n_production_sequence;
 module_param_named(jagar_production_sequence,
 		   sharp_nt36523n_production_sequence, bool, 0644);
 MODULE_PARM_DESC(jagar_production_sequence,
@@ -69,13 +69,13 @@ MODULE_PARM_DESC(jagar_production_sequence,
  * group at a time, and a failed stage can be recovered through the other A/B
  * slot without conflating those operations.
  *
- * Each group has now been advanced on hardware and the full sequence completes
- * ("production power sequence complete; reset released"), so the default is the
- * whole sequence: holding it meant mediatek-drm never bound at boot and the
- * panel had to be brought up by hand after every reset. Drop back to 0 with
- * jagar_probe_stage= on the cmdline if a panel change strands the boot.
+ * Defaulting this to 3 was tried on 2026-08-09 and DOES NOT BOOT: the full
+ * sequence completes fine when advanced from a live console at t=275s, but
+ * running it from probe during boot never reaches userspace, and LK falls back
+ * to the other slot. Keep the default at the boot-proven hold and advance it at
+ * runtime (device/userspace/sway-test/panel-up.sh).
  */
-static unsigned int sharp_nt36523n_probe_stage = 3;
+static unsigned int sharp_nt36523n_probe_stage;
 module_param_named(jagar_probe_stage, sharp_nt36523n_probe_stage, uint, 0644);
 MODULE_PARM_DESC(jagar_probe_stage,
 		 "DC-1 panel probe stage: 0=hold, 1=VDDI, 2=bias, 3=reset/attach");
