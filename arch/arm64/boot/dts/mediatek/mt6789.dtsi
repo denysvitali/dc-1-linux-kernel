@@ -1446,8 +1446,7 @@
 		};
 
 		mipi_tx0: dsi-phy@11f60000 {
-			compatible = "mediatek,mt6789-mipi-tx",
-			             "mediatek,mt8183-mipi-tx";
+			compatible = "mediatek,mt6789-mipi-tx";
 			reg = <0 0x11f60000 0 0x1000>;
 			clocks = <&clk26m>;
 			#clock-cells = <0>;

@@ -40,8 +40,9 @@ static int mtk_mipi_tx_power_on(struct phy *phy)
 	if (ret < 0)
 		return ret;
 
-	/* Enable DSI Lane LDO outputs, disable pad tie low */
-	mipi_tx->driver_data->mipi_tx_enable_signal(phy);
+	/* Some SoCs stage the lane supplies as part of PLL preparation. */
+	if (mipi_tx->driver_data->mipi_tx_enable_signal)
+		mipi_tx->driver_data->mipi_tx_enable_signal(phy);
 	return 0;
 }
 
@@ -49,8 +50,9 @@ static int mtk_mipi_tx_power_off(struct phy *phy)
 {
 	struct mtk_mipi_tx *mipi_tx = phy_get_drvdata(phy);
 
-	/* Enable pad tie low, disable DSI Lane LDO outputs */
-	mipi_tx->driver_data->mipi_tx_disable_signal(phy);
+	/* Enable pad tie low, disable DSI Lane LDO outputs when separate. */
+	if (mipi_tx->driver_data->mipi_tx_disable_signal)
+		mipi_tx->driver_data->mipi_tx_disable_signal(phy);
 
 	/* Disable PLL and power down core */
 	clk_disable_unprepare(mipi_tx->pll_hw.clk);
@@ -182,6 +184,7 @@ static int mtk_mipi_tx_probe(struct platform_device *pdev)
 static const struct of_device_id mtk_mipi_tx_match[] = {
 	{ .compatible = "mediatek,mt2701-mipi-tx", .data = &mt2701_mipitx_data },
 	{ .compatible = "mediatek,mt8173-mipi-tx", .data = &mt8173_mipitx_data },
+	{ .compatible = "mediatek,mt6789-mipi-tx", .data = &mt6789_mipitx_data },
 	{ .compatible = "mediatek,mt8183-mipi-tx", .data = &mt8183_mipitx_data },
 	{ /* sentinel */ }
 };
