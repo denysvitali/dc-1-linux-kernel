@@ -1335,12 +1335,17 @@ static int sharp_nt36523n_power_on(struct panel_info *pinfo)
 	usleep_range(11000, 11055);
 
 	/*
-	 * Keep the reset cadence that already boots through the mainline DSI
-	 * handoff. The shipped microsecond pulse still needs an isolated hardware
-	 * test; applying it together with first-time bias ownership prevented Linux
-	 * from reaching its USB console.
+	 * Exact production reset from the shipped driver. GPIO85 is active-high in
+	 * the factory FDT: the old generic cadence ended low and left the controller
+	 * physically held in reset while every DCS command was sent.
 	 */
-	nt36523_reset(pinfo);
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 1);
+	usleep_range(12, 13);
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
+	usleep_range(12, 13);
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 1);
+	msleep(92);
+	dev_info(dev, "production power sequence complete; reset released\n");
 	pinfo->jagar_bias_enabled = true;
 
 	return 0;
