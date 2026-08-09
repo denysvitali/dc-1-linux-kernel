@@ -505,7 +505,8 @@ static void mtk_dsi_ps_control(struct mtk_dsi *dsi, bool config_vact)
 	if (config_vact) {
 		vact_nl = FIELD_PREP(VACT_NL, dsi->vm.vactive);
 		writel(vact_nl, dsi->regs + DSI_VACT_NL);
-		writel(ps_wc, dsi->regs + DSI_HSTX_CKL_WC);
+		if (!dsi->driver_data->use_mt6789_timings)
+			writel(ps_wc, dsi->regs + DSI_HSTX_CKL_WC);
 	}
 	writel(ps_val, dsi->regs + DSI_PSCTRL);
 }
@@ -560,11 +561,6 @@ static void mtk_dsi_config_vdo_timing_per_frame_lp(struct mtk_dsi *dsi)
 			   horizontal_frontporch_byte) % dsi->lanes;
 	if (v_active_roundup)
 		horizontal_backporch_byte += dsi->lanes - v_active_roundup;
-	if (dsi->driver_data->use_mt6789_timings) {
-		horizontal_sync_active_byte = ALIGN(horizontal_sync_active_byte, 4);
-		horizontal_backporch_byte = ALIGN(horizontal_backporch_byte, 4);
-		horizontal_frontporch_byte = ALIGN(horizontal_frontporch_byte, 4);
-	}
 	hstx_cklp_wc_min = (DIV_ROUND_UP(cklp_wc_min_adjust, dsi->lanes) + da_hs_trail + 1)
 			   * dsi->lanes / 6 - 1;
 	hstx_cklp_wc_max = (DIV_ROUND_UP((cklp_wc_max_adjust + horizontal_backporch_byte +
@@ -648,6 +644,33 @@ static void mtk_dsi_config_vdo_timing_per_line_lp(struct mtk_dsi *dsi)
 	writel(horizontal_frontporch_byte, dsi->regs + DSI_HFP_WC);
 }
 
+static void mtk_dsi_config_vdo_timing_mt6789(struct mtk_dsi *dsi)
+{
+	struct videomode *vm = &dsi->vm;
+	u32 hsa_byte, hbp_byte, hfp_byte;
+	u32 dsi_buf_bpp;
+
+	if (dsi->format == MIPI_DSI_FMT_RGB565)
+		dsi_buf_bpp = 2;
+	else
+		dsi_buf_bpp = 3;
+
+	if (dsi->mode_flags & MIPI_DSI_MODE_VIDEO_SYNC_PULSE) {
+		hsa_byte = ALIGN(vm->hsync_len * dsi_buf_bpp - 10, 4);
+		hbp_byte = ALIGN(vm->hback_porch * dsi_buf_bpp - 10, 4);
+	} else {
+		hsa_byte = ALIGN(vm->hsync_len * dsi_buf_bpp - 4, 4);
+		hbp_byte = ALIGN((vm->hback_porch + vm->hsync_len) *
+				 dsi_buf_bpp - 10, 4);
+	}
+
+	hfp_byte = ALIGN(vm->hfront_porch * dsi_buf_bpp - 12, 4);
+
+	writel(hsa_byte, dsi->regs + DSI_HSA_WC);
+	writel(hbp_byte, dsi->regs + DSI_HBP_WC);
+	writel(hfp_byte, dsi->regs + DSI_HFP_WC);
+}
+
 static void mtk_dsi_config_vdo_timing(struct mtk_dsi *dsi)
 {
 	struct videomode *vm = &dsi->vm;
@@ -662,7 +685,9 @@ static void mtk_dsi_config_vdo_timing(struct mtk_dsi *dsi)
 			FIELD_PREP(DSI_WIDTH, vm->hactive),
 			dsi->regs + DSI_SIZE_CON);
 
-	if (dsi->driver_data->support_per_frame_lp)
+	if (dsi->driver_data->use_mt6789_timings)
+		mtk_dsi_config_vdo_timing_mt6789(dsi);
+	else if (dsi->driver_data->support_per_frame_lp)
 		mtk_dsi_config_vdo_timing_per_frame_lp(dsi);
 	else
 		mtk_dsi_config_vdo_timing_per_line_lp(dsi);
@@ -1384,7 +1409,7 @@ static const struct mtk_dsi_driver_data mt6789_dsi_driver_data = {
 	.reg_shadow_dbg_off = 0xc00,
 	.has_shadow_ctl = false,
 	.has_size_ctl = true,
-	.support_per_frame_lp = true,
+	.support_per_frame_lp = false,
 	.use_mt6789_timings = true,
 	.needs_cmd_mode_init = true,
 };
