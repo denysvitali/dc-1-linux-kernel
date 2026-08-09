@@ -915,6 +915,17 @@ static const struct mtk_pin_field_calc mt6789_pin_drv_range[] = {
 	PIN_FIELD_BASE(187, 187, 4, 0x0060, 0x10, 18, 3),
 };
 
+/*
+ * MT6789 calls these fields DRV_EH downstream.  Mainline represents the same
+ * raw enhanced-drive field as DRV_ADV.  GPIO144/145 are i2c7 SCL/SDA; without
+ * this range the stock pin state fails on GPIO144 and never applies GPIO145's
+ * pull/drive configuration.
+ */
+static const struct mtk_pin_field_calc mt6789_pin_drv_adv_range[] = {
+	PIN_FIELD_BASE(144, 144, 4, 0x0080, 0x10, 12, 3),
+	PIN_FIELD_BASE(145, 145, 4, 0x0080, 0x10, 27, 3),
+};
+
 static const struct mtk_pin_field_calc mt6789_pin_rsel_range[] = {
 	PIN_FIELD_BASE(130, 130, 4, 0x01d0, 0x10, 0, 3),
 	PIN_FIELD_BASE(131, 131, 4, 0x01d0, 0x10, 15, 3),
@@ -1050,6 +1061,7 @@ static const struct mtk_pin_reg_calc mt6789_reg_cals[PINCTRL_PIN_REG_MAX] = {
 	[PINCTRL_PIN_REG_PU] = MTK_RANGE(mt6789_pin_pu_range),
 	[PINCTRL_PIN_REG_PD] = MTK_RANGE(mt6789_pin_pd_range),
 	[PINCTRL_PIN_REG_DRV] = MTK_RANGE(mt6789_pin_drv_range),
+	[PINCTRL_PIN_REG_DRV_ADV] = MTK_RANGE(mt6789_pin_drv_adv_range),
 	[PINCTRL_PIN_REG_PUPD] = MTK_RANGE(mt6789_pin_pupd_range),
 	[PINCTRL_PIN_REG_R0] = MTK_RANGE(mt6789_pin_r0_range),
 	[PINCTRL_PIN_REG_R1] = MTK_RANGE(mt6789_pin_r1_range),
