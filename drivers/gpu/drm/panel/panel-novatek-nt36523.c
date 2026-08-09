@@ -56,7 +56,7 @@ struct panel_desc {
 	bool has_jagar_power_sequence;
 };
 
-static bool sharp_nt36523n_production_sequence;
+static bool sharp_nt36523n_production_sequence = true;
 module_param_named(jagar_production_sequence,
 		   sharp_nt36523n_production_sequence, bool, 0644);
 MODULE_PARM_DESC(jagar_production_sequence,
@@ -65,11 +65,17 @@ MODULE_PARM_DESC(jagar_production_sequence,
 /*
  * The shipped FDT lets the jagar panel probe advance through several pieces of
  * hardware ownership at once: inherited VDDI, the two bias regulators, and the
- * reset GPIO. Keep the default at the already boot-proven boundary, then let a
- * live console advance one resource group at a time. A failed stage can be
- * recovered through the other A/B slot without conflating those operations.
+ * reset GPIO. The staging exists so a live console can advance one resource
+ * group at a time, and a failed stage can be recovered through the other A/B
+ * slot without conflating those operations.
+ *
+ * Each group has now been advanced on hardware and the full sequence completes
+ * ("production power sequence complete; reset released"), so the default is the
+ * whole sequence: holding it meant mediatek-drm never bound at boot and the
+ * panel had to be brought up by hand after every reset. Drop back to 0 with
+ * jagar_probe_stage= on the cmdline if a panel change strands the boot.
  */
-static unsigned int sharp_nt36523n_probe_stage;
+static unsigned int sharp_nt36523n_probe_stage = 3;
 module_param_named(jagar_probe_stage, sharp_nt36523n_probe_stage, uint, 0644);
 MODULE_PARM_DESC(jagar_probe_stage,
 		 "DC-1 panel probe stage: 0=hold, 1=VDDI, 2=bias, 3=reset/attach");
@@ -1228,6 +1234,19 @@ static int sharp_nt36523n_production_init_sequence(struct panel_info *pinfo)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
+
+	/*
+	 * Establish the full-panel column/page window before sleep-out. LK sets
+	 * this explicitly -- its LCM driver logs "New Display Area : Left = %d,
+	 * Top = %d, Right = %d, Bottom = %d" -- and we were leaving it at
+	 * whatever the panel powers up with. A window that disagrees with the
+	 * 1200-pixel line the host actually sends makes the panel lay each line
+	 * down over the wrong span, which shows up as a stable vertical comb
+	 * that persists even for a uniform frame.
+	 */
+	mipi_dsi_dcs_set_column_address_multi(&dsi_ctx, 0, 1200 - 1);
+	mipi_dsi_dcs_set_page_address_multi(&dsi_ctx, 0, 1600 - 1);
+
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11);
 	mipi_dsi_msleep(&dsi_ctx, 122);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x29);
