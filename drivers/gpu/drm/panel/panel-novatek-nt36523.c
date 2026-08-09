@@ -61,6 +61,18 @@ module_param_named(jagar_production_sequence,
 MODULE_PARM_DESC(jagar_production_sequence,
 		 "Use the DC-1 production panel power and initialization sequence");
 
+/*
+ * The shipped FDT lets the jagar panel probe advance through several pieces of
+ * hardware ownership at once: inherited VDDI, the two bias regulators, and the
+ * reset GPIO. Keep the default at the already boot-proven boundary, then let a
+ * live console advance one resource group at a time. A failed stage can be
+ * recovered through the other A/B slot without conflating those operations.
+ */
+static unsigned int sharp_nt36523n_probe_stage;
+module_param_named(jagar_probe_stage, sharp_nt36523n_probe_stage, uint, 0644);
+MODULE_PARM_DESC(jagar_probe_stage,
+		 "DC-1 panel probe stage: 0=hold, 1=VDDI, 2=bias, 3=reset/attach");
+
 static inline struct panel_info *to_panel_info(struct drm_panel *panel)
 {
 	return container_of(panel, struct panel_info, panel);
@@ -1555,6 +1567,11 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 	if (!pinfo->desc)
 		return -ENODEV;
 
+	if (pinfo->desc->has_jagar_power_sequence &&
+	    sharp_nt36523n_probe_stage < 1)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "jagar panel probe held before VDDI\n");
+
 	vddio_supply = pinfo->desc->has_jagar_power_sequence ? "vddi" : "vddio";
 	pinfo->vddio = devm_regulator_get(dev, vddio_supply);
 	if (pinfo->desc->has_jagar_power_sequence &&
@@ -1573,6 +1590,11 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 				     "failed to get panel I/O regulator\n");
 	}
 
+	if (pinfo->desc->has_jagar_power_sequence &&
+	    sharp_nt36523n_probe_stage < 2)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "jagar panel probe held before bias regulators\n");
+
 	if (pinfo->desc->has_jagar_power_sequence) {
 		pinfo->bias_supplies[0].supply = "vpos";
 		pinfo->bias_supplies[1].supply = "vneg";
@@ -1583,6 +1605,11 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 			return dev_err_probe(dev, ret,
 					     "failed to get panel bias supplies\n");
 	}
+
+	if (pinfo->desc->has_jagar_power_sequence &&
+	    sharp_nt36523n_probe_stage < 3)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "jagar panel probe held before reset GPIO\n");
 
 	reset_flags = GPIOD_OUT_HIGH;
 	pinfo->reset_gpio = devm_gpiod_get(dev, "reset", reset_flags);
