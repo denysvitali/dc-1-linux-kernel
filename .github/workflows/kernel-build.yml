@@ -167,6 +167,10 @@ jobs:
               fail=1
             fi
           done
+          if grep -q '^CONFIG_RTC_SYSTOHC=y' .config; then
+            echo "::error::CONFIG_RTC_SYSTOHC must stay disabled for the first RTC milestone"
+            fail=1
+          fi
           exit $fail
 
       # HOSTCC is clang too, NOT gcc: LLVM=-19 switches the host toolchain to
