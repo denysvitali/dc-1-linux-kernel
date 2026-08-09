@@ -124,7 +124,7 @@ module_param_named(jagar_refresh, sharp_nt36523n_refresh, uint, 0644);
 MODULE_PARM_DESC(jagar_refresh,
 		 "DC-1 panel refresh rate in Hz (0 = use the mode table)");
 
-static unsigned long sharp_nt36523n_hs_rate = 850000000;
+static unsigned long sharp_nt36523n_hs_rate;
 module_param_named(jagar_hs_rate, sharp_nt36523n_hs_rate, ulong, 0644);
 MODULE_PARM_DESC(jagar_hs_rate,
 		 "DC-1 peripheral HS data rate in Hz (0 = derive from the mode)");
@@ -1289,18 +1289,6 @@ static int sharp_nt36523n_production_init_sequence(struct panel_info *pinfo)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
 
-	/*
-	 * Establish the full-panel column/page window before sleep-out. LK sets
-	 * this explicitly -- its LCM driver logs "New Display Area : Left = %d,
-	 * Top = %d, Right = %d, Bottom = %d" -- and we were leaving it at
-	 * whatever the panel powers up with. A window that disagrees with the
-	 * 1200-pixel line the host actually sends makes the panel lay each line
-	 * down over the wrong span, which shows up as a stable vertical comb
-	 * that persists even for a uniform frame.
-	 */
-	mipi_dsi_dcs_set_column_address_multi(&dsi_ctx, 0, 1200 - 1);
-	mipi_dsi_dcs_set_page_address_multi(&dsi_ctx, 0, 1600 - 1);
-
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11);
 	mipi_dsi_msleep(&dsi_ctx, 122);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x29);
@@ -1350,7 +1338,8 @@ static const struct panel_desc sharp_nt36523n_desc = {
 	.height_mm = 213,
 	.bpc = 8,
 	.lanes = 4,
-	.hs_rate = 850000000,
+	/* jagar takes its rate from jagar_hs_rate; this field is unused for it. */
+	.hs_rate = 0,
 	.format = MIPI_DSI_FMT_RGB888,
 	/*
 	 * The shipped panel module writes 0xe05 to dsi->mode_flags in
