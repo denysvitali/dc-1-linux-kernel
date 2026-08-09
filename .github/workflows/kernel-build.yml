@@ -150,7 +150,8 @@ jobs:
                      CONFIG_BINFMT_SCRIPT \
                      CONFIG_EPOLL CONFIG_SIGNALFD CONFIG_TIMERFD CONFIG_EVENTFD \
                      CONFIG_FILE_LOCKING CONFIG_ADVISE_SYSCALLS \
-                     CONFIG_USB_CONFIGFS_ECM CONFIG_CHARGER_MT6375_READONLY; do
+                     CONFIG_USB_CONFIGFS_ECM CONFIG_CHARGER_MT6375_READONLY \
+                     CONFIG_BACKLIGHT_RT4539; do
             if ! grep -q "^${sym}=y" .config; then
               echo "::error::${sym} is not =y in the generated .config"
               fail=1
