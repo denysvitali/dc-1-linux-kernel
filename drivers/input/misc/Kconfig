@@ -369,6 +369,17 @@ config INPUT_GPIO_VIBRA
 	  To compile this driver as a module, choose M here: the module will be
 	  called gpio-vibra.
 
+config INPUT_HALL_SWITCH
+	tristate "Legacy hall-switch lid sensor"
+	depends on OF_GPIO
+	help
+	  Say Y here to support legacy hall-switch device-tree nodes which
+	  describe an active GPIO through the linux,gpio-int property. The
+	  driver reports the state as EV_SW/SW_LID.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called hall-switch.
+
 config INPUT_COBALT_BTNS
 	tristate "Cobalt button interface"
 	depends on MIPS_COBALT
