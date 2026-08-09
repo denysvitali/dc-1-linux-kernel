@@ -33,6 +33,7 @@ struct panel_info {
 	struct backlight_device *backlight;
 	struct regulator *vddio;
 	struct regulator_bulk_data bias_supplies[2];
+	bool jagar_bias_enabled;
 };
 
 struct panel_desc {
@@ -53,6 +54,12 @@ struct panel_desc {
 	bool has_dcs_backlight;
 	bool has_jagar_power_sequence;
 };
+
+static bool sharp_nt36523n_production_sequence;
+module_param_named(jagar_production_sequence,
+		   sharp_nt36523n_production_sequence, bool, 0644);
+MODULE_PARM_DESC(jagar_production_sequence,
+		 "Use the DC-1 production panel power and initialization sequence");
 
 static inline struct panel_info *to_panel_info(struct drm_panel *panel)
 {
@@ -1219,7 +1226,8 @@ static int sharp_nt36523n_init_sequence(struct panel_info *pinfo)
 {
 	u32 sample_id1;
 
-	if (!of_property_read_u32(pinfo->panel.dev->of_node, "sample-id1",
+	if (sharp_nt36523n_production_sequence &&
+	    !of_property_read_u32(pinfo->panel.dev->of_node, "sample-id1",
 				  &sample_id1) &&
 	    (sample_id1 & 0xf0) == 0x30)
 		return sharp_nt36523n_production_init_sequence(pinfo);
@@ -1271,6 +1279,16 @@ static int sharp_nt36523n_power_on(struct panel_info *pinfo)
 	struct device *dev = pinfo->panel.dev;
 	int ret;
 
+	/*
+	 * Preserve the already boot-proven pre-TS path until userspace opts into
+	 * the production sequence. This lets the DC-1 reach its serial and USB
+	 * consoles before the first experiment that takes ownership of VPOS/VNEG.
+	 */
+	if (!sharp_nt36523n_production_sequence) {
+		nt36523_reset(pinfo);
+		return 0;
+	}
+
 	if (pinfo->vddio) {
 		ret = regulator_enable(pinfo->vddio);
 		if (ret) {
@@ -1310,6 +1328,7 @@ static int sharp_nt36523n_power_on(struct panel_info *pinfo)
 	 * from reaching its USB console.
 	 */
 	nt36523_reset(pinfo);
+	pinfo->jagar_bias_enabled = true;
 
 	return 0;
 
@@ -1324,11 +1343,17 @@ err_disable_vddi:
 
 static void sharp_nt36523n_power_off(struct panel_info *pinfo)
 {
+	if (!pinfo->jagar_bias_enabled) {
+		gpiod_set_value_cansleep(pinfo->reset_gpio, 1);
+		return;
+	}
+
 	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
 	regulator_disable(pinfo->bias_supplies[1].consumer);
 	regulator_disable(pinfo->bias_supplies[0].consumer);
 	if (pinfo->vddio)
 		regulator_disable(pinfo->vddio);
+	pinfo->jagar_bias_enabled = false;
 }
 
 static int nt36523_prepare(struct drm_panel *panel)
