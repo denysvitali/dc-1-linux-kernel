@@ -85,6 +85,17 @@ MODULE_PARM_DESC(jagar_production_sequence,
  * rate can be tried without a flash cycle: write it before advancing
  * jagar_probe_stage.
  */
+/*
+ * 0 = use the refresh rate in the mode table (60 Hz). Set to 120 to run the
+ * factory rate. Combine with jagar_hs_rate=0 so the link rate is derived from
+ * whatever mode is selected instead of being forced to a value belonging to a
+ * different one.
+ */
+static unsigned int sharp_nt36523n_refresh;
+module_param_named(jagar_refresh, sharp_nt36523n_refresh, uint, 0644);
+MODULE_PARM_DESC(jagar_refresh,
+		 "DC-1 panel refresh rate in Hz (0 = use the mode table)");
+
 static unsigned long sharp_nt36523n_hs_rate = 850000000;
 module_param_named(jagar_hs_rate, sharp_nt36523n_hs_rate, ulong, 0644);
 MODULE_PARM_DESC(jagar_hs_rate,
@@ -1511,6 +1522,25 @@ static int nt36523_get_modes(struct drm_panel *panel,
 			dev_err(panel->dev, "failed to add mode %ux%u@%u\n",
 				m->hdisplay, m->vdisplay, drm_mode_vrefresh(m));
 			return -ENOMEM;
+		}
+
+		/*
+		 * The DC-1 panel is a 120 Hz part ("sharp,nt36523n,vdo,120hz"
+		 * in the shipped FDT) but this table programs 60 Hz, and the
+		 * factory HS rate and porch byte counts belong to the 120 Hz
+		 * configuration. Everything else about the panel now matches
+		 * factory exactly -- init table, bias rails, packet timing --
+		 * so the refresh rate is the last unmatched parameter. Allow it
+		 * to be overridden at runtime rather than spending a flash
+		 * cycle per candidate.
+		 */
+		if (pinfo->desc->has_jagar_power_sequence &&
+		    sharp_nt36523n_refresh) {
+			mode->clock = DIV_ROUND_CLOSEST(mode->htotal *
+							mode->vtotal *
+							sharp_nt36523n_refresh,
+							1000);
+			drm_mode_set_crtcinfo(mode, 0);
 		}
 
 		mode->type = DRM_MODE_TYPE_DRIVER;
