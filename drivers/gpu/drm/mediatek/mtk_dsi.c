@@ -194,6 +194,7 @@ struct mtk_dsi_driver_data {
 	bool has_size_ctl;
 	bool cmdq_long_packet_ctl;
 	bool support_per_frame_lp;
+	bool use_mt6789_timings;
 	bool needs_cmd_mode_init;
 };
 
@@ -245,11 +246,86 @@ static void mtk_dsi_mask(struct mtk_dsi *dsi, u32 offset, u32 mask, u32 data)
 	writel((temp & ~mask) | (data & mask), dsi->regs + offset);
 }
 
+static void mtk_dsi_phy_timconfig_mt6789(struct mtk_dsi *dsi)
+{
+	u32 timcon0, timcon1, timcon2, timcon3;
+	u32 data_rate_mhz = dsi->data_rate / HZ_PER_MHZ;
+	u32 ui, cycle_time, hs_zero, clk_zero;
+	struct mtk_phy_timing *timing = &dsi->phy_timing;
+
+	if (!data_rate_mhz || data_rate_mhz > 8000) {
+		dev_err(dsi->dev, "invalid MT6789 DSI data rate %u Hz\n",
+			dsi->data_rate);
+		return;
+	}
+
+	/* Match the MT6789 vendor driver's integer-MHz calculations. */
+	ui = max(1000 / data_rate_mhz, 1U);
+	cycle_time = 8000 / data_rate_mhz;
+
+	timing->lpx = 75 / cycle_time + 1;
+	timing->da_hs_prepare = (64 + 5 * ui) / cycle_time + 1;
+	hs_zero = (200 + 10 * ui) / cycle_time;
+	timing->da_hs_zero = hs_zero > timing->da_hs_prepare ?
+			     hs_zero - timing->da_hs_prepare : hs_zero;
+	timing->da_hs_trail = max(9 * ui / cycle_time,
+				  (80 + 5 * ui) / cycle_time);
+
+	/* These use the pre-constraint LPX value in the vendor driver. */
+	timing->ta_get = 5 * timing->lpx;
+	timing->ta_sure = 3 * timing->lpx / 2;
+	timing->ta_go = 4 * timing->lpx;
+	timing->da_hs_exit = 125 / cycle_time + 1;
+
+	timing->clk_hs_prepare = 64 / cycle_time;
+	clk_zero = 350 / cycle_time;
+	timing->clk_hs_zero = clk_zero > timing->clk_hs_prepare ?
+			      clk_zero - timing->clk_hs_prepare : clk_zero;
+	timing->clk_hs_trail = 80 / cycle_time;
+	timing->clk_hs_exit = 125 / cycle_time + 1;
+	timing->clk_hs_post = (90 + 52 * ui) / cycle_time;
+
+	/* MT6789 takes the vendor default branch and applies N4/N5 limits. */
+	if (timing->lpx & 1)
+		timing->lpx++;
+	if (timing->da_hs_prepare & 1)
+		timing->da_hs_prepare++;
+	timing->da_hs_prepare = max(timing->da_hs_prepare, 6U);
+	if (!(timing->da_hs_exit & 1))
+		timing->da_hs_exit++;
+
+	timcon0 = FIELD_PREP(LPX, timing->lpx) |
+		  FIELD_PREP(HS_PREP, timing->da_hs_prepare) |
+		  FIELD_PREP(HS_ZERO, timing->da_hs_zero) |
+		  FIELD_PREP(HS_TRAIL, timing->da_hs_trail);
+	timcon1 = FIELD_PREP(TA_GO, timing->ta_go) |
+		  FIELD_PREP(TA_SURE, timing->ta_sure) |
+		  FIELD_PREP(TA_GET, timing->ta_get) |
+		  FIELD_PREP(DA_HS_EXIT, timing->da_hs_exit);
+	timcon2 = FIELD_PREP(CONT_DET, 3) |
+		  FIELD_PREP(DA_HS_SYNC, 1) |
+		  FIELD_PREP(CLK_ZERO, timing->clk_hs_zero) |
+		  FIELD_PREP(CLK_TRAIL, timing->clk_hs_trail);
+	timcon3 = FIELD_PREP(CLK_HS_PREP, timing->clk_hs_prepare) |
+		  FIELD_PREP(CLK_HS_POST, timing->clk_hs_post) |
+		  FIELD_PREP(CLK_HS_EXIT, timing->clk_hs_exit);
+
+	writel(timcon0, dsi->regs + DSI_PHY_TIMECON0);
+	writel(timcon1, dsi->regs + DSI_PHY_TIMECON1);
+	writel(timcon2, dsi->regs + DSI_PHY_TIMECON2);
+	writel(timcon3, dsi->regs + DSI_PHY_TIMECON3);
+}
+
 static void mtk_dsi_phy_timconfig(struct mtk_dsi *dsi)
 {
 	u32 timcon0, timcon1, timcon2, timcon3;
 	u32 data_rate_mhz = DIV_ROUND_UP(dsi->data_rate, HZ_PER_MHZ);
 	struct mtk_phy_timing *timing = &dsi->phy_timing;
+
+	if (dsi->driver_data->use_mt6789_timings) {
+		mtk_dsi_phy_timconfig_mt6789(dsi);
+		return;
+	}
 
 	timing->lpx = (60 * data_rate_mhz / (8 * 1000)) + 1;
 	timing->da_hs_prepare = (80 * data_rate_mhz + 4 * 1000) / 8000;
@@ -484,6 +560,11 @@ static void mtk_dsi_config_vdo_timing_per_frame_lp(struct mtk_dsi *dsi)
 			   horizontal_frontporch_byte) % dsi->lanes;
 	if (v_active_roundup)
 		horizontal_backporch_byte += dsi->lanes - v_active_roundup;
+	if (dsi->driver_data->use_mt6789_timings) {
+		horizontal_sync_active_byte = ALIGN(horizontal_sync_active_byte, 4);
+		horizontal_backporch_byte = ALIGN(horizontal_backporch_byte, 4);
+		horizontal_frontporch_byte = ALIGN(horizontal_frontporch_byte, 4);
+	}
 	hstx_cklp_wc_min = (DIV_ROUND_UP(cklp_wc_min_adjust, dsi->lanes) + da_hs_trail + 1)
 			   * dsi->lanes / 6 - 1;
 	hstx_cklp_wc_max = (DIV_ROUND_UP((cklp_wc_max_adjust + horizontal_backporch_byte +
@@ -1304,6 +1385,7 @@ static const struct mtk_dsi_driver_data mt6789_dsi_driver_data = {
 	.has_shadow_ctl = false,
 	.has_size_ctl = true,
 	.support_per_frame_lp = true,
+	.use_mt6789_timings = true,
 	.needs_cmd_mode_init = true,
 };
 
