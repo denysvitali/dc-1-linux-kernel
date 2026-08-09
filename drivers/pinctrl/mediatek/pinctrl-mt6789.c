@@ -917,11 +917,13 @@ static const struct mtk_pin_field_calc mt6789_pin_drv_range[] = {
 
 /*
  * MT6789 calls these fields DRV_EH downstream.  Mainline represents the same
- * raw enhanced-drive field as DRV_ADV.  GPIO144/145 are i2c7 SCL/SDA; without
- * this range the stock pin state fails on GPIO144 and never applies GPIO145's
- * pull/drive configuration.
+ * raw enhanced-drive field as DRV_ADV.  GPIO140/141 and GPIO144/145 are the
+ * SCL/SDA pairs for i2c5 and i2c7; without these ranges the stock pin states
+ * fail on the first pin and never apply the second pin's pull/drive settings.
  */
 static const struct mtk_pin_field_calc mt6789_pin_drv_adv_range[] = {
+	PIN_FIELD_BASE(140, 140, 4, 0x0080, 0x10, 6, 3),
+	PIN_FIELD_BASE(141, 141, 4, 0x0080, 0x10, 21, 3),
 	PIN_FIELD_BASE(144, 144, 4, 0x0080, 0x10, 12, 3),
 	PIN_FIELD_BASE(145, 145, 4, 0x0080, 0x10, 27, 3),
 };
