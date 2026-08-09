@@ -85,7 +85,7 @@ MODULE_PARM_DESC(jagar_production_sequence,
  * rate can be tried without a flash cycle: write it before advancing
  * jagar_probe_stage.
  */
-static unsigned long sharp_nt36523n_hs_rate = 850000000;
+static unsigned long sharp_nt36523n_hs_rate;
 module_param_named(jagar_hs_rate, sharp_nt36523n_hs_rate, ulong, 0644);
 MODULE_PARM_DESC(jagar_hs_rate,
 		 "DC-1 peripheral HS data rate in Hz (0 = derive from the mode)");
@@ -1225,8 +1225,9 @@ static int sharp_nt36523n_pre_ts_init_sequence(struct panel_info *pinfo)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0x03);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x89, 0xa8, 0x00, 0x14, 0xd2, 0x00, 0x02, 0x45, 0x01, 0xec, 0x00, 0x08, 0x05, 0x7a, 0x04, 0x94);
+	/* no-DSC tail (init_pre_ts_60hz_no_dsc); this table carried the 3x DSC one. */
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x89, 0xa8, 0x00, 0x0c, 0xd2, 0x00, 0x02, 0x25, 0x01, 0x14, 0x00, 0x07, 0x09, 0x75, 0x08, 0x7a);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x92, 0x10, 0xf0);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xbb, 0x13);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11);
@@ -1251,16 +1252,26 @@ static int sharp_nt36523n_production_init_sequence(struct panel_info *pinfo)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
 
 	/*
-	 * Establish the full-panel column/page window before sleep-out. LK sets
-	 * this explicitly -- its LCM driver logs "New Display Area : Left = %d,
-	 * Top = %d, Right = %d, Bottom = %d" -- and we were leaving it at
-	 * whatever the panel powers up with. A window that disagrees with the
-	 * 1200-pixel line the host actually sends makes the panel lay each line
-	 * down over the wrong span, which shows up as a stable vertical comb
-	 * that persists even for a uniform frame.
+	 * Take the panel OUT of DSC.
+	 *
+	 * init_es3 -- the eight commands above, byte-for-byte what LK sends -- never
+	 * writes 0x90, so the panel keeps its MTP default. Every vendor mode for
+	 * MP-family samples is 120 Hz 3x DSC, so that default is DSC ON, and we then
+	 * transmit uncompressed RGB888: the panel latches 1200 bytes per line against
+	 * our 3600 and stretches the first third of each line to full width. That is
+	 * the stable full-screen comb, and it is why a saturated white frame still
+	 * looked clean (all-0xFF survives any decode).
+	 *
+	 * Values from init_pre_ts_60hz_no_dsc in the unstripped vendor module,
+	 * extracted/vendor_boot_a/vr/lib/modules/panel-sharp-nt36523n-vdo-120hz.ko.
+	 * 0x90 is latched at sleep-out, so this must precede 0x11.
 	 */
-	mipi_dsi_dcs_set_column_address_multi(&dsi_ctx, 0, 1200 - 1);
-	mipi_dsi_dcs_set_page_address_multi(&dsi_ctx, 0, 1600 - 1);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x89, 0xa8, 0x00, 0x0c, 0xd2,
+				     0x00, 0x02, 0x25, 0x01, 0x14, 0x00, 0x07, 0x09,
+				     0x75, 0x08, 0x7a);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x92, 0x10, 0xf0);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xbb, 0x13);
 
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11);
 	mipi_dsi_msleep(&dsi_ctx, 122);
