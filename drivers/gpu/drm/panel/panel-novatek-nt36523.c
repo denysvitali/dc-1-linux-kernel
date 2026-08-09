@@ -1293,11 +1293,16 @@ static int sharp_nt36523n_power_on(struct panel_info *pinfo)
 	if (ret)
 		goto err_disable_vddi;
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(pinfo->bias_supplies),
-				    pinfo->bias_supplies);
+	/* The shipped board sequence requires VPOS before VNEG. */
+	ret = regulator_enable(pinfo->bias_supplies[0].consumer);
 	if (ret)
 		goto err_disable_vddi;
 
+	ret = regulator_enable(pinfo->bias_supplies[1].consumer);
+	if (ret)
+		goto err_disable_vpos;
+
+	usleep_range(5000, 5100);
 	usleep_range(11000, 11055);
 
 	/* Exact raw reset pulse from the shipped production panel driver. */
@@ -1310,6 +1315,8 @@ static int sharp_nt36523n_power_on(struct panel_info *pinfo)
 
 	return 0;
 
+err_disable_vpos:
+	regulator_disable(pinfo->bias_supplies[0].consumer);
 err_disable_vddi:
 	regulator_disable(pinfo->vddio);
 	dev_err(dev, "failed to enable panel bias supplies: %d\n", ret);
@@ -1319,8 +1326,8 @@ err_disable_vddi:
 static void sharp_nt36523n_power_off(struct panel_info *pinfo)
 {
 	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
-	regulator_bulk_disable(ARRAY_SIZE(pinfo->bias_supplies),
-			       pinfo->bias_supplies);
+	regulator_disable(pinfo->bias_supplies[1].consumer);
+	regulator_disable(pinfo->bias_supplies[0].consumer);
 	regulator_disable(pinfo->vddio);
 }
 
