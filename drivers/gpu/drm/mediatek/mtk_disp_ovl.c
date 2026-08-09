@@ -174,8 +174,16 @@ static irqreturn_t mtk_disp_ovl_irq_handler(int irq, void *dev_id)
 	/* Clear frame completion interrupt */
 	writel(0x0, priv->regs + DISP_REG_OVL_INTSTA);
 
+	/*
+	 * The bootloader can leave the OVL scanning out and its interrupt
+	 * asserted, so this fires long before the DRM device is bound and a
+	 * vblank callback exists. We did acknowledge the source above, so
+	 * report the interrupt as handled: returning IRQ_NONE here lets the
+	 * spurious-interrupt detector disable the line permanently, and the
+	 * CRTC then never gets a vblank once it finally comes up.
+	 */
 	if (!priv->vblank_cb)
-		return IRQ_NONE;
+		return IRQ_HANDLED;
 
 	priv->vblank_cb(priv->vblank_cb_data);
 
