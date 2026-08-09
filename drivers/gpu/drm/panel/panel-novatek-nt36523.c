@@ -1260,6 +1260,7 @@ static const struct panel_desc sharp_nt36523n_desc = {
 	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
 		      MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM,
 	.init_sequence = sharp_nt36523n_init_sequence,
+	.has_jagar_power_sequence = true,
 };
 
 static void nt36523_reset(struct panel_info *pinfo)
