@@ -1271,9 +1271,6 @@ static int sharp_nt36523n_power_on(struct panel_info *pinfo)
 	struct device *dev = pinfo->panel.dev;
 	int ret;
 
-	/* Assert reset before enabling the panel supplies. */
-	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
-
 	if (pinfo->vddio) {
 		ret = regulator_enable(pinfo->vddio);
 		if (ret) {
@@ -1306,13 +1303,13 @@ static int sharp_nt36523n_power_on(struct panel_info *pinfo)
 	usleep_range(5000, 5100);
 	usleep_range(11000, 11055);
 
-	/* Exact raw reset pulse from the shipped production panel driver. */
-	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 1);
-	usleep_range(12, 13);
-	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
-	usleep_range(12, 13);
-	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 1);
-	msleep(92);
+	/*
+	 * Keep the reset cadence that already boots through the mainline DSI
+	 * handoff. The shipped microsecond pulse still needs an isolated hardware
+	 * test; applying it together with first-time bias ownership prevented Linux
+	 * from reaching its USB console.
+	 */
+	nt36523_reset(pinfo);
 
 	return 0;
 
@@ -1561,8 +1558,7 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 					     "failed to get panel bias supplies\n");
 	}
 
-	reset_flags = pinfo->desc->has_jagar_power_sequence ? GPIOD_OUT_LOW :
-							 GPIOD_OUT_HIGH;
+	reset_flags = GPIOD_OUT_HIGH;
 	pinfo->reset_gpio = devm_gpiod_get(dev, "reset", reset_flags);
 	if (IS_ERR(pinfo->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(pinfo->reset_gpio), "failed to get reset gpio\n");
