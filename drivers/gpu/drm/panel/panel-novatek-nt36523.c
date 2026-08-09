@@ -114,10 +114,22 @@ MODULE_PARM_DESC(jagar_production_sequence,
  *   1 = force the production (DSC-mode) table
  *   2 = force the pre-TS (no-DSC) table, to pair with the 60 Hz uncompressed mode
  */
+/*
+ * Send the Novatek DSC-disable tail (0x90 0x00 + the no-DSC PPS/slice values) in the
+ * production init. Default on: the panel's MTP default for MP-family samples is DSC ON,
+ * and we transmit uncompressed RGB888. Set to N to compare against the old behaviour
+ * without a reflash.
+ */
+static bool sharp_nt36523n_dsc_off = true;
+module_param_named(jagar_dsc_off, sharp_nt36523n_dsc_off, bool, 0644);
+MODULE_PARM_DESC(jagar_dsc_off,
+		 "DC-1: write 0x90=0x00 to take the panel out of DSC (default Y)");
+
 static unsigned int sharp_nt36523n_init_table;
 module_param_named(jagar_init_table, sharp_nt36523n_init_table, uint, 0644);
 MODULE_PARM_DESC(jagar_init_table,
-		 "DC-1 panel init table: 0=by sample id, 1=production/DSC, 2=pre-TS/no-DSC");
+		 "DC-1 panel init table: 0=by sample id, 1=production(init_es3), 2=pre-TS (WARNING: this table is init_pre_ts_120hz_3x_dsc and "
+		 "ENABLES DSC via 0x90 0x03)");
 
 static unsigned int sharp_nt36523n_refresh;
 module_param_named(jagar_refresh, sharp_nt36523n_refresh, uint, 0644);
@@ -1288,6 +1300,36 @@ static int sharp_nt36523n_production_init_sequence(struct panel_info *pinfo)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
+
+	/*
+	 * Take the panel OUT of DSC.
+	 *
+	 * The vendor module (extracted/vendor_boot_a/vr/lib/modules/
+	 * panel-sharp-nt36523n-vdo-120hz.ko is unstripped and carries every init table
+	 * in .data) ships two pre-TS inits differing only in this tail:
+	 *
+	 *   no DSC: 90 00 | 91 89 a8 00 0c d2 00 02 25 01 14 00 07 09 75 08 7a | 92 10 f0
+	 *   3x DSC: 90 03 | 91 89 a8 00 14 d2 00 02 45 01 ec 00 08 05 7a 04 94 | 92 10 f0
+	 *
+	 * 0x90/0x91/0x92 in CMD1 are Novatek's DSC enable / PPS / slice config. The
+	 * production table (init_es3) never writes 0x90 at all, so the panel keeps its
+	 * MTP default -- and every vendor mode for those samples is 120 Hz 3x DSC, so
+	 * that default is DSC ON. We then send uncompressed RGB888: the panel latches
+	 * 1200 bytes per line while we transmit 3600, and the decoder expands the first
+	 * third of each line back to full width. That is the stable full-screen comb,
+	 * and it is why a saturated white frame still looks clean (all-0xFF survives
+	 * any decode).
+	 *
+	 * 0x90 is latched at sleep-out, so this must precede 0x11.
+	 */
+	if (sharp_nt36523n_dsc_off) {
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0x00);
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x89, 0xa8, 0x00, 0x0c,
+					     0xd2, 0x00, 0x02, 0x25, 0x01, 0x14, 0x00,
+					     0x07, 0x09, 0x75, 0x08, 0x7a);
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x92, 0x10, 0xf0);
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xbb, 0x13);
+	}
 
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11);
 	mipi_dsi_msleep(&dsi_ctx, 122);
