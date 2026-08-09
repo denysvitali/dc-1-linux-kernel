@@ -1273,15 +1273,15 @@ static const struct panel_desc sharp_nt36523n_desc = {
 	.format = MIPI_DSI_FMT_RGB888,
 	/*
 	 * The shipped panel module writes 0xe05 to dsi->mode_flags in
-	 * sharp_probe(): sync-pulse video without EoT packets, a non-continuous
-	 * clock, and low-power command transfers. The vendor tree's misleading
-	 * MIPI_DSI_MODE_EOT_PACKET name was later renamed NO_EOT_PACKET without
-	 * changing bit 9. Burst mode produces stable but corrupt raster data on
-	 * the DC-1 panel.
+	 * sharp_probe(), but the shipped MT6789 host's video-mode RX/TX setup
+	 * ignores bit 9 (called MIPI_DSI_MODE_EOT_PACKET in that tree).  Setting
+	 * the modern NO_EOT_PACKET spelling would therefore change the actual
+	 * wire framing by setting DIS_EOT.  Reproduce the factory host behavior:
+	 * sync-pulse video with EoT packets, a non-continuous clock, and low-power
+	 * command transfers.
 	 */
 	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
-		      MIPI_DSI_MODE_NO_EOT_PACKET | MIPI_DSI_CLOCK_NON_CONTINUOUS |
-		      MIPI_DSI_MODE_LPM,
+		      MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM,
 	.init_sequence = sharp_nt36523n_init_sequence,
 	.has_jagar_power_sequence = true,
 };
