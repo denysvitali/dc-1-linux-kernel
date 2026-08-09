@@ -91,6 +91,34 @@ MODULE_PARM_DESC(jagar_production_sequence,
  * whatever mode is selected instead of being forced to a value belonging to a
  * different one.
  */
+/*
+ * Which initialisation table to push, INDEPENDENT of the power sequence.
+ *
+ * These were conflated: jagar_production_sequence=N also skips VDDI/VPOS/VNEG entirely
+ * (see below), so trying the pre-TS table that way just produced an unpowered, blank
+ * panel and said nothing about the table itself.
+ *
+ * It matters because of what the vendor driver does. In
+ * panel-sharp-nt36523n-vdo-120hz.c the sample ID selects the table, and EVERY branch
+ * except SAMPLE_PRE_TS-without-DSC pushes a "120hz_3x_dsc" table. Our unit
+ * (sample-id1 0x30, id2 0x22, id3 0x01) lands in the ES/Pre-ES family, so the eight
+ * commands LK sends -- which sharp_nt36523n_production_init_sequence() reproduces
+ * byte-for-byte -- configure the panel for 3x DSC. We then feed it uncompressed
+ * RGB888, which is consistent with the observed symptom: saturated white passes
+ * cleanly, every driven pixel is shredded.
+ *
+ * The vendor also ships a genuine 60 Hz uncompressed pairing:
+ * display_mode_60hz_no_dsc + init_pre_ts_60hz_no_dsc. Our pre-TS table is that one.
+ *
+ *   0 = pick by sample id (previous behaviour)
+ *   1 = force the production (DSC-mode) table
+ *   2 = force the pre-TS (no-DSC) table, to pair with the 60 Hz uncompressed mode
+ */
+static unsigned int sharp_nt36523n_init_table;
+module_param_named(jagar_init_table, sharp_nt36523n_init_table, uint, 0644);
+MODULE_PARM_DESC(jagar_init_table,
+		 "DC-1 panel init table: 0=by sample id, 1=production/DSC, 2=pre-TS/no-DSC");
+
 static unsigned int sharp_nt36523n_refresh;
 module_param_named(jagar_refresh, sharp_nt36523n_refresh, uint, 0644);
 MODULE_PARM_DESC(jagar_refresh,
@@ -1283,6 +1311,14 @@ static int sharp_nt36523n_production_init_sequence(struct panel_info *pinfo)
 static int sharp_nt36523n_init_sequence(struct panel_info *pinfo)
 {
 	u32 sample_id1;
+
+	/* Explicit override wins, so the table can be chosen without also
+	 * changing whether the power sequence runs.
+	 */
+	if (sharp_nt36523n_init_table == 1)
+		return sharp_nt36523n_production_init_sequence(pinfo);
+	if (sharp_nt36523n_init_table == 2)
+		return sharp_nt36523n_pre_ts_init_sequence(pinfo);
 
 	if (sharp_nt36523n_production_sequence &&
 	    !of_property_read_u32(pinfo->panel.dev->of_node, "sample-id1",
