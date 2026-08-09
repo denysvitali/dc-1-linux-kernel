@@ -42,6 +42,7 @@ struct panel_desc {
 
 	unsigned int bpc;
 	unsigned int lanes;
+	unsigned long hs_rate;
 	unsigned long mode_flags;
 	enum mipi_dsi_pixel_format format;
 
@@ -1268,6 +1269,7 @@ static const struct panel_desc sharp_nt36523n_desc = {
 	.height_mm = 213,
 	.bpc = 8,
 	.lanes = 4,
+	.hs_rate = 850000000,
 	.format = MIPI_DSI_FMT_RGB888,
 	/*
 	 * The shipped panel module writes 0xe05 to dsi->mode_flags in
@@ -1678,6 +1680,7 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 
 	for (i = 0; i < DSI_NUM_MIN + pinfo->desc->is_dual_dsi; i++) {
 		pinfo->dsi[i]->lanes = pinfo->desc->lanes;
+		pinfo->dsi[i]->hs_rate = pinfo->desc->hs_rate;
 		pinfo->dsi[i]->format = pinfo->desc->format;
 		pinfo->dsi[i]->mode_flags = pinfo->desc->mode_flags;
 
