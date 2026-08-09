@@ -32,6 +32,7 @@ struct panel_info {
 	struct gpio_desc *reset_gpio;
 	struct backlight_device *backlight;
 	struct regulator *vddio;
+	struct regulator_bulk_data bias_supplies[2];
 };
 
 struct panel_desc {
@@ -50,6 +51,7 @@ struct panel_desc {
 
 	bool is_dual_dsi;
 	bool has_dcs_backlight;
+	bool has_jagar_power_sequence;
 };
 
 static inline struct panel_info *to_panel_info(struct drm_panel *panel)
@@ -986,13 +988,15 @@ static const struct panel_desc j606f_boe_desc = {
  * Timings and the init sequence were recovered from the unstripped vendor
  * module panel-sharp-nt36523n-vdo-120hz.ko, NOT guessed:
  *   - drm_display_mode at .rodata+0xcb0 (display_mode_60hz_no_dsc)
- *   - init table at .data+0x183fd4, 190 entries of
+ *   - production init table at .data+0x182834, selected by the shipped
+ *     sample-id1 value 0x30 / lcm_config 0x7ff802
+ *   - pre-production init table at .data+0x183fd4, 190 entries of
  *     { u32 cmd; u32 count; u8 data[64]; } with stride 0x48, as decoded from
  *     the module's push_table() helper. Markers 0xFFFC/0xFFFB are ms/us delays.
  * The 60Hz non-DSC mode is used deliberately: the 120Hz mode needs DSC, which
  * is not wired up here yet.
  */
-static int sharp_nt36523n_init_sequence(struct panel_info *pinfo)
+static int sharp_nt36523n_pre_ts_init_sequence(struct panel_info *pinfo)
 {
 	struct mipi_dsi_device *dsi = pinfo->dsi[0];
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
@@ -1191,6 +1195,38 @@ static int sharp_nt36523n_init_sequence(struct panel_info *pinfo)
 	return dsi_ctx.accum_err;
 }
 
+static int sharp_nt36523n_production_init_sequence(struct panel_info *pinfo)
+{
+	struct mipi_dsi_device *dsi = pinfo->dsi[0];
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
+
+	/* lcm_config 0x7ff802 / sample-id1 0x30 in the shipped DC-1. */
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x20);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x18, 0x04);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x19, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11);
+	mipi_dsi_msleep(&dsi_ctx, 122);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x29);
+
+	return dsi_ctx.accum_err;
+}
+
+static int sharp_nt36523n_init_sequence(struct panel_info *pinfo)
+{
+	u32 sample_id1;
+
+	if (!of_property_read_u32(pinfo->panel.dev->of_node, "sample-id1",
+				  &sample_id1) &&
+	    (sample_id1 & 0xf0) == 0x30)
+		return sharp_nt36523n_production_init_sequence(pinfo);
+
+	return sharp_nt36523n_pre_ts_init_sequence(pinfo);
+}
+
 static const struct drm_display_mode sharp_nt36523n_modes[] = {
 	{
 		.clock = 128746,
@@ -1216,6 +1252,7 @@ static const struct panel_desc sharp_nt36523n_desc = {
 	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
 		      MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM,
 	.init_sequence = sharp_nt36523n_init_sequence,
+	.has_jagar_power_sequence = true,
 };
 
 static void nt36523_reset(struct panel_info *pinfo)
@@ -1230,22 +1267,89 @@ static void nt36523_reset(struct panel_info *pinfo)
 	usleep_range(12000, 13000);
 }
 
+static int sharp_nt36523n_power_on(struct panel_info *pinfo)
+{
+	struct device *dev = pinfo->panel.dev;
+	int ret;
+
+	/* Assert reset before enabling the panel supplies. */
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
+
+	ret = regulator_enable(pinfo->vddio);
+	if (ret) {
+		dev_err(dev, "failed to enable vddi regulator: %d\n", ret);
+		return ret;
+	}
+
+	usleep_range(2500, 2600);
+
+	ret = regulator_set_voltage(pinfo->bias_supplies[0].consumer,
+				    5400000, 5400000);
+	if (ret)
+		goto err_disable_vddi;
+
+	ret = regulator_set_voltage(pinfo->bias_supplies[1].consumer,
+				    5400000, 5400000);
+	if (ret)
+		goto err_disable_vddi;
+
+	ret = regulator_bulk_enable(ARRAY_SIZE(pinfo->bias_supplies),
+				    pinfo->bias_supplies);
+	if (ret)
+		goto err_disable_vddi;
+
+	usleep_range(11000, 11055);
+
+	/* Exact raw reset pulse from the shipped production panel driver. */
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 1);
+	usleep_range(12, 13);
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
+	usleep_range(12, 13);
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 1);
+	msleep(92);
+
+	return 0;
+
+err_disable_vddi:
+	regulator_disable(pinfo->vddio);
+	dev_err(dev, "failed to enable panel bias supplies: %d\n", ret);
+	return ret;
+}
+
+static void sharp_nt36523n_power_off(struct panel_info *pinfo)
+{
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
+	regulator_bulk_disable(ARRAY_SIZE(pinfo->bias_supplies),
+			       pinfo->bias_supplies);
+	regulator_disable(pinfo->vddio);
+}
+
 static int nt36523_prepare(struct drm_panel *panel)
 {
 	struct panel_info *pinfo = to_panel_info(panel);
 	int ret;
 
-	ret = regulator_enable(pinfo->vddio);
-	if (ret) {
-		dev_err(panel->dev, "failed to enable vddio regulator: %d\n", ret);
-		return ret;
-	}
+	if (pinfo->desc->has_jagar_power_sequence) {
+		ret = sharp_nt36523n_power_on(pinfo);
+		if (ret)
+			return ret;
+	} else {
+		ret = regulator_enable(pinfo->vddio);
+		if (ret) {
+			dev_err(panel->dev,
+				"failed to enable vddio regulator: %d\n", ret);
+			return ret;
+		}
 
-	nt36523_reset(pinfo);
+		nt36523_reset(pinfo);
+	}
 
 	ret = pinfo->desc->init_sequence(pinfo);
 	if (ret < 0) {
-		regulator_disable(pinfo->vddio);
+		if (pinfo->desc->has_jagar_power_sequence)
+			sharp_nt36523n_power_off(pinfo);
+		else
+			regulator_disable(pinfo->vddio);
 		dev_err(panel->dev, "failed to initialize panel: %d\n", ret);
 		return ret;
 	}
@@ -1278,6 +1382,11 @@ static int nt36523_disable(struct drm_panel *panel)
 static int nt36523_unprepare(struct drm_panel *panel)
 {
 	struct panel_info *pinfo = to_panel_info(panel);
+
+	if (pinfo->desc->has_jagar_power_sequence) {
+		sharp_nt36523n_power_off(pinfo);
+		return 0;
+	}
 
 	gpiod_set_value_cansleep(pinfo->reset_gpio, 1);
 	regulator_disable(pinfo->vddio);
@@ -1399,6 +1508,8 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 	struct mipi_dsi_host *dsi1_host;
 	struct panel_info *pinfo;
 	const struct mipi_dsi_device_info *info;
+	const char *vddio_supply;
+	enum gpiod_flags reset_flags;
 	int i, ret;
 
 	pinfo = devm_drm_panel_alloc(dev, struct panel_info, panel,
@@ -1407,17 +1518,32 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 	if (IS_ERR(pinfo))
 		return PTR_ERR(pinfo);
 
-	pinfo->vddio = devm_regulator_get(dev, "vddio");
-	if (IS_ERR(pinfo->vddio))
-		return dev_err_probe(dev, PTR_ERR(pinfo->vddio), "failed to get vddio regulator\n");
-
-	pinfo->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
-	if (IS_ERR(pinfo->reset_gpio))
-		return dev_err_probe(dev, PTR_ERR(pinfo->reset_gpio), "failed to get reset gpio\n");
-
 	pinfo->desc = of_device_get_match_data(dev);
 	if (!pinfo->desc)
 		return -ENODEV;
+
+	vddio_supply = pinfo->desc->has_jagar_power_sequence ? "vddi" : "vddio";
+	pinfo->vddio = devm_regulator_get(dev, vddio_supply);
+	if (IS_ERR(pinfo->vddio))
+		return dev_err_probe(dev, PTR_ERR(pinfo->vddio),
+				     "failed to get panel I/O regulator\n");
+
+	if (pinfo->desc->has_jagar_power_sequence) {
+		pinfo->bias_supplies[0].supply = "vpos";
+		pinfo->bias_supplies[1].supply = "vneg";
+		ret = devm_regulator_bulk_get(dev,
+					      ARRAY_SIZE(pinfo->bias_supplies),
+					      pinfo->bias_supplies);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to get panel bias supplies\n");
+	}
+
+	reset_flags = pinfo->desc->has_jagar_power_sequence ? GPIOD_OUT_LOW :
+							 GPIOD_OUT_HIGH;
+	pinfo->reset_gpio = devm_gpiod_get(dev, "reset", reset_flags);
+	if (IS_ERR(pinfo->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(pinfo->reset_gpio), "failed to get reset gpio\n");
 
 	/* If the panel is dual dsi, register DSI1 */
 	if (pinfo->desc->is_dual_dsi) {

@@ -17,6 +17,7 @@
 #include <linux/of.h>
 #include <linux/pm_domain.h>
 
+#include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/memory/mtk-memory-port.h>
 #include <dt-bindings/power/mediatek,mt6789-power.h>
 
@@ -43,6 +44,55 @@ static struct property mt6789_ovl_iommus = {
 	.value = mt6789_ovl_iommus_cells,
 };
 
+static __be32 mt6789_touch_reset_cells[3];
+static struct property mt6789_touch_reset_gpios = {
+	.name = "reset-gpios",
+	.length = sizeof(mt6789_touch_reset_cells),
+	.value = mt6789_touch_reset_cells,
+};
+
+static int __init mt6789_legacy_touch_fixup(void)
+{
+	const __be32 *legacy_cells;
+	struct device_node *touch_node;
+	int length;
+	int ret = 0;
+
+	touch_node = of_find_compatible_node(NULL, NULL, "tchip,ilitek");
+	if (!touch_node || of_property_present(touch_node, "reset-gpios"))
+		goto out_put_node;
+
+	legacy_cells = of_get_property(touch_node, "ilitek,reset-gpio", &length);
+	if (!legacy_cells)
+		goto out_put_node;
+
+	/*
+	 * The shipped node uses a singular vendor property with raw GPIO flags.
+	 * Its driver pulses GPIO40 high-low-high, proving that reset is electrically
+	 * active-low even though the legacy flags cell is zero.  Publish the same
+	 * line through the generic descriptor binding before device population.
+	 */
+	if (length != sizeof(mt6789_touch_reset_cells) ||
+	    legacy_cells[2] != cpu_to_be32(GPIO_ACTIVE_HIGH)) {
+		pr_warn("MT6789: refusing malformed legacy Ilitek reset GPIO\n");
+		goto out_put_node;
+	}
+
+	memcpy(mt6789_touch_reset_cells, legacy_cells,
+	       sizeof(mt6789_touch_reset_cells));
+	mt6789_touch_reset_cells[2] = cpu_to_be32(GPIO_ACTIVE_LOW);
+
+	ret = of_add_property(touch_node, &mt6789_touch_reset_gpios);
+	if (ret)
+		pr_warn("MT6789: failed to add Ilitek reset GPIO: %d\n", ret);
+	else
+		pr_info("MT6789: translated legacy Ilitek reset GPIO binding\n");
+
+out_put_node:
+	of_node_put(touch_node);
+	return ret;
+}
+
 static int __init mt6789_legacy_display_iommu_fixup(void)
 {
 	struct property *mmsys_iommus;
@@ -67,6 +117,8 @@ static int __init mt6789_legacy_display_iommu_fixup(void)
 	 */
 	if (!of_machine_is_compatible("mediatek,MT6789"))
 		return 0;
+
+	mt6789_legacy_touch_fixup();
 
 	iommu_node = of_find_compatible_node(NULL, NULL,
 					     "mediatek,mt6789-disp-iommu");

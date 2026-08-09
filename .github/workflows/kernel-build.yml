@@ -146,10 +146,16 @@ jobs:
           # ADVISE_SYSCALLS: madvise/fadvise ENOSYS breaks userspace equally opaquely.
           # BINFMT_SCRIPT: DHCP and normal Alpine hooks are shebang scripts;
           # without it udhcpc obtains a lease but silently fails to apply it.
+          # SHMEM/MEMFD_CREATE: Wayland clients abort when creating their shared
+          # pixel buffers; foot reports "Function not implemented".
+          # INPUT_EVDEV/TOUCHSCREEN_ILITEK: libinput otherwise sees no DC-1 touch
+          # device even if the controller and IRQ both probe successfully.
           for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD \
                      CONFIG_BINFMT_SCRIPT \
                      CONFIG_EPOLL CONFIG_SIGNALFD CONFIG_TIMERFD CONFIG_EVENTFD \
+                     CONFIG_SHMEM CONFIG_MEMFD_CREATE \
                      CONFIG_FILE_LOCKING CONFIG_ADVISE_SYSCALLS \
+                     CONFIG_INPUT_EVDEV CONFIG_TOUCHSCREEN_ILITEK \
                      CONFIG_USB_CONFIGFS_ECM CONFIG_CHARGER_MT6375_READONLY \
                      CONFIG_BACKLIGHT_RT4539; do
             if ! grep -q "^${sym}=y" .config; then
