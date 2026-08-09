@@ -75,6 +75,21 @@ MODULE_PARM_DESC(jagar_production_sequence,
  * to the other slot. Keep the default at the boot-proven hold and advance it at
  * runtime (device/userspace/sway-test/panel-up.sh).
  */
+/*
+ * The 850 MHz peripheral HS rate is the factory value, but the factory runs
+ * this panel at 120 Hz while sharp_nt36523n_modes programs 60 Hz. 60 Hz needs
+ * 128746 kHz * 24 bpp / 4 lanes = 772.5 Mbps/lane, so forcing 850 makes the
+ * link and the packet timing disagree -- a candidate for the stable vertical
+ * comb the panel shows for a uniform frame. 0 means "derive from the mode",
+ * which is what mtk_dsi does when hs_rate is unset. Settable at runtime so a
+ * rate can be tried without a flash cycle: write it before advancing
+ * jagar_probe_stage.
+ */
+static unsigned long sharp_nt36523n_hs_rate = 850000000;
+module_param_named(jagar_hs_rate, sharp_nt36523n_hs_rate, ulong, 0644);
+MODULE_PARM_DESC(jagar_hs_rate,
+		 "DC-1 peripheral HS data rate in Hz (0 = derive from the mode)");
+
 static unsigned int sharp_nt36523n_probe_stage;
 module_param_named(jagar_probe_stage, sharp_nt36523n_probe_stage, uint, 0644);
 MODULE_PARM_DESC(jagar_probe_stage,
@@ -1699,7 +1714,9 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 
 	for (i = 0; i < DSI_NUM_MIN + pinfo->desc->is_dual_dsi; i++) {
 		pinfo->dsi[i]->lanes = pinfo->desc->lanes;
-		pinfo->dsi[i]->hs_rate = pinfo->desc->hs_rate;
+		pinfo->dsi[i]->hs_rate = pinfo->desc->has_jagar_power_sequence
+					 ? sharp_nt36523n_hs_rate
+					 : pinfo->desc->hs_rate;
 		pinfo->dsi[i]->format = pinfo->desc->format;
 		pinfo->dsi[i]->mode_flags = pinfo->desc->mode_flags;
 
