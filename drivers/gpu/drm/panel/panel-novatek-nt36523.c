@@ -1252,7 +1252,6 @@ static const struct panel_desc sharp_nt36523n_desc = {
 	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
 		      MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM,
 	.init_sequence = sharp_nt36523n_init_sequence,
-	.has_jagar_power_sequence = true,
 };
 
 static void nt36523_reset(struct panel_info *pinfo)
@@ -1275,10 +1274,12 @@ static int sharp_nt36523n_power_on(struct panel_info *pinfo)
 	/* Assert reset before enabling the panel supplies. */
 	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
 
-	ret = regulator_enable(pinfo->vddio);
-	if (ret) {
-		dev_err(dev, "failed to enable vddi regulator: %d\n", ret);
-		return ret;
+	if (pinfo->vddio) {
+		ret = regulator_enable(pinfo->vddio);
+		if (ret) {
+			dev_err(dev, "failed to enable vddi regulator: %d\n", ret);
+			return ret;
+		}
 	}
 
 	usleep_range(2500, 2600);
@@ -1318,7 +1319,8 @@ static int sharp_nt36523n_power_on(struct panel_info *pinfo)
 err_disable_vpos:
 	regulator_disable(pinfo->bias_supplies[0].consumer);
 err_disable_vddi:
-	regulator_disable(pinfo->vddio);
+	if (pinfo->vddio)
+		regulator_disable(pinfo->vddio);
 	dev_err(dev, "failed to enable panel bias supplies: %d\n", ret);
 	return ret;
 }
@@ -1328,7 +1330,8 @@ static void sharp_nt36523n_power_off(struct panel_info *pinfo)
 	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
 	regulator_disable(pinfo->bias_supplies[1].consumer);
 	regulator_disable(pinfo->bias_supplies[0].consumer);
-	regulator_disable(pinfo->vddio);
+	if (pinfo->vddio)
+		regulator_disable(pinfo->vddio);
 }
 
 static int nt36523_prepare(struct drm_panel *panel)
@@ -1531,9 +1534,21 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 
 	vddio_supply = pinfo->desc->has_jagar_power_sequence ? "vddi" : "vddio";
 	pinfo->vddio = devm_regulator_get(dev, vddio_supply);
-	if (IS_ERR(pinfo->vddio))
+	if (pinfo->desc->has_jagar_power_sequence &&
+	    PTR_ERR_OR_ZERO(pinfo->vddio) == -EPROBE_DEFER) {
+		/*
+		 * The shipped FDT calls this regulator child "ldo_vrf18" while
+		 * the MT6366 driver matches "vrf18". Consequently the phandle
+		 * cannot resolve even though VRF18 is a boot-on 1.8 V rail and is
+		 * already enabled by LK. Do not let that naming mismatch block
+		 * ownership of the separately controllable panel bias rails.
+		 */
+		dev_warn(dev, "using the inherited boot-on VRF18 panel supply\n");
+		pinfo->vddio = NULL;
+	} else if (IS_ERR(pinfo->vddio)) {
 		return dev_err_probe(dev, PTR_ERR(pinfo->vddio),
 				     "failed to get panel I/O regulator\n");
+	}
 
 	if (pinfo->desc->has_jagar_power_sequence) {
 		pinfo->bias_supplies[0].supply = "vpos";
