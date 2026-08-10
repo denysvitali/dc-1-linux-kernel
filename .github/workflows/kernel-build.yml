@@ -21,7 +21,7 @@ on:
   push:
     # Only master on push: any other branch that matters is in a PR, and
     # 'push' + 'pull_request' together build every PR branch twice.
-    branches: ['master', 'jagar-display-test']
+    branches: ['master', 'jagar-display-test', 'jagar-kexec-control']
   pull_request:
   workflow_dispatch:
 
@@ -153,6 +153,7 @@ jobs:
           # INPUT_EVDEV/TOUCHSCREEN_ILITEK: libinput otherwise sees no DC-1 touch
           # device even if the controller and IRQ both probe successfully.
           for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD \
+                     CONFIG_KEXEC \
                      CONFIG_BINFMT_SCRIPT \
                      CONFIG_EPOLL CONFIG_SIGNALFD CONFIG_TIMERFD CONFIG_EVENTFD \
                      CONFIG_SHMEM CONFIG_MEMFD_CREATE \
