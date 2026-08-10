@@ -153,7 +153,7 @@ jobs:
           # INPUT_EVDEV/TOUCHSCREEN_ILITEK: libinput otherwise sees no DC-1 touch
           # device even if the controller and IRQ both probe successfully.
           for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD \
-                     CONFIG_MODULES CONFIG_KEXEC \
+                     CONFIG_MODULES CONFIG_KEXEC CONFIG_OF_OVERLAY \
                      CONFIG_BINFMT_SCRIPT \
                      CONFIG_EPOLL CONFIG_SIGNALFD CONFIG_TIMERFD CONFIG_EVENTFD \
                      CONFIG_SHMEM CONFIG_MEMFD_CREATE \
@@ -170,6 +170,10 @@ jobs:
           done
           if ! grep -q '^CONFIG_DRM_PANFROST=m' .config; then
             echo "::error::CONFIG_DRM_PANFROST is not =m in the generated .config"
+            fail=1
+          fi
+          if ! grep -q '^CONFIG_MTK_MT6789_LIVE_GPU_OVERLAY=m' .config; then
+            echo "::error::CONFIG_MTK_MT6789_LIVE_GPU_OVERLAY is not =m in the generated .config"
             fail=1
           fi
           if ! grep -q '^CONFIG_COMMON_CLK_MT6789_MFGCFG=y' .config; then
@@ -240,6 +244,12 @@ jobs:
             echo "::error::Panfrost module missing from modules installation"
             exit 1
           }
+          overlay_loader=$(find modules-staging -type f \
+            -name 'mt6789-live-gpu-overlay.ko*' -print -quit)
+          [ -n "$overlay_loader" ] || {
+            echo "::error::MT6789 live GPU overlay loader missing from modules installation"
+            exit 1
+          }
           normal_status=$(fdtget -t s "$dtb" /soc/gpu@13000000 status)
           probe_status=$(fdtget -t s "$probe_dtb" /soc/gpu@13000000 status)
           [ "$normal_status" = disabled ] || {
@@ -290,7 +300,7 @@ jobs:
             }
           done
           ls -l "$Image" "$dtb" "$probe_dtb" "$live_probe_dtbo" \
-            "$panfrost" "$modules"
+            "$panfrost" "$overlay_loader" "$modules"
 
       - uses: actions/upload-artifact@v7
         with:
