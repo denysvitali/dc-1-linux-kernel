@@ -19,6 +19,7 @@ properties:
     oneOf:
       - enum:
           - mediatek,mt6779-gce
+          - mediatek,mt6789-gce
           - mediatek,mt8173-gce
           - mediatek,mt8183-gce
           - mediatek,mt8186-gce
