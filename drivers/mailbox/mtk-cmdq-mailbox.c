@@ -99,6 +99,7 @@ struct gce_plat {
 	bool control_by_sw;
 	bool sw_ddr_en;
 	bool gce_vm;
+	bool legacy_3cell;
 	u32 gce_num;
 };
 
@@ -620,14 +621,33 @@ static const struct mbox_chan_ops cmdq_mbox_chan_ops = {
 static struct mbox_chan *cmdq_xlate(struct mbox_controller *mbox,
 		const struct of_phandle_args *sp)
 {
-	int ind = sp->args[0];
+	struct cmdq *cmdq = container_of(mbox, struct cmdq, mbox);
 	struct cmdq_thread *thread;
+	u32 ind, priority;
+
+	if (sp->args_count < 2)
+		return ERR_PTR(-EINVAL);
+
+	ind = sp->args[0];
+	priority = sp->args[1];
+
+	/*
+	 * The downstream MT6789 binding used by production firmware has three
+	 * cells: <thread timeout priority>.  Keep accepting the upstream
+	 * two-cell <thread priority> binding used by mt6789.dtsi as well.
+	 */
+	if (cmdq->pdata->legacy_3cell && sp->args_count == 3)
+		priority = sp->args[2];
+	else if (sp->args_count != 2)
+		return ERR_PTR(-EINVAL);
 
 	if (ind >= mbox->num_chans)
 		return ERR_PTR(-EINVAL);
+	if (cmdq->pdata->legacy_3cell && priority > 7)
+		return ERR_PTR(-EINVAL);
 
 	thread = (struct cmdq_thread *)mbox->chans[ind].con_priv;
-	thread->priority = sp->args[1];
+	thread->priority = priority;
 	thread->chan = &mbox->chans[ind];
 
 	return &mbox->chans[ind];
@@ -794,6 +814,14 @@ static const struct gce_plat gce_plat_mt6779 = {
 	.gce_num = 1
 };
 
+static const struct gce_plat gce_plat_mt6789 = {
+	.thread_nr = 24,
+	.shift = 3,
+	.control_by_sw = false,
+	.legacy_3cell = true,
+	.gce_num = 1
+};
+
 static const struct gce_plat gce_plat_mt8173 = {
 	.thread_nr = 16,
 	.shift = 0,
@@ -849,6 +877,7 @@ static const struct gce_plat gce_plat_mt8196 = {
 
 static const struct of_device_id cmdq_of_ids[] = {
 	{.compatible = "mediatek,mt6779-gce", .data = (void *)&gce_plat_mt6779},
+	{.compatible = "mediatek,mt6789-gce", .data = (void *)&gce_plat_mt6789},
 	{.compatible = "mediatek,mt8173-gce", .data = (void *)&gce_plat_mt8173},
 	{.compatible = "mediatek,mt8183-gce", .data = (void *)&gce_plat_mt8183},
 	{.compatible = "mediatek,mt8186-gce", .data = (void *)&gce_plat_mt8186},
