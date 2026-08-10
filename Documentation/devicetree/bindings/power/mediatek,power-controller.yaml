@@ -24,6 +24,7 @@ properties:
   compatible:
     enum:
       - mediatek,mt6735-power-controller
+      - mediatek,mt6789-power-controller
       - mediatek,mt6795-power-controller
       - mediatek,mt6893-power-controller
       - mediatek,mt8167-power-controller
@@ -101,6 +102,7 @@ $defs:
       reg:
         description: |
           Power domain index. Valid values are defined in:
+              "include/dt-bindings/power/mediatek,mt6789-power.h" - for MT6789 type power domain.
               "include/dt-bindings/power/mt6795-power.h" - for MT8167 type power domain.
               "include/dt-bindings/power/mediatek,mt6893-power.h" - for MT6893 type power domain.
               "include/dt-bindings/power/mt8167-power.h" - for MT8167 type power domain.

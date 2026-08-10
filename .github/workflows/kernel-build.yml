@@ -153,6 +153,7 @@ jobs:
           # INPUT_EVDEV/TOUCHSCREEN_ILITEK: libinput otherwise sees no DC-1 touch
           # device even if the controller and IRQ both probe successfully.
           for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD \
+                     CONFIG_MODULES CONFIG_KEXEC \
                      CONFIG_BINFMT_SCRIPT \
                      CONFIG_EPOLL CONFIG_SIGNALFD CONFIG_TIMERFD CONFIG_EVENTFD \
                      CONFIG_SHMEM CONFIG_MEMFD_CREATE \
@@ -167,6 +168,14 @@ jobs:
               fail=1
             fi
           done
+          if ! grep -q '^CONFIG_DRM_PANFROST=m' .config; then
+            echo "::error::CONFIG_DRM_PANFROST is not =m in the generated .config"
+            fail=1
+          fi
+          if ! grep -q '^CONFIG_COMMON_CLK_MT6789_MFGCFG=y' .config; then
+            echo "::error::CONFIG_COMMON_CLK_MT6789_MFGCFG is not =y in the generated .config"
+            fail=1
+          fi
           exit $fail
 
       # HOSTCC is clang too, NOT gcc: LLVM=-19 switches the host toolchain to
@@ -184,7 +193,7 @@ jobs:
       # input on every single run and defeats the cache no matter how it is
       # keyed. This is also why the running kernel's version string shows a
       # fixed build identity rather than the wall clock.
-      - name: Build Image and DTBs
+      - name: Build Image, DTBs and modules
         env:
           KBUILD_BUILD_TIMESTAMP: '@0'
           KBUILD_BUILD_USER: ci
@@ -192,7 +201,11 @@ jobs:
         run: |
           make ARCH=arm64 LLVM=-19 \
             CC="ccache clang-19" HOSTCC="ccache clang-19" \
-            -j"$(nproc)" Image dtbs
+            -j"$(nproc)" Image dtbs modules
+          make ARCH=arm64 LLVM=-19 \
+            INSTALL_MOD_PATH="$PWD/modules-staging" modules_install
+          tar -C modules-staging -czf "jagar-modules-${GITHUB_SHA}.tar.gz" \
+            lib/modules
 
       # Reported so a collapsing hit rate is VISIBLE rather than showing up
       # only as "CI got slower". A healthy warm run is >90% direct hits.
@@ -216,10 +229,41 @@ jobs:
         run: |
           Image=arch/arm64/boot/Image
           dtb=arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar.dtb
-          for f in "$Image" "$dtb"; do
+          probe_dtb=arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar-gpu-probe.dtb
+          modules="jagar-modules-${GITHUB_SHA}.tar.gz"
+          for f in "$Image" "$dtb" "$probe_dtb" "$modules"; do
             [ -s "$f" ] || { echo "::error::missing or empty: $f"; exit 1; }
           done
-          ls -l "$Image" "$dtb"
+          panfrost=$(find modules-staging -type f -name 'panfrost.ko*' -print -quit)
+          [ -n "$panfrost" ] || {
+            echo "::error::Panfrost module missing from modules installation"
+            exit 1
+          }
+          normal_status=$(fdtget -t s "$dtb" /soc/gpu@13000000 status)
+          probe_status=$(fdtget -t s "$probe_dtb" /soc/gpu@13000000 status)
+          [ "$normal_status" = disabled ] || {
+            echo "::error::normal jagar DTB unexpectedly enables the GPU"
+            exit 1
+          }
+          [ "$probe_status" = okay ] || {
+            echo "::error::GPU probe DTB does not enable the GPU"
+            exit 1
+          }
+          opp_nodes=$(fdtget -l "$probe_dtb" /opp-table-gpu-jagar-probe |
+            grep -c '^opp-')
+          [ "$opp_nodes" -eq 1 ] || {
+            echo "::error::GPU probe DTB must contain exactly one OPP"
+            exit 1
+          }
+          opp_hz=$(fdtget -t i "$probe_dtb" \
+            /opp-table-gpu-jagar-probe/opp-390000000 opp-hz)
+          opp_uv=$(fdtget -t i "$probe_dtb" \
+            /opp-table-gpu-jagar-probe/opp-390000000 opp-microvolt)
+          [ "$opp_hz" = "0 390000000" ] && [ "$opp_uv" = 675000 ] || {
+            echo "::error::GPU probe OPP is not exactly 390MHz/675mV"
+            exit 1
+          }
+          ls -l "$Image" "$dtb" "$probe_dtb" "$panfrost" "$modules"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -228,6 +272,7 @@ jobs:
           path: |
             arch/arm64/boot/Image
             arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar*.dtb
+            jagar-modules-${{ github.sha }}.tar.gz
             .config
 
       # POSITIVE CONTROL for the cache itself. A build that bypasses ccache

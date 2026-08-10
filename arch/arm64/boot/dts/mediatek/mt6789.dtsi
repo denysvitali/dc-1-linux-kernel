@@ -552,8 +552,10 @@
 						#size-cells = <0>;
 						#power-domain-cells = <1>;
 
-						power-domain@MT6789_POWER_DOMAIN_MFG2 {
+						mfg2: power-domain@MT6789_POWER_DOMAIN_MFG2 {
 							reg = <MT6789_POWER_DOMAIN_MFG2>;
+							clocks = <&mfgcfg CLK_MFGCFG_BG3D>;
+							clock-names = "mfg";
 							#power-domain-cells = <0>;
 						};
 
