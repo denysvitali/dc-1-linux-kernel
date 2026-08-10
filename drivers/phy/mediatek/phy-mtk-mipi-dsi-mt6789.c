@@ -45,6 +45,11 @@ static int mtk_mipi_tx_pll_prepare(struct clk_hw *hw)
 	}
 
 	if (readl(base + MIPITX_PLL_CON1) & RG_DSI_PLL_EN) {
+		/* LK can hand Linux an already-running PLL; still take ownership
+		 * of the analog clock gate that belongs to this prepare cycle.
+		 */
+		mtk_phy_set_bits(base + MIPITX_SW_CTRL_CON4,
+				 MIPI_TX_SW_ANA_CK_EN);
 		dev_dbg(mipi_tx->dev, "MIPI TX PLL already enabled\n");
 		return 0;
 	}
