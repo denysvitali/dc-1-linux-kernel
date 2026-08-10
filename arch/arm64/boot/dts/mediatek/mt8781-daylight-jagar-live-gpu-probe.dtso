@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Daylight DC-1 bounded GPU probe overlay for LK's shipped MT6789 DT
+ *
+ * Apply this only to a captured live DT after a same-Image/live-DT kexec
+ * control has passed.  It deliberately leaves the flat legacy SCPSYS provider
+ * in place for DISP and adds a nested provider containing only MFG0..MFG3.
+ * Both GPU rails were observed enabled at 850 mV with every MFG domain off;
+ * pinning that already-live voltage avoids adding DVFS to the first register
+ * and power-sequence probe.
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/clock/mediatek,mt6789-clk.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/power/mediatek,mt6789-power.h>
+
+/ {
+	compatible = "mediatek,MT6789";
+};
+
+&scpsys {
+	compatible = "mediatek,mt6789-scpsys", "syscon", "simple-mfd";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	jagar_gpu_spm: power-controller {
+		compatible = "mediatek,mt6789-power-controller";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		#power-domain-cells = <1>;
+
+		jagar_mfg0: power-domain@MT6789_POWER_DOMAIN_MFG0 {
+			reg = <MT6789_POWER_DOMAIN_MFG0>;
+			domain-supply = <&mt6358_vgpu_reg>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			#power-domain-cells = <1>;
+
+			jagar_mfg1: power-domain@MT6789_POWER_DOMAIN_MFG1 {
+				reg = <MT6789_POWER_DOMAIN_MFG1>;
+				domain-supply = <&mt6358_vsram_gpu_reg>;
+				clocks = <&topckgen_clk CLK_TOP_MFG_PLL_SEL>,
+					 <&topckgen_clk CLK_TOP_MFG_REF_SEL>;
+				clock-names = "mfg", "alt";
+				mediatek,infracfg = <&infracfg_ao_clk>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#power-domain-cells = <1>;
+
+				jagar_mfg2: power-domain@MT6789_POWER_DOMAIN_MFG2 {
+					reg = <MT6789_POWER_DOMAIN_MFG2>;
+					clocks = <&mfg_top_config_clk CLK_MFGCFG_BG3D>;
+					clock-names = "mfg";
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6789_POWER_DOMAIN_MFG3 {
+					reg = <MT6789_POWER_DOMAIN_MFG3>;
+					#power-domain-cells = <0>;
+				};
+			};
+		};
+	};
+};
+
+&soc {
+	jagar_live_gpu_opp: opp-table-jagar-live-gpu-probe {
+		compatible = "operating-points-v2";
+
+		opp-390000000 {
+			opp-hz = /bits/ 64 <390000000>;
+			opp-microvolt = <850000>;
+		};
+	};
+};
+
+&mt6358_vgpu_reg {
+	regulator-compatible = "vgpu";
+	regulator-always-on;
+	regulator-min-microvolt = <850000>;
+	regulator-max-microvolt = <850000>;
+};
+
+&mt6358_vsram_gpu_reg {
+	regulator-compatible = "vsram-gpu";
+	regulator-always-on;
+	regulator-min-microvolt = <850000>;
+	regulator-max-microvolt = <850000>;
+};
+
+&mali {
+	compatible = "mediatek,mt6789-mali", "arm,mali-valhall-jm";
+	clocks = <&mfg_top_config_clk CLK_MFGCFG_BG3D>;
+	interrupt-parent = <&gic>;
+	interrupts = <GIC_SPI 398 IRQ_TYPE_LEVEL_HIGH 0>,
+		     <GIC_SPI 397 IRQ_TYPE_LEVEL_HIGH 0>,
+		     <GIC_SPI 396 IRQ_TYPE_LEVEL_HIGH 0>;
+	interrupt-names = "job", "mmu", "gpu";
+	mali-supply = <&mt6358_vgpu_reg>;
+	operating-points-v2 = <&jagar_live_gpu_opp>;
+	power-domains = <&jagar_gpu_spm MT6789_POWER_DOMAIN_MFG2>,
+			<&jagar_gpu_spm MT6789_POWER_DOMAIN_MFG3>;
+	power-domain-names = "core0", "core1";
+	status = "okay";
+};

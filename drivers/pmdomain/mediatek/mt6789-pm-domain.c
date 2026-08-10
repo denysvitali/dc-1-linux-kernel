@@ -22,8 +22,6 @@
 #include <dt-bindings/memory/mtk-memory-port.h>
 #include <dt-bindings/power/mediatek,mt6789-power.h>
 
-#define MT6789_POWER_DOMAIN_NR	(MT6789_POWER_DOMAIN_CAM_RAWB + 1)
-
 static struct generic_pm_domain mt6789_display_domain = {
 	.name = "disp",
 	.flags = GENPD_FLAG_ALWAYS_ON,
