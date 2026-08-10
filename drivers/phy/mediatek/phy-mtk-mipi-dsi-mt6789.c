@@ -26,7 +26,7 @@
 #define RG_DSI_PLL_EN		BIT(4)
 #define RG_DSI_PLL_POSDIV	GENMASK(10, 8)
 #define DSI_SW_CTL_EN		BIT(0)
-#define SW_CTRL_CON4_EN		BIT(0)
+#define MIPI_TX_SW_ANA_CK_EN	BIT(8)
 
 static int mtk_mipi_tx_pll_prepare(struct clk_hw *hw)
 {
@@ -93,7 +93,8 @@ static int mtk_mipi_tx_pll_prepare(struct clk_hw *hw)
 	mtk_phy_set_bits(base + MIPITX_PLL_CON1, RG_DSI_PLL_EN);
 
 	usleep_range(50, 100);
-	mtk_phy_set_bits(base + MIPITX_SW_CTRL_CON4, SW_CTRL_CON4_EN);
+	/* MT6789 places the software analog-clock enable at bit 8. */
+	mtk_phy_set_bits(base + MIPITX_SW_CTRL_CON4, MIPI_TX_SW_ANA_CK_EN);
 
 	return 0;
 }
@@ -106,7 +107,8 @@ static void mtk_mipi_tx_pll_unprepare(struct clk_hw *hw)
 	dev_dbg(mipi_tx->dev, "unprepare\n");
 
 	mtk_phy_clear_bits(base + MIPITX_PLL_CON1, RG_DSI_PLL_EN);
-	mtk_phy_clear_bits(base + MIPITX_SW_CTRL_CON4, SW_CTRL_CON4_EN);
+	mtk_phy_clear_bits(base + MIPITX_SW_CTRL_CON4,
+			   MIPI_TX_SW_ANA_CK_EN);
 	mtk_phy_set_bits(base + MIPITX_PLL_PWR, AD_DSI_PLL_SDM_ISO_EN);
 	mtk_phy_clear_bits(base + MIPITX_PLL_PWR, AD_DSI_PLL_SDM_PWR_ON);
 
