@@ -66,6 +66,12 @@
 #define CMDQ_JUMP_BY_OFFSET		0x10000000
 #define CMDQ_JUMP_BY_PA			0x10000001
 
+static unsigned int cmdq_jagar_mt6789_probe_stage;
+module_param_named(jagar_mt6789_probe_stage, cmdq_jagar_mt6789_probe_stage,
+		   uint, 0644);
+MODULE_PARM_DESC(jagar_mt6789_probe_stage,
+		 "Jagar MT6789 GCE probe stage: 0=held, 1=resources, 2=clock prepare, 3=hardware init, 4=full probe");
+
 struct cmdq_thread {
 	struct mbox_chan	*chan;
 	void __iomem		*base;
@@ -209,11 +215,14 @@ static void cmdq_thread_resume(struct cmdq_thread *thread)
 	writel(CMDQ_THR_RESUME, thread->base + CMDQ_THR_SUSPEND_TASK);
 }
 
-static void cmdq_init(struct cmdq *cmdq)
+static int cmdq_init(struct cmdq *cmdq)
 {
+	int ret;
 	int i;
 
-	WARN_ON(clk_bulk_enable(cmdq->pdata->gce_num, cmdq->clocks));
+	ret = clk_bulk_enable(cmdq->pdata->gce_num, cmdq->clocks);
+	if (ret)
+		return ret;
 
 	cmdq_vm_init(cmdq);
 	cmdq_gctl_value_toggle(cmdq, true);
@@ -222,6 +231,8 @@ static void cmdq_init(struct cmdq *cmdq)
 	for (i = 0; i <= CMDQ_MAX_EVENT; i++)
 		writel(i, cmdq->base + CMDQ_SYNC_TOKEN_UPDATE);
 	clk_bulk_disable(cmdq->pdata->gce_num, cmdq->clocks);
+
+	return 0;
 }
 
 static int cmdq_thread_reset(struct cmdq *cmdq, struct cmdq_thread *thread)
@@ -706,11 +717,25 @@ static int cmdq_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct cmdq *cmdq;
+	bool staged_probe;
 	int err, i;
 
 	cmdq = devm_kzalloc(dev, sizeof(*cmdq), GFP_KERNEL);
 	if (!cmdq)
 		return -ENOMEM;
+
+	cmdq->pdata = device_get_match_data(dev);
+	if (!cmdq->pdata) {
+		dev_err(dev, "failed to get match data\n");
+		return -EINVAL;
+	}
+
+	staged_probe = of_machine_is_compatible("mediatek,MT6789") &&
+		of_device_is_compatible(dev->of_node, "mediatek,mt6789-gce");
+	if (staged_probe && cmdq_jagar_mt6789_probe_stage < 1) {
+		dev_info(dev, "Jagar MT6789 GCE probe held at stage 0\n");
+		return -ENODEV;
+	}
 
 	cmdq->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(cmdq->base))
@@ -720,12 +745,6 @@ static int cmdq_probe(struct platform_device *pdev)
 	if (cmdq->irq < 0)
 		return cmdq->irq;
 
-	cmdq->pdata = device_get_match_data(dev);
-	if (!cmdq->pdata) {
-		dev_err(dev, "failed to get match data\n");
-		return -EINVAL;
-	}
-
 	cmdq->irq_mask = GENMASK(cmdq->pdata->thread_nr - 1, 0);
 
 	dev_dbg(dev, "cmdq device: addr:0x%p, va:0x%p, irq:%d\n",
@@ -734,6 +753,11 @@ static int cmdq_probe(struct platform_device *pdev)
 	err = cmdq_get_clocks(dev, cmdq);
 	if (err)
 		return err;
+	if (staged_probe) {
+		dev_info(dev, "Jagar MT6789 GCE probe stage 1 complete: resources and clocks resolved\n");
+		if (cmdq_jagar_mt6789_probe_stage < 2)
+			return -ENODEV;
+	}
 
 	dma_set_coherent_mask(dev,
 			      DMA_BIT_MASK(sizeof(u32) * BITS_PER_BYTE + cmdq->pdata->shift));
@@ -766,9 +790,30 @@ static int cmdq_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, cmdq);
 
-	WARN_ON(clk_bulk_prepare(cmdq->pdata->gce_num, cmdq->clocks));
+	err = clk_bulk_prepare(cmdq->pdata->gce_num, cmdq->clocks);
+	if (err)
+		return dev_err_probe(dev, err, "failed to prepare GCE clocks\n");
+	if (staged_probe) {
+		dev_info(dev, "Jagar MT6789 GCE probe stage 2 complete: clocks prepared\n");
+		if (cmdq_jagar_mt6789_probe_stage < 3) {
+			clk_bulk_unprepare(cmdq->pdata->gce_num, cmdq->clocks);
+			return -ENODEV;
+		}
+		dev_info(dev, "Jagar MT6789 GCE probe stage 3: entering hardware initialization\n");
+	}
 
-	cmdq_init(cmdq);
+	err = cmdq_init(cmdq);
+	if (err) {
+		clk_bulk_unprepare(cmdq->pdata->gce_num, cmdq->clocks);
+		return dev_err_probe(dev, err, "failed to initialize GCE hardware\n");
+	}
+	if (staged_probe) {
+		dev_info(dev, "Jagar MT6789 GCE probe stage 3 complete: hardware initialized\n");
+		if (cmdq_jagar_mt6789_probe_stage < 4) {
+			clk_bulk_unprepare(cmdq->pdata->gce_num, cmdq->clocks);
+			return -ENODEV;
+		}
+	}
 
 	err = devm_request_irq(dev, cmdq->irq, cmdq_irq_handler, IRQF_SHARED,
 			       "mtk_cmdq", cmdq);
@@ -796,6 +841,8 @@ static int cmdq_probe(struct platform_device *pdev)
 		dev_err(dev, "failed to register mailbox: %d\n", err);
 		return err;
 	}
+	if (staged_probe)
+		dev_info(dev, "Jagar MT6789 GCE probe stage 4 complete: mailbox registered\n");
 
 	return 0;
 }
