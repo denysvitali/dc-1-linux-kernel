@@ -230,13 +230,15 @@ EXPORT_SYMBOL(cmdq_pkt_write);
 int cmdq_pkt_write_pa(struct cmdq_pkt *pkt, u8 subsys /*unused*/, u32 pa_base,
 		      u16 offset, u32 value)
 {
+	u32 addr = pa_base + offset;
 	int err;
 
-	err = cmdq_pkt_assign(pkt, CMDQ_THR_SPR_IDX0, CMDQ_ADDR_HIGH(pa_base));
+	err = cmdq_pkt_assign(pkt, CMDQ_THR_SPR_IDX0, CMDQ_ADDR_HIGH(addr));
 	if (err < 0)
 		return err;
 
-	return cmdq_pkt_write_s_value(pkt, CMDQ_THR_SPR_IDX0, CMDQ_ADDR_LOW(offset), value);
+	return cmdq_pkt_write_s_value(pkt, CMDQ_THR_SPR_IDX0,
+				      CMDQ_ADDR_LOW(addr), value);
 }
 EXPORT_SYMBOL(cmdq_pkt_write_pa);
 
@@ -267,14 +269,15 @@ EXPORT_SYMBOL(cmdq_pkt_write_mask);
 int cmdq_pkt_write_mask_pa(struct cmdq_pkt *pkt, u8 subsys /*unused*/, u32 pa_base,
 			   u16 offset, u32 value, u32 mask)
 {
+	u32 addr = pa_base + offset;
 	int err;
 
-	err = cmdq_pkt_assign(pkt, CMDQ_THR_SPR_IDX0, CMDQ_ADDR_HIGH(pa_base));
+	err = cmdq_pkt_assign(pkt, CMDQ_THR_SPR_IDX0, CMDQ_ADDR_HIGH(addr));
 	if (err < 0)
 		return err;
 
 	return cmdq_pkt_write_s_mask_value(pkt, CMDQ_THR_SPR_IDX0,
-					   CMDQ_ADDR_LOW(offset), value, mask);
+					   CMDQ_ADDR_LOW(addr), value, mask);
 }
 EXPORT_SYMBOL(cmdq_pkt_write_mask_pa);
 
