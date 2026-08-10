@@ -133,22 +133,8 @@ static unsigned int mt8167_mtk_ddp_main[] = {
 static const unsigned int mt6789_mtk_ddp_main[] = {
 	DDP_COMPONENT_OVL0,
 	DDP_COMPONENT_RDMA0,
-	/*
-	 * COLOR0 and DITHER0 are deliberately omitted.
-	 *
-	 * COLOR0 at 0x14009000 is UNRESPONSIVE on this board: every register reads 0
-	 * and writes do not stick (verified with mempoke; its mmsys clock gate bit 10
-	 * in CG_CON0 is clear, so it is not simply clock-gated). A dead engine in the
-	 * middle of the path stalls the frame handshake: OVL0 reports INTSTA bit13
-	 * ABNORMAL_SOF and never raises FME_CPL, so no frame ever completes, atomic
-	 * flips never finish, and the panel rescans one stale frame forever while
-	 * RDMA0 free-runs at ~100 Hz.
-	 *
-	 * The mmsys routing table already provides a direct RDMA0 -> DSI0 route
-	 * (MT6789_DISP_RDMA0_RSZ0_SOUT_TO_DSI0 plus DSI0_SEL_IN = FROM_RDMA_RSZ0), so
-	 * neither block is needed to get pixels to the panel. Colour correction and
-	 * dithering are cosmetic here; revisit once COLOR0 is understood.
-	 */
+	DDP_COMPONENT_COLOR0,
+	DDP_COMPONENT_DITHER0,
 	/* DSC deliberately omitted: we drive the panel's 60Hz non-DSC mode, and
 	 * pulling DSC in would mean borrowing mt8195's disp-dsc binding for
 	 * hardware we are not exercising. */
