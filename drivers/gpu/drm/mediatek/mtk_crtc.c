@@ -398,7 +398,6 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 	 */
 	if (priv->data->quiesce_mutex_first) {
 		mtk_mutex_disable(mtk_crtc->mutex);
-		mtk_ddp_comp_stop(mtk_crtc->ddp_comp[0]);
 	}
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
@@ -420,6 +419,14 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
 
 		/*
+		 * MT6789's DSI start hook stops the inherited LK video stream.
+		 * Defer the first OVL stop/reset until that hook has run, while
+		 * DISP_MUTEX remains disabled, so no live DSI SOF can race it.
+		 */
+		if (priv->data->quiesce_mutex_first && i == 0)
+			continue;
+
+		/*
 		 * The first OVL has no upstream compositor and must use its local
 		 * background.  Boot firmware may have left it consuming a secondary
 		 * OVL's background as part of a cascaded topology.
@@ -429,6 +436,14 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		else if (i == 1)
 			mtk_ddp_comp_bgclr_in_on(comp);
 
+		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
+		mtk_ddp_comp_start(comp);
+	}
+	if (priv->data->quiesce_mutex_first) {
+		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
+
+		mtk_ddp_comp_bgclr_in_off(comp);
+		mtk_ddp_comp_stop(comp);
 		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
 		mtk_ddp_comp_start(comp);
 	}
@@ -442,8 +457,21 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 
 		plane_state = to_mtk_plane_state(plane->state);
 
-		/* should not enable layer before crtc enabled */
-		plane_state->pending.enable = false;
+		if (priv->data->quiesce_mutex_first &&
+		    plane_state->base.crtc == crtc &&
+		    plane_state->base.fb && plane_state->base.visible) {
+			/*
+			 * commit_tail_rpm enables the CRTC before its plane commit.
+			 * MT6789 must not see its first DSI SOF with every OVL layer
+			 * disabled, so program the already-validated atomic plane
+			 * state synchronously while the mutex remains quiesced.  The
+			 * later plane commit may safely repeat this configuration.
+			 */
+			mtk_plane_update_new_state(&plane_state->base, plane_state);
+		} else {
+			/* should not enable layer before crtc enabled */
+			plane_state->pending.enable = false;
+		}
 		comp = mtk_ddp_comp_for_plane(crtc, plane, &local_layer);
 		if (comp)
 			mtk_ddp_comp_layer_config(comp, local_layer,

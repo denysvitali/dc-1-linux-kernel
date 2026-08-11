@@ -153,6 +153,7 @@ struct mtk_disp_ovl_data {
 	bool supports_clrfmt_ext;
 	bool bypass_shadow;
 	bool skip_config_reset;
+	bool reset_on_stop;
 };
 
 /*
@@ -288,9 +289,23 @@ void mtk_ovl_start(struct device *dev)
 void mtk_ovl_stop(struct device *dev)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	u32 en = ovl->data->bypass_shadow ? OVL_EN_BYPASS_SHADOW : 0;
 
-	writel_relaxed(ovl->data->bypass_shadow ? OVL_EN_BYPASS_SHADOW : 0,
-		       ovl->regs + DISP_REG_OVL_EN);
+	if (ovl->data->reset_on_stop) {
+		/*
+		 * Match the MT6789 vendor stop sequence while the caller has the
+		 * display mutex quiesced: mask interrupts, stop, reset, clear latched
+		 * status, then release reset.  Keep BYPASS_SHADOW set while EN itself
+		 * is clear.
+		 */
+		writel(0, ovl->regs + DISP_REG_OVL_INTEN);
+		writel(en, ovl->regs + DISP_REG_OVL_EN);
+		writel(1, ovl->regs + DISP_REG_OVL_RST);
+		writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
+		writel(0, ovl->regs + DISP_REG_OVL_RST);
+	} else {
+		writel_relaxed(en, ovl->regs + DISP_REG_OVL_EN);
+	}
 	if (ovl->data->smi_id_en) {
 		unsigned int reg;
 
@@ -737,6 +752,7 @@ static const struct mtk_disp_ovl_data mt6789_ovl_driver_data = {
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 	.bypass_shadow = true,
 	.skip_config_reset = true,
+	.reset_on_stop = true,
 };
 
 static const struct mtk_disp_ovl_data mt6789_ovl_2l_driver_data = {
@@ -749,6 +765,7 @@ static const struct mtk_disp_ovl_data mt6789_ovl_2l_driver_data = {
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 	.bypass_shadow = true,
 	.skip_config_reset = true,
+	.reset_on_stop = true,
 };
 
 static const struct mtk_disp_ovl_data mt8192_ovl_driver_data = {
