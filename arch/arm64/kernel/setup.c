@@ -31,6 +31,7 @@
 #include <linux/psci.h>
 #include <linux/sched/task.h>
 #include <linux/scs.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 
 #include <asm/acpi.h>
@@ -52,6 +53,7 @@
 #include <asm/tlbflush.h>
 #include <asm/traps.h>
 #include <asm/efi.h>
+#include <asm/io.h>
 #include <asm/xen/hypervisor.h>
 #include <asm/mmu_context.h>
 
@@ -60,6 +62,43 @@ static struct resource *standard_resources;
 
 phys_addr_t __fdt_pointer __initdata;
 u64 mmu_enabled_at_boot __initdata;
+static void __iomem *jagar_wdt_va;
+unsigned int jagar_usb_probe_stage;
+unsigned int jagar_usb_phy_present;
+
+void jagar_fbcon_early_init(void);
+void jagar_pstore_checkpoint(void);
+void jagar_pstore_early_init(void);
+void jagar_pstore_drop_early(void);
+void jagar_note_checkpoint(unsigned int n);
+
+/*
+ * jagar_wdt_va starts life as an early_ioremap() mapping, which
+ * early_ioremap_reset() tears down partway through setup_arch(). Writing
+ * through it after that point is a use-after-unmap and faults -- which is what
+ * the checkpoint right after early_ioremap_reset() was doing, killing boot at
+ * the scaffolding rather than at any real mainline problem. Drop the pointer at
+ * reset time and re-establish it with a real ioremap() once slab exists.
+ */
+void jagar_wdt_drop_early(void)
+{
+	jagar_wdt_va = NULL;
+}
+
+void jagar_late_wdt_checkpoint(unsigned int seconds)
+{
+	/*
+	 * Disabled. Every variant of this write proved either ineffective or
+	 * actively fatal, and the timings it produced were indistinguishable
+	 * from LK's own 31s watchdog -- i.e. pure artifact. Let the default
+	 * watchdog handle recovery and get output from the panel instead.
+	 */
+	(void)seconds;
+	return;
+	/* Breadcrumb that bypasses printk (no console yet during setup_arch). */
+	jagar_note_checkpoint(seconds);
+	pr_info("jagar: checkpoint %u\n", seconds);
+}
 
 /*
  * Standard memory resources
@@ -280,16 +319,63 @@ u64 cpu_logical_map(unsigned int cpu)
 
 void __init __no_sanitize_address setup_arch(char **cmdline_p)
 {
+
+	jagar_late_wdt_checkpoint(16);
 	setup_initial_init_mm(_text, _etext, _edata, _end);
 
 	*cmdline_p = boot_command_line;
 
 	kaslr_init();
+	jagar_late_wdt_checkpoint(18);
 
 	early_fixmap_init();
 	early_ioremap_init();
+	jagar_wdt_va = early_ioremap(0x10007000, SZ_4K);
+	jagar_pstore_early_init();
+	jagar_note_checkpoint(80);	/* ramoops channel liveness */
+
+	/*
+	 * Bracket setup_machine_fdt() with two distinct, low timeouts. It spins
+	 * forever if early_init_dt_scan() rejects the blob, so if boot dies in
+	 * there the watchdog fires on the FIRST value and never reaches the
+	 * second. 8 and 10 both sit well below the ~42 s LK null, so the two
+	 * outcomes are separable by timing alone, independent of ramoops.
+	 */
+	{
+		/*
+		 * setup_machine_fdt() spins forever when early_init_dt_scan()
+		 * rejects the blob, so the watchdog fires on whatever was set
+		 * last. Encode WHICH precondition failed into that timeout:
+		 * fixmap_remap_fdt() bails on a null dt_phys, an 8-byte
+		 * misalignment, a bad FDT_MAGIC, or size > MAX_FDT_SIZE.
+		 * Values are spaced 3s apart -- run-to-run spread is ~0.3s.
+		 */
+		phys_addr_t p = __fdt_pointer;
+		unsigned int code;
+		int fs = 0;
+		void *v = NULL;
+
+		if (p && !(p % 8))
+			v = fixmap_remap_fdt(p, &fs, PAGE_KERNEL);
+
+		if (!p)
+			code = 5;			/* x0 carried no DTB */
+		else if (p % 8)
+			code = 8;			/* misaligned */
+		else if (!v)
+			code = 11;			/* bad magic or oversized */
+		else if (!early_init_dt_verify(v, p))
+			code = 14;			/* header maps, scan rejects */
+		else
+			code = 17;			/* blob is fine; hang is elsewhere */
+
+		jagar_late_wdt_checkpoint(code);
+		jagar_note_checkpoint(code);
+	}
 
 	setup_machine_fdt(__fdt_pointer);
+	jagar_late_wdt_checkpoint(10);
+	jagar_note_checkpoint(91);
 
 	/*
 	 * Initialise the static keys early as they may be enabled by the
@@ -297,8 +383,10 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	 */
 	jump_label_init();
 	parse_early_param();
+	jagar_late_wdt_checkpoint(21);
 
 	dynamic_scs_init();
+	jagar_late_wdt_checkpoint(22);
 
 	/*
 	 * The primary CPU enters the kernel with all DAIF exceptions masked.
@@ -312,15 +400,19 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	 * detected and initialized.
 	 */
 	local_daif_restore(DAIF_PROCCTX_NOIRQ);
+	jagar_late_wdt_checkpoint(23);
 
 	/*
 	 * TTBR0 is only used for the identity mapping at this stage. Make it
 	 * point to zero page to avoid speculatively fetching new entries.
 	 */
+	jagar_late_wdt_checkpoint(24);
 	cpu_uninstall_idmap();
+	jagar_late_wdt_checkpoint(14);
 
 	xen_early_init();
 	efi_init();
+	jagar_late_wdt_checkpoint(15);
 
 	if (!efi_enabled(EFI_BOOT)) {
 		if ((u64)_text % MIN_KIMG_ALIGN)
@@ -330,8 +422,13 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	}
 
 	arm64_memblock_init();
+	jagar_late_wdt_checkpoint(16);
 
 	paging_init();
+	jagar_late_wdt_checkpoint(17);
+
+	/* Linear map is live: LK's framebuffer is reachable via __va() from here. */
+	jagar_fbcon_early_init();
 
 	acpi_table_upgrade();
 
@@ -340,25 +437,33 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 
 	if (acpi_disabled)
 		unflatten_device_tree();
+	jagar_late_wdt_checkpoint(18);
 
 	bootmem_init();
 
 	kasan_init();
 
 	request_standard_resources();
+	jagar_late_wdt_checkpoint(19);
 
+	/* 24s must cover everything until slab_is_available() re-arms us. */
+	jagar_late_wdt_checkpoint(24);
 	early_ioremap_reset();
+	jagar_pstore_drop_early();
+	jagar_wdt_drop_early();
 
 	if (acpi_disabled)
 		psci_dt_init();
 	else
 		psci_acpi_init();
+	jagar_late_wdt_checkpoint(15);
 
 	arm64_rsi_init();
 
 	init_bootcpu_ops();
 	smp_init_cpus();
 	smp_build_mpidr_hash();
+	jagar_late_wdt_checkpoint(16);
 
 #ifdef CONFIG_ARM64_SW_TTBR0_PAN
 	/*
@@ -375,6 +480,7 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 			"This indicates a broken bootloader or old kernel\n",
 			boot_args[1], boot_args[2], boot_args[3]);
 	}
+	jagar_late_wdt_checkpoint(17);
 }
 
 static inline bool cpu_can_disable(unsigned int cpu)

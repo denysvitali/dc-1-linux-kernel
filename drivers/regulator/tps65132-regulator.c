@@ -31,6 +31,13 @@
 #define TPS65132_REG_APPS_DISP_DISN	0x03
 #define TPS65132_REG_CONTROL		0x0FF
 
+/*
+ * CONTROL bit 0 selects which bank the data registers address: set = the
+ * non-volatile IVR (EEPROM staging), clear = the volatile DR that actually
+ * drives the rails. They share addresses 0x00-0x03.
+ */
+#define TPS65132_REG_CONTROL_EE_DR	BIT(0)
+
 #define TPS65132_VOUT_MASK		0x1F
 #define TPS65132_VOUT_N_VOLTAGE		0x15
 #define TPS65132_VOUT_VMIN		4000000
@@ -117,13 +124,47 @@ static int tps65132_regulator_is_enabled(struct regulator_dev *rdev)
 	return 1;
 }
 
+/*
+ * The chip powers up with VPOS/VNEG reading 0x1f (selector 31) on jagar, while
+ * n_voltages is 21, so valid selectors are 0..20. Measured on hardware:
+ *
+ *     reg 0x00 (VPOS) = 0x1f    reg 0x01 (VNEG) = 0x1f
+ *
+ * regulator_get_voltage_sel_regmap() happily returns 31, then
+ * regulator_list_voltage_linear() rejects it, and the -EINVAL surfaces during
+ * registration because machine_constraints_voltage() reads the current voltage:
+ *
+ *     LCD_AVDD: failed to get the current voltage: -22
+ *     tps65132 2-003e: regulator tps65132-outp register failed: -22
+ *
+ * so probe aborts and the panel never gets AVDD/AVEE.
+ *
+ * -ENOTRECOVERABLE is the core's own idiom for "this regulator cannot be read
+ * and must be initialised": machine_constraints_voltage() catches it, applies
+ * the constraint voltage with _regulator_do_set_voltage(), and re-reads. That
+ * is exactly the right behaviour for a chip sitting in an out-of-range reset
+ * state, and it is strictly better than failing probe.
+ */
+static int tps65132_regulator_get_voltage_sel(struct regulator_dev *rdev)
+{
+	int sel = regulator_get_voltage_sel_regmap(rdev);
+
+	if (sel < 0)
+		return sel;
+
+	if (sel >= rdev->desc->n_voltages)
+		return -ENOTRECOVERABLE;
+
+	return sel;
+}
+
 static const struct regulator_ops tps65132_regulator_ops = {
 	.enable = tps65132_regulator_enable,
 	.disable = tps65132_regulator_disable,
 	.is_enabled = tps65132_regulator_is_enabled,
 	.list_voltage = regulator_list_voltage_linear,
 	.map_voltage = regulator_map_voltage_linear,
-	.get_voltage_sel = regulator_get_voltage_sel_regmap,
+	.get_voltage_sel = tps65132_regulator_get_voltage_sel,
 	.set_voltage_sel = regulator_set_voltage_sel_regmap,
 	.set_active_discharge = regulator_set_active_discharge_regmap,
 };
@@ -243,6 +284,29 @@ static int tps65132_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, tps);
 	tps->dev = dev;
+
+	/*
+	 * Select the VOLATILE data registers.
+	 *
+	 * This part powers up on some boards with CONTROL bit 0 (EE/DR) SET, which
+	 * points 0x00-0x03 at the EEPROM staging area instead of the live
+	 * registers. Measured on a jagar (MT6789) tablet: CONTROL reads 0x7f at
+	 * boot, every write to VPOS/VNEG is ACKed and then silently discarded, and
+	 * reads return the stale IVR contents -- 0x1f, i.e. selector 31, which is
+	 * outside n_voltages (21). That makes regulator_get_voltage_rdev() return
+	 * -EINVAL, so machine_constraints_voltage() aborts and probe fails with
+	 * "failed to get the current voltage: -22" before any rail comes up.
+	 *
+	 * Clearing the bit first makes writes land and read back correctly:
+	 *     reg 0xff <- 0x00   then   reg 0x00 <- 0x0e reads back 0x0e
+	 *
+	 * Best-effort: a part that does not implement CONTROL should not be
+	 * prevented from probing, so only log a failure here.
+	 */
+	ret = regmap_update_bits(rmap, TPS65132_REG_CONTROL,
+				 TPS65132_REG_CONTROL_EE_DR, 0);
+	if (ret < 0)
+		dev_warn(dev, "failed to select volatile registers: %d\n", ret);
 
 	for (id = 0; id < TPS65132_MAX_REGULATORS; ++id) {
 		config.regmap = rmap;

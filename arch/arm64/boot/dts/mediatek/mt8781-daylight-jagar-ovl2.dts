@@ -1,0 +1,1135 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Device Tree Source for the Daylight Computer DC-1 tablet ("jagar")
+ *
+ * SoC:      MediaTek MT8781 (Helio G99) -- register-compatible with MT6789
+ * Display:  Sharp NT36523N DSI video-mode panel, 1200x1600 portrait
+ * Storage:  UFS (ufshci@11270000) + microSD on MSDC0
+ * PMIC:     MT6366 (mt6358 family) over PMIC wrapper
+ *
+ * Every address, size, GPIO number and pinmux value in this file was read back
+ * from the running stock device:
+ *   - /sys/firmware/fdt  -> work/live/live.dtb / live.dts   (LK-generated DT)
+ *   - /proc/iomem, dmesg, getprop                            (work/live/*.txt)
+ * Anything that could NOT be measured is called out in a "XXX UNKNOWN" comment.
+ *
+ * Layering note: this board file is written against mt6789.dtsi as it exists on
+ * linux-mediatek/linux branch mt6789-next (commit 2ed59e4, byte-identical to the
+ * copy in work/mainline/tree).  It deliberately does NOT modify the .dtsi; the
+ * two SoC-level bugs it has to work around are patched with overrides at the
+ * bottom of this file and flagged with "XXX DTSI BUG".
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/regulator/mediatek,mt6397-regulator.h>
+#include <dt-bindings/pinctrl/mediatek,mt6789-pinfunc.h>
+
+#include "mt6789.dtsi"
+
+/ {
+	model = "Daylight Computer DC-1";
+	chassis-type = "tablet";
+	compatible = "daylight,jagar", "mediatek,mt8781", "mediatek,mt6789";
+
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	aliases {
+		mmc0 = &mmc0;
+		serial0 = &uart0;
+	};
+
+	chosen: chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/*
+		 * MTK preloader/LK leave UART0 muxed and running at 921600 8n1.
+		 * "earlycon" on the command line resolves through stdout-path and
+		 * uses the OF_EARLYCON_DECLARE(mtk8250, "mediatek,mt6577-uart")
+		 * hook, so it works before any clock driver has loaded.
+		 */
+		stdout-path = "serial0:921600n1";
+
+		/*
+		 * Fallback command line.  If the boot chain patches /chosen/bootargs
+		 * (MTK LK does fdt_setprop on the DT it hands to the kernel) that wins
+		 * and this string is discarded, so having it here is strictly safer
+		 * than having nothing.
+		 *
+		 * - earlycon + keep_bootcon: the only console that works before
+		 *   clk-mt6789.ko is loaded (uart0's "bus" clock is CLK_IFRAO_UART0,
+		 *   whose provider is a module in this defconfig -> mtk8250_probe
+		 *   returns -EPROBE_DEFER until then).
+		 * - clk/regulator/pd_ignore_unused: stop the kernel gating off the
+		 *   clocks, rails and power domains that LK left on for the panel,
+		 *   the framebuffer scanout and UFS.
+		 * - maxcpus=1: bring up cpu0 only for the first attempt; see the
+		 *   CPU discussion at the bottom of this file.
+		 * - arm64.nomte mirrors stock; stock has a reason to set it and we
+		 *   have no way to know what it is.
+		 */
+		bootargs = "earlycon keep_bootcon console=tty0 console=ttyS0,921600n1 loglevel=8 clk_ignore_unused regulator_ignore_unused pd_ignore_unused nokaslr maxcpus=1 arm64.nomte";
+
+		/*
+		 * LK initialises the panel itself and leaves a live scanout in DRAM.
+		 * Measured (atag,videolfb-* in the LK-generated DT):
+		 *   fb_base_l          = 0xfe8c1000
+		 *   vramSize           = 0x1650000   (3 x 0x76c000 + 0xc000 slack)
+		 *   islcmfound         = 1
+		 *   islcm_inited       = 0   -> the *preloader* did not init the LCM,
+		 *                              LK did.  So the panel is only alive
+		 *                              because LK left it that way: nothing
+		 *                              in this DT may reset the DSI path.
+		 * Panel is natively PORTRAIT 1200x1600; the line stride carries 16
+		 * pixels of padding, i.e. (1200 + 16) * 4 = 4864 bytes, which is
+		 * exactly consistent with vramSize / 3.
+		 *
+		 * NOTE: deliberately no "power-domains" property here.  Xiaomi
+		 * emerald adds power-domains = <&spm MT6789_POWER_DOMAIN_DISP>, which
+		 * makes the simple-framebuffer platform device wait for the scpsys
+		 * DISP domain -- and that domain needs topckgen/mmsys clocks, which
+		 * are modules.  The result is that simpledrm never probes and there is
+		 * no display output at all until userspace modprobes.  The domain is
+		 * already powered by LK, so we just don't mention it.
+		 */
+		framebuffer@fe8c1000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0xfe8c1000 0x0 ((1200 + 16) * 1600 * 4)>;
+			width = <1200>;
+			height = <1600>;
+			stride = <((1200 + 16) * 4)>;
+			format = "a8r8g8b8";
+		};
+	};
+
+	/*
+	 * 8 GiB in a single contiguous window, two DRAM ranks.
+	 * Confirmed twice: the LK DT /memory reg = <0x0 0x40000000 0x2 0x0>, and
+	 * the stock emimpu driver printing
+	 *   "dram_start(40000000),dram_end(23fffffff)".
+	 */
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x2 0x00000000>;
+	};
+
+	/*
+	 * ------------------------------------------------------------------
+	 * reserved-memory
+	 * ------------------------------------------------------------------
+	 * The stock DT declares 26 regions.  A mainline kernel only needs the
+	 * ones where *something other than Linux* owns the DRAM, because those
+	 * are the ones that either (a) are EMI-MPU protected, so a read/write
+	 * from EL1 raises an external abort, or (b) contain live firmware /
+	 * a live scanout buffer that we would silently corrupt.
+	 *
+	 * KEPT and why:
+	 *   bl31        TF-A runtime is executing there
+	 *   gz, gz_log  GenieZone hypervisor is executing there
+	 *   tee_secmem  TEE, EMI-MPU protected
+	 *   unmap2      region LK deliberately leaves unmapped
+	 *   mcupm       MCUPM firmware is running
+	 *   sspm, sspm_ap, debug_met  SSPM firmware is running + its shared/
+	 *               profiling buffers (debug_met is contiguous with sspm_ap)
+	 *   scp, scp_share  SCP firmware image + AP<->SCP shared buffer
+	 *   consys_emi, wifi_dma  connsys (MT7902) EMI windows, MPU protected
+	 *   atf_log     TF-A appends to this ring continuously at runtime
+	 *   dfdmcu      DFD MCU writes here on reset
+	 *   emi_mbist   EMI MBIST scratch
+	 *   crypto_hw   1 page, MPU protected
+	 *   dramc_rk0/1 the DRAM controller uses the last page of each rank
+	 *   framebuffer the scanout simpledrm is going to map -- must be no-map
+	 *               (see comment on that node)
+	 *   aee_lk      LK crash buffer; only 8 MiB and it lets LK's AEE survive
+	 *   log_store   preloader/LK log ring, readable from LK afterwards
+	 *   ramoops     see comment on that node -- this is a *feature* for us
+	 *
+	 * OMITTED and why:
+	 *   ssmr-reserved-cma_memory (0xa000000)  Android "secure memory"
+	 *     allocator (mediatek,trusted_mem).  No mainline consumer; it is
+	 *     ordinary DRAM that stock steals for DRM/SVP.  Reserving it would
+	 *     just cost us 160 MiB of usable RAM.
+	 *   aee_debug_kinfo (0x48080000+0x10000)  Android debug_kinfo blob for
+	 *     the vendor crash tooling.  Nothing writes it from EL3/EL2.
+	 *   minirdump (0x48170000+0x10000)  Android mini ramdump control block.
+	 *     Same reasoning.
+	 *   No modem regions at all.  Unlike mt6789-motorola-vicky and
+	 *     mt8781-zinwa-q25, jagar's stock DT has *no* md_mem/ap_md_smem/
+	 *     ccci_tag reservations -- this is a Wi-Fi-only tablet with no
+	 *     cellular modem, so there is nothing to reserve.
+	 *
+	 * RESIDUAL RISK: the stock DT only lists what LK chose to publish.
+	 * MT6789 EMI-MPU has 32 regions and jagar's stock kernel logs
+	 * "failed to set region permission" during boot, so at least one window
+	 * is configured by firmware outside this list.  If the mainline kernel
+	 * dies with an unattributed SError early in boot, an undeclared
+	 * MPU-protected window is the first thing to suspect.
+	 */
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		aee_kinfo_reserved: aee-debug-kinfo@48080000 {
+			/*
+			 * Not strictly needed (see above) but it is 64 KiB and it
+			 * sits immediately below ramoops; keeping it means the
+			 * 0x48080000..0x48170000 block matches stock exactly.
+			 */
+			reg = <0x0 0x48080000 0x0 0x10000>;
+			no-map;
+		};
+
+		/*
+		 * Persistent-store console log.
+		 *
+		 * This is the single most valuable observable-output channel on this
+		 * device: it needs no UART, no display and no working USB.  Geometry
+		 * is copied *exactly* from the stock kernel command line
+		 *   ramoops.mem_address=0x48090000 ramoops.mem_size=0xe0000
+		 *   ramoops.record_size=0x40000 ramoops.console_size=0x80000
+		 *   ramoops.pmsg_size=0x10000 ramoops.max_reason=5
+		 * so that after a failed mainline boot you can reflash boot_a, boot
+		 * stock Android (whose pstore uses the same driver and the same
+		 * geometry) and read the mainline kernel's console out of
+		 * /sys/fs/pstore/console-ramoops-0.
+		 *
+		 * Requires CONFIG_PSTORE_RAM=y, CONFIG_PSTORE_CONSOLE=y and
+		 * CONFIG_PSTORE_PMSG=y (all currently =m/unset).
+		 *
+		 * We deliberately DO NOT give this node the "ramoops" compatible.
+		 * If we did, the ramoops driver would build its zone layout from
+		 * the DT properties -- and a DT node has no ftrace-size default
+		 * (=> 0), whereas the module-param path LK drives via the kernel
+		 * cmdline defaults ftrace to 0x1000. That 0x1000 skew moves the
+		 * console zone, so a stock 5.10 kernel (driven by the same LK
+		 * cmdline) would read our ring at the wrong offset and report it
+		 * empty; it also races the cmdline dummy device for the region.
+		 *
+		 * Instead this stays a pure no-map reservation so the kernel
+		 * cannot allocate over the region, and LK's own cmdline params
+		 * (ramoops.mem_address=0x48090000 mem_size=0xe0000
+		 * record_size=0x40000 console_size=0x80000 pmsg_size=0x10000
+		 * max_reason=5) drive ramoops with EXACTLY the stock layout, so
+		 * the ring is byte-compatible for cross-kernel read-back.
+		 */
+		ramoops_mem: ramoops@48090000 {
+			reg = <0x0 0x48090000 0x0 0xe0000>;
+			no-map;
+		};
+
+		minirdump_mem: minirdump@48170000 {
+			reg = <0x0 0x48170000 0x0 0x10000>;
+			no-map;
+		};
+
+		bl31_mem: bl31@48200000 {
+			reg = <0x0 0x48200000 0x0 0x200000>;
+			no-map;
+		};
+
+		crypto_mem: crypto-hw@48401000 {
+			reg = <0x0 0x48401000 0x0 0x1000>;
+			no-map;
+		};
+
+		aee_lk_mem: aee-lk@50700000 {
+			reg = <0x0 0x50700000 0x0 0x800000>;
+			no-map;
+		};
+
+		consys_emi_mem: consys-emi@7e000000 {
+			reg = <0x0 0x7e000000 0x0 0x500000>;
+			no-map;
+		};
+
+		tee_sec_mem: tee-secmem@7ea00000 {
+			reg = <0x0 0x7ea00000 0x0 0x800000>;
+			no-map;
+		};
+
+		gz_log_mem: gz-log@7f200000 {
+			reg = <0x0 0x7f200000 0x0 0x41000>;
+			no-map;
+		};
+
+		unmap_mem: unmap@7f400000 {
+			reg = <0x0 0x7f400000 0x0 0x400000>;
+			no-map;
+		};
+
+		gz_mem: gz@7f800000 {
+			reg = <0x0 0x7f800000 0x0 0x600000>;
+			no-map;
+		};
+
+		mcupm_mem: mcupm@7feb0000 {
+			reg = <0x0 0x7feb0000 0x0 0x100000>;
+			no-map;
+		};
+
+		log_store_mem: log-store@7ffbf000 {
+			reg = <0x0 0x7ffbf000 0x0 0x40000>;
+			no-map;
+		};
+
+		mbist_mem: emi-mbist@7ffff000 {
+			reg = <0x0 0x7ffff000 0x0 0x1000>;
+			no-map;
+		};
+
+		scp_share_mem: scp-share@8f000000 {
+			reg = <0x0 0x8f000000 0x0 0x7a0000>;
+			no-map;
+		};
+
+		sspm_ap_mem: sspm-ap@9f560000 {
+			reg = <0x0 0x9f560000 0x0 0x110000>;
+			no-map;
+		};
+
+		debug_met_mem: debug-met@9f670000 {
+			reg = <0x0 0x9f670000 0x0 0x800000>;
+			no-map;
+		};
+
+		sspm_mem: sspm@9fe70000 {
+			reg = <0x0 0x9fe70000 0x0 0x180000>;
+			no-map;
+		};
+
+		wifi_mem: wifi@bf000000 {
+			reg = <0x0 0xbf000000 0x0 0x600000>;
+			no-map;
+		};
+
+		scp_mem: scp@bf800000 {
+			reg = <0x0 0xbf800000 0x0 0x600000>;
+			no-map;
+		};
+
+		atf_log_mem: atf-log@bfe00000 {
+			reg = <0x0 0xbfe00000 0x0 0x200000>;
+			no-map;
+		};
+
+		dfdmcu_mem: dfdmcu-dump@fe000000 {
+			reg = <0x0 0xfe000000 0x0 0x100000>;
+			no-map;
+		};
+
+		/*
+		 * Live scanout buffer.  Covers the whole stock reservation
+		 * (0x173e000), not just the one frame simpledrm maps, because LK's
+		 * display engine may still be flipping inside it.
+		 *
+		 * "no-map" is required, not cosmetic: simpledrm does ioremap_wc() on
+		 * this range, and ioremap of memory that is in the kernel's linear
+		 * map is refused.  Stock leaves this region mapped because the
+		 * vendor display driver reaches it a different way.
+		 */
+		fb_mem: framebuffer@fe8c1000 {
+			reg = <0x0 0xfe8c1000 0x0 0x173e000>;
+			no-map;
+		};
+
+		/*
+		 * Last page of each of the two DRAM ranks; the DRAM controller uses
+		 * these for calibration/self-refresh scratch.  Stock declares both,
+		 * which is independent confirmation of a 2-rank 8 GiB configuration.
+		 */
+		dramc_rk0_mem: dram-controller@13ffff000 {
+			reg = <0x1 0x3ffff000 0x0 0x1000>;
+			no-map;
+		};
+
+		dramc_rk1_mem: dram-controller@23ffff000 {
+			reg = <0x2 0x3ffff000 0x0 0x1000>;
+			no-map;
+		};
+	};
+
+	/* Root of the PMIC supply tree; not a real controllable regulator. */
+	reg_vsys: regulator-vsys {
+		compatible = "regulator-fixed";
+		regulator-name = "vsys";
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/*
+	 * microSD card-slot level shifter.  Measured from the stock
+	 * /odm/regulator-vqmmc-sdcard node: regulator-gpio on GPIO157,
+	 * gpio high = 1.8 V, gpio low = 3.0 V.
+	 */
+	reg_vqmmc_sd: regulator-vqmmc-sd {
+		compatible = "regulator-gpio";
+		regulator-name = "sdcard-io";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <3000000>;
+		regulator-settling-time-up-us = <1>;
+		regulator-settling-time-down-us = <2>;
+		gpios = <&pio 157 GPIO_ACTIVE_HIGH>;
+		gpios-states = <0>;
+		states = <1800000 0x1>,
+			 <3000000 0x0>;
+		enable-active-high;
+		vin-supply = <&mt6366_vmc_reg>;
+	};
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * Console
+ * ---------------------------------------------------------------------------
+ * No pinctrl-0 on purpose.  The preloader muxes the UART0 pads before we ever
+ * run, and we have no measurement telling us *which* pads jagar routes UART0
+ * to (mt6789 can put URXD0/UTXD0 on GPIO28/29, 136/137 or 182/183; the stock DT
+ * has no pinctrl entry for serial@11002000 either).  Re-muxing a guess could
+ * steal a pad that jagar uses for something else, so leave the mux alone.
+ *
+ * XXX UNKNOWN: whether UART0 is physically accessible on the DC-1 at all
+ * (test pads / pogo pins / USB-C sideband).  Nothing in the DT says.
+ * Note also that stock boots with mtk_printk_ctrl.disable_uart=1, which is a
+ * software gag on the stock kernel only; it does not affect earlycon here.
+ */
+&uart0 {
+	status = "okay";
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * Storage
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * XXX DTSI BUG (mt6789.dtsi:1798, present in both linux-mediatek mt6789-next
+ * and ellyq/mtk_g99-mainline): the node is named ufs-phy@11fa0000 but carries
+ *   reg = <0 0x01fa0000 0 0xc000>;
+ * i.e. the leading "1" of the base address was dropped.  mt8195.dtsi, which
+ * this node was cloned from, uses 0x11fa0000, and ufs_mtk_init() unconditionally
+ * calls phy_power_on() -> ufs_mtk_phy_set_active(), which does read-modify-write
+ * on that mapping.  With the wrong base those accesses land on an address with
+ * nothing behind it.
+ *
+ * Overriding it here rather than editing the .dtsi.  If the device hangs or
+ * takes an SError at ufshci probe, the two things to try, in order, are:
+ *   1. delete this reg override (go back to the upstream value, which is what
+ *      zinwa-q25 reportedly boots with)
+ *   2. set status = "disabled" on BOTH &ufsphy and &ufs -- the first boot does
+ *      not need UFS at all, the rootfs comes from the boot image ramdisk.
+ */
+&ufsphy {
+	reg = <0 0x11fa0000 0 0xc000>;
+	status = "okay";
+};
+
+&ufs {
+	status = "okay";
+
+	/* Stock: ufshci@11270000 vcc-supply -> mt6366 ldo_vemc. */
+	vcc-supply = <&mt6366_vemc_reg>;
+};
+
+/*
+ * microSD slot.  NOTE the wiring is the opposite way round from every other
+ * mt6789 board upstream: because jagar boots from UFS, MSDC0 (which is normally
+ * the eMMC controller) is free and the SD slot hangs off it, while MSDC1 carries
+ * the MT7902 Wi-Fi SDIO.  On xiaomi-emerald and zinwa-q25 the SD card is on
+ * mmc1.  Pins and CD polarity below are the measured stock values.
+ */
+&mmc0 {
+	status = "okay";
+
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc0_pins_default>;
+	pinctrl-1 = <&mmc0_pins_default>;
+
+	bus-width = <4>;
+	max-frequency = <200000000>;
+
+	cap-sd-highspeed;
+	sd-uhs-sdr12;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+	sd-uhs-ddr50;
+	no-mmc;
+	no-sdio;
+	disable-wp;
+
+	cd-debounce-delay-ms = <0>;
+	cd-gpios = <&pio 7 GPIO_ACTIVE_LOW>;
+
+	vmmc-supply = <&mt6366_vmch_reg>;
+	vqmmc-supply = <&reg_vqmmc_sd>;
+};
+
+/*
+ * MSDC1 = MT7902 Wi-Fi over SDIO (stock cmdline: wlan_mt7902_sdio_mt6789.*).
+ * Left disabled: there is no mainline MT7902 driver, and probing an SDIO bus
+ * whose power sequencing we have not reproduced buys nothing.
+ * Measured for later: WLAN-3V3 on GPIO152, WLAN-RST on GPIO89,
+ * host wake EINT on GPIO21.
+ */
+
+/*
+ * ---------------------------------------------------------------------------
+ * Display
+ * ---------------------------------------------------------------------------
+ * Keep mediatek-drm OUT of the picture.  mt6789.dtsi leaves the whole DDP
+ * pipeline (mmsys/mutex/ovl0/rdma0/color0/dither0/dsc0/dsi0) enabled, and
+ * CONFIG_DRM_MEDIATEK=m.  If that module ever binds it will reprogram the OVL
+ * and RDMA that LK is currently using to scan out our framebuffer, and the
+ * screen goes black -- which is exactly the observable output we are trying to
+ * get.  Disabling dsi0 leaves DDP_COMPONENT_DSI0 permanently missing from the
+ * CRTC path, so mtk_drm's component master never completes and never touches
+ * the hardware.  (xiaomi-emerald does the same thing.)
+ *
+ * The panel itself is a Sharp NT36523N, confirmed three ways:
+ *   - stock DSI child node: compatible = "sharp,nt36523n,vdo,120hz"
+ *   - stock dmesg loads panel-sharp-nt36523n-vdo-120hz.ko
+ *   - packed atag,videolfb string decodes to
+ *     "nt36523n_uxga_dsi_vdo_120hz_sharp_lcm_drv"
+ * Board wiring, measured:
+ *   reset-gpios = <&pio 85 GPIO_ACTIVE_HIGH>
+ *   vddi-supply = mt6366 vrf18 (1.8 V)
+ *   vpos/vneg   = TPS65132 outp ("LCD_AVDD") / outn ("LCD_AVEE") at i2c2 0x3e,
+ *                 enable GPIOs 39 and 38 respectively
+ *   TE          = EINT on GPIO83
+ *
+ * XXX UNKNOWN: the display timings.  They are NOT in any device tree on this
+ * device -- they live inside panel-sharp-nt36523n-vdo-120hz.ko (extracted at
+ * extracted/vendor_boot_a/vr/).  Until those are reverse-engineered a real
+ * panel node cannot be written, so this file intentionally ships none.
+ * When they are: drivers/gpu/drm/panel/panel-novatek-nt36523.c is the driver to
+ * extend -- it already carries lenovo,j606f-boe-nt36523w and
+ * xiaomi,elish-{boe,csot}-nt36523, i.e. it already handles tablet-class
+ * NT36523 panels; jagar just needs a new entry (single DSI link, 1200x1600).
+ * XXX Also beware: the stock LK DT contains a *stale* scalar property
+ *   atag,videolfb-lcmname = "nt36672e_fhdp_dsi_vdo_60hz_jdi_dphy_drv"
+ * which contradicts every other source.  It is a leftover default from the
+ * reference design; do not trust it.
+ */
+&dsi0 {
+	status = "disabled";
+};
+
+/*
+ * Mali-G57 (Valhall).  Left disabled as in the .dtsi: enabling it requires
+ * mali-supply/domain-supply from the PMIC, and the GPU is irrelevant to first
+ * boot.
+ */
+
+/*
+ * ---------------------------------------------------------------------------
+ * USB
+ * ---------------------------------------------------------------------------
+ * MT6789's USB2 block is MUSB ("mediatek,mt6789-musb"/"mediatek,mtk-musb"),
+ * confirmed by the stock node usb0@11200000 compatible
+ * "mediatek,mt6789-usb20" at the same base with the same IRQ (SPI 128).
+ *
+ * XXX CONFIG PROBLEM, not a DTS problem: the current .config has
+ * CONFIG_USB_MTU3=y but "# CONFIG_USB_MUSB_MEDIATEK is not set".  MTU3 is the
+ * *xHCI-style* MediaTek controller and will never match this node, so as
+ * configured today enabling usb2 gives no gadget and no USB output channel.
+ * CONFIG_USB_MUSB_MEDIATEK must be turned on (=y) for USB to be usable.
+ *
+ * PHY tuning values below are the measured stock ones and differ from the
+ * .dtsi defaults (which say eye-vrt = 4).
+ */
+&usb2 {
+	status = "okay";
+
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+};
+
+&u2phy {
+	status = "okay";
+};
+
+&u2port0 {
+	/*
+	 * Stock usb-phy@11f40000 measured: eye-vrt 7, eye-term 4, discth 7.
+	 * eye-term and discth already match the .dtsi; only eye-vrt differs
+	 * (the .dtsi says 4), so that is the only value overridden here.
+	 *
+	 * Two stock properties deliberately NOT carried over:
+	 *   mediatek,rx_sqth = 5   -- vendor-only, phy-mtk-tphy has no such
+	 *                             property (it understands only bc12,
+	 *                             eye-src, eye-vrt, eye-term, intr, discth,
+	 *                             pre-emphasis).
+	 *   nvmem-cell-names = "intr_cal"  -- mainline spells this cell "intr"
+	 *                             and needs an efuse cell node giving its
+	 *                             offset/length.  XXX UNKNOWN: that offset.
+	 *                             Without it the PHY uses its default
+	 *                             (uncalibrated) intr value, which is fine
+	 *                             for bring-up but will hurt eye margin.
+	 */
+	mediatek,eye-vrt = <7>;
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * I2C buses
+ * ---------------------------------------------------------------------------
+ * Bus numbering resolved by matching the stock DT register bases against the
+ * labels in mt6789.dtsi:
+ *   i2c2 @11eb0000  TPS65132 @0x3e (panel AVDD/AVEE), RT4539 amber backlight @0x3c
+ *   i2c5 @11017000  RT4539 white backlight @0x3c
+ *   i2c7 @11f00000  BQ78Z100 fuel gauge @0x55, RT9471 "secondary_chg" @0x53
+ *   i2c8 @11eb2000  Seiko S-35390A RTC @0x30
+ *   i2c9 @11eb3000  Wacom EMR digitiser @0x09
+ *
+ * Declared below: only the two devices that have a real mainline driver and a
+ * real binding.  Not declared, and why:
+ *   richtek,rt4539  no mainline driver at all (dual amber+white backlight;
+ *                   measured: amber @i2c2 0x3c enable GPIO99, white @i2c5 0x3c)
+ *   emr,wacom_i2c   no mainline driver (measured: i2c9 0x09, IRQ GPIO9,
+ *                   reset GPIO88 active-low, vdd WACOM-1V8 = GPIO150,
+ *                   vddl WACOM-3V3 = GPIO41, 110 ms post-power-on delay)
+ *   richtek,rt9471  driver exists (drivers/power/supply/rt9471.c) but on jagar
+ *                   this part is the *secondary* charger of a dual-charger
+ *                   topology, with a CE GPIO (GPIO151, active low) and an IRQ
+ *                   on GPIO8.  Bringing up half of a dual-charger setup on a
+ *                   device with a non-removable battery is not something to do
+ *                   blind, so it is left out.
+ *   tps65132       there is a mainline regulator driver, but its only consumer
+ *                   would be the panel node we cannot write yet.
+ *
+ * XXX UNKNOWN: the touchscreen.  The stock DT has an empty /touch node and a
+ * "mediatek,goodix-fp" node, but the touch controller's bus, address, IRQ and
+ * reset GPIO are configured by the vendor driver, not the DT.  pmaports MR
+ * !8365 guesses goodix-berlin-spi for motorola-vicky; for jagar it is
+ * unmeasured, so no touchscreen node is written.
+ */
+&i2c2 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c2_pins>;
+	clock-frequency = <100000>;
+
+	/* tps65132@3e -- panel AVDD/AVEE, see the display section */
+	/* backlight amber richtek,rt4539@3c -- no mainline driver */
+};
+
+&i2c7 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c7_pins>;
+	clock-frequency = <400000>;
+
+	/* richtek,rt9471@53 -- secondary charger, see above */
+
+	fuel-gauge@55 {
+		compatible = "ti,bq78z100";
+		reg = <0x55>;
+
+		/*
+		 * XXX UNKNOWN: the battery characteristics.  jagar's stock DT has
+		 * no simple-battery node and no design capacity anywhere, so
+		 * monitored-battery is omitted.  The gauge still reports
+		 * voltage/current/temperature/SoC from its own flash config, which
+		 * is enough to be a useful sign of life in
+		 * /sys/class/power_supply/.
+		 */
+	};
+};
+
+&i2c8 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c8_pins>;
+	clock-frequency = <100000>;
+
+	/*
+	 * Board RTC, in addition to the PMIC RTC.  Measured extras not carried
+	 * over because rtc-s35390a does not consume them: an alarm EINT on
+	 * GPIO14 (level low, wakeup-source) with GPIO13/14 both pulled up, and
+	 * a stock default-time of 2023-03-01 00:00:00.
+	 */
+	rtc@30 {
+		compatible = "sii,s35390a";
+		reg = <0x30>;
+	};
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * PMIC
+ * ---------------------------------------------------------------------------
+ * MT6366 behind the PMIC wrapper, IRQ on GPIO137, exactly as on the other two
+ * mt6789 boards.  Voltage windows are the generic MT6366 ones.
+ *
+ * Dependency warning: pwrap needs CLK_IFRAO_PMIC_* from infracfg_ao
+ * (COMMON_CLK_MT6789=m) and its IRQ from &pio (PINCTRL_MT6789=m), so nothing
+ * downstream of this node -- including &ufs's vcc-supply -- can probe until
+ * userspace has modprobed those.  That is a config choice, not a DT bug, but it
+ * is why the first boot must rely on earlycon + simplefb and not on UFS.
+ */
+&pwrap {
+	status = "okay";
+
+	pmic: pmic {
+		compatible = "mediatek,mt6358";
+		interrupt-controller;
+		interrupts-extended = <&pio 137 IRQ_TYPE_LEVEL_HIGH>;
+		#interrupt-cells = <2>;
+
+		mt6366_regulator: mt6366-regulator {
+			compatible = "mediatek,mt6366-regulator", "mediatek,mt6358-regulator";
+
+			vsys-ldo1-supply = <&reg_vsys>;
+			vsys-ldo2-supply = <&reg_vsys>;
+			vsys-ldo3-supply = <&reg_vsys>;
+			vsys-vs1-supply = <&reg_vsys>;
+			vsys-vs2-supply = <&reg_vsys>;
+			vsys-vdram1-supply = <&reg_vsys>;
+			vsys-vcore-supply = <&reg_vsys>;
+			vsys-vpa-supply = <&reg_vsys>;
+			vsys-vproc11-supply = <&reg_vsys>;
+			vsys-vproc12-supply = <&reg_vsys>;
+			vsys-vgpu-supply = <&reg_vsys>;
+			vsys-vmodem-supply = <&reg_vsys>;
+			vs1-ldo1-supply = <&mt6366_vs1_reg>;
+			vs2-ldo1-supply = <&mt6366_vdram1_reg>;
+			vs2-ldo2-supply = <&mt6366_vs2_reg>;
+			vs2-ldo3-supply = <&mt6366_vs2_reg>;
+
+			mt6366_vdram1_reg: vdram1 {
+				regulator-name = "vdram1";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <2087500>;
+				regulator-ramp-delay = <12500>;
+				regulator-enable-ramp-delay = <0>;
+				regulator-always-on;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+							   MT6397_BUCK_MODE_FORCE_PWM>;
+			};
+
+			mt6366_vcore_reg: vcore {
+				regulator-name = "vcore";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <200>;
+				regulator-always-on;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+							   MT6397_BUCK_MODE_FORCE_PWM>;
+			};
+
+			mt6366_vproc11_reg: vproc11 {
+				regulator-name = "vproc11";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <200>;
+				regulator-always-on;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+							   MT6397_BUCK_MODE_FORCE_PWM>;
+			};
+
+			mt6366_vproc12_reg: vproc12 {
+				regulator-name = "vproc12";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <200>;
+				regulator-always-on;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+							   MT6397_BUCK_MODE_FORCE_PWM>;
+			};
+
+			mt6366_vgpu_reg: vgpu {
+				regulator-name = "vgpu";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <900000>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <200>;
+				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
+							   MT6397_BUCK_MODE_FORCE_PWM>;
+
+				regulator-coupled-with = <&mt6366_vsram_gpu_reg>;
+				regulator-coupled-max-spread = <100000>;
+			};
+
+			mt6366_vs1_reg: vs1 {
+				regulator-name = "vs1";
+				regulator-min-microvolt = <1000000>;
+				regulator-max-microvolt = <2587500>;
+				regulator-ramp-delay = <12500>;
+				regulator-enable-ramp-delay = <0>;
+				regulator-always-on;
+			};
+
+			mt6366_vs2_reg: vs2 {
+				regulator-name = "vs2";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <2087500>;
+				regulator-ramp-delay = <12500>;
+				regulator-enable-ramp-delay = <0>;
+				regulator-always-on;
+			};
+
+			/* LPDDR4X, always on */
+			mt6366_vdram2_reg: vdram2 {
+				regulator-name = "vdram2";
+				regulator-min-microvolt = <600000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <3300>;
+				regulator-always-on;
+			};
+
+			mt6366_vrf12_reg: vrf12 {
+				regulator-name = "vrf12";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-enable-ramp-delay = <120>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			/* Panel VDDI (stock panel1@0 vddi-supply) */
+			mt6366_vrf18_reg: vrf18 {
+				regulator-name = "vrf18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <120>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			mt6366_vio18_reg: vio18 {
+				regulator-name = "vio18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <2700>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			mt6366_vio28_reg: vio28 {
+				regulator-name = "vio28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			mt6366_vusb_reg: vusb {
+				regulator-name = "vusb";
+				regulator-min-microvolt = <3000000>;
+				regulator-max-microvolt = <3100000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-always-on;
+			};
+
+			mt6366_va12_reg: va12 {
+				regulator-name = "va12";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-always-on;
+			};
+
+			mt6366_vaux18_reg: vaux18 {
+				regulator-name = "vaux18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			mt6366_vxo22_reg: vxo22 {
+				regulator-name = "vxo22";
+				regulator-min-microvolt = <2200000>;
+				regulator-max-microvolt = <2200000>;
+				regulator-enable-ramp-delay = <120>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			mt6366_vsram_proc11_reg: vsram-proc11 {
+				regulator-name = "vsram_proc11";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <240>;
+				regulator-always-on;
+			};
+
+			mt6366_vsram_proc12_reg: vsram-proc12 {
+				regulator-name = "vsram_proc12";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <240>;
+				regulator-always-on;
+			};
+
+			mt6366_vsram_others_reg: vsram-others {
+				regulator-name = "vsram_others";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <240>;
+				regulator-always-on;
+			};
+
+			mt6366_vsram_core_reg: vsram-core {
+				regulator-name = "vsram_core";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1293750>;
+				regulator-enable-ramp-delay = <240>;
+				regulator-always-on;
+			};
+
+			mt6366_vsram_gpu_reg: vsram-gpu {
+				regulator-name = "vsram_gpu";
+				regulator-min-microvolt = <750000>;
+				regulator-max-microvolt = <950000>;
+				regulator-ramp-delay = <6250>;
+				regulator-enable-ramp-delay = <240>;
+
+				regulator-coupled-with = <&mt6366_vgpu_reg>;
+				regulator-coupled-max-spread = <100000>;
+			};
+
+			/* UFS device VCC (stock ufshci vcc-supply) */
+			mt6366_vemc_reg: vemc {
+				regulator-name = "vemc";
+				regulator-min-microvolt = <2900000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-enable-ramp-delay = <60>;
+				regulator-boot-on;
+			};
+
+			/* microSD VMMC */
+			mt6366_vmch_reg: vmch {
+				regulator-name = "vmch";
+				regulator-min-microvolt = <2900000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-enable-ramp-delay = <60>;
+			};
+
+			/* microSD VQMMC rail feeding the GPIO level shifter */
+			mt6366_vmc_reg: vmc {
+				regulator-name = "vmc";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-enable-ramp-delay = <60>;
+			};
+
+			mt6366_vcn18_reg: vcn18 {
+				regulator-name = "vcn18";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <270>;
+			};
+
+			mt6366_vcn28_reg: vcn28 {
+				regulator-name = "vcn28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-enable-ramp-delay = <270>;
+			};
+
+			mt6366_vcn33_reg: vcn33 {
+				regulator-name = "vcn33";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3500000>;
+				regulator-enable-ramp-delay = <270>;
+			};
+
+			mt6366_vaud28_reg: vaud28 {
+				regulator-name = "vaud28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+
+			mt6366_vibr_reg: vibr {
+				regulator-name = "vibr";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-enable-ramp-delay = <60>;
+			};
+
+			mt6366_vefuse_reg: vefuse {
+				regulator-name = "vefuse";
+				regulator-min-microvolt = <1700000>;
+				regulator-max-microvolt = <1900000>;
+				regulator-enable-ramp-delay = <270>;
+			};
+
+			mt6366_vbif28_reg: vbif28 {
+				regulator-name = "vbif28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-enable-ramp-delay = <270>;
+			};
+
+			mt6366_vldo28_reg: vldo28 {
+				regulator-name = "vldo28";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <3000000>;
+				regulator-enable-ramp-delay = <270>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+		};
+
+		/*
+		 * The DC-1 also has a Seiko S-35390A RTC on i2c8 @0x30; the PMIC RTC
+		 * is still the one the kernel should use for time keeping.
+		 */
+		mt6358_rtc: rtc {
+			compatible = "mediatek,mt6358-rtc";
+		};
+
+		/*
+		 * Power and volume-up come in through the PMIC, not through GPIOs:
+		 * the stock /odm/gpio-keys node is empty and /mt6366keys carries
+		 * KEY_POWER (0x74) and KEY_VOLUMEUP (0x73).
+		 * XXX UNKNOWN: volume-down.  It is not in the stock DT at all; the
+		 * DC-1 may simply not have one.
+		 */
+		mt6358_keys: keys {
+			compatible = "mediatek,mt6358-keys";
+
+			power-off-time-sec = <0>;
+			mediatek,long-press-mode = <1>;
+
+			power {
+				linux,keycodes = <KEY_POWER>;
+				wakeup-source;
+			};
+
+			home {
+				linux,keycodes = <KEY_VOLUMEUP>;
+			};
+		};
+	};
+};
+
+&pio {
+	/*
+	 * Measured from the stock pinctrl states mmc0default / mmc0@normal:
+	 *   GPIO55 MSDC0_CLK, GPIO56 MSDC0_CMD, GPIO58..61 MSDC0_DAT0..3,
+	 *   GPIO7 plain GPIO with pull-up = card detect.
+	 * (GPIO57/MSDC0_RSTB is unused -- it only matters for eMMC.)
+	 */
+	mmc0_pins_default: mmc0-pins-default-state {
+		pins-cd {
+			pinmux = <PINMUX_GPIO7__FUNC_GPIO7>;
+			bias-pull-up;
+		};
+
+		pins-clk {
+			pinmux = <PINMUX_GPIO55__FUNC_MSDC0_CLK>;
+			drive-strength = <3>;
+			input-enable;
+		};
+
+		pins-cmd-dat {
+			pinmux = <PINMUX_GPIO56__FUNC_MSDC0_CMD>,
+				 <PINMUX_GPIO58__FUNC_MSDC0_DAT0>,
+				 <PINMUX_GPIO59__FUNC_MSDC0_DAT1>,
+				 <PINMUX_GPIO60__FUNC_MSDC0_DAT2>,
+				 <PINMUX_GPIO61__FUNC_MSDC0_DAT3>;
+			drive-strength = <3>;
+			input-enable;
+		};
+	};
+
+	/* All three measured from the stock i2c{2,7,8}_default pinctrl states. */
+	i2c2_pins: i2c2-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO134__FUNC_SCL2>,
+				 <PINMUX_GPIO135__FUNC_SDA2>;
+			bias-pull-up;
+			input-enable;
+		};
+	};
+
+	i2c7_pins: i2c7-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO144__FUNC_SCL7>,
+				 <PINMUX_GPIO145__FUNC_SDA7>;
+			bias-pull-up;
+		};
+	};
+
+	i2c8_pins: i2c8-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO146__FUNC_SCL8>,
+				 <PINMUX_GPIO147__FUNC_SDA8>;
+			bias-pull-up;
+			input-enable;
+		};
+	};
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * CPUs
+ * ---------------------------------------------------------------------------
+ * mt6789.dtsi declares and enables all EIGHT cores:
+ *   cluster0: cpu0..cpu5  Cortex-A55, MPIDR Aff1 = 0..5 (reg 0x000..0x500)
+ *   cluster1: cpu6, cpu7  Cortex-A76, MPIDR Aff1 = 6..7 (reg 0x600, 0x700)
+ * (the .dtsi also has the arm,cortex-a76-pmu node commented out, and
+ * mt6789-xiaomi-emerald.dts carries a FIXME saying >4 CPUs hangs at boot, that
+ * cpu4/cpu5 can be onlined later from sysfs, and that "CPU6 and CPU7 fail to
+ * boot due to some capability conflicts")
+ *
+ * So the two cores that do not work are the two big A76s, cpu6 and cpu7.
+ *
+ * Recommendation, in order of preference:
+ *  1. First boot: do NOT touch the DT, use maxcpus=1 on the command line
+ *     (already in the fallback bootargs above).  One core is plenty for
+ *     getting output, and it removes secondary bring-up from the list of
+ *     things that can hang before we see anything.
+ *  2. Once cpu0 boots: uncomment the two overrides below.  Note the property
+ *     value MUST be "fail", not "disabled" -- arm64 enumerates CPUs through
+ *     of_get_next_cpu_node(), which skips nodes via __of_device_is_fail() only
+ *     (drivers/of/base.c:840).  status = "disabled" on a cpu node is silently
+ *     ignored and the kernel will still try to PSCI_CPU_ON them.
+ *  3. Do not delete the nodes: &cpu6/&cpu7 are referenced by cpu-map,
+ *     dsu-pmu, the GIC ppi-partition affinity list and two thermal
+ *     cooling-maps.  Marking them "fail" leaves those phandles resolvable;
+ *     the affected drivers (arm_dsu_pmu, gic ppi partitions, cpufreq-cooling)
+ *     degrade with a warning instead of failing to build the DTB.
+ */
+/*
+&cpu6 {
+	status = "fail";
+};
+
+&cpu7 {
+	status = "fail";
+};
+*/
+
+/*
+ * cpu-supply is deliberately not set on any CPU.  It is only consumed by
+ * mediatek-cpufreq, and ARM_MEDIATEK_CPUFREQ_HW is what this SoC uses
+ * (performance-domains, already in the .dtsi), which needs no regulator.
+ * If classic cpufreq is ever wanted: cpu0..cpu5 -> mt6366_vproc11_reg,
+ * cpu6..cpu7 -> mt6366_vproc12_reg (as on emerald).
+ */
+
+#include "jagar-overlay-stubs.dtsi"

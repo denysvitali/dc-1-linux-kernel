@@ -1508,7 +1508,14 @@ unlock_out:
 		clk_core_disable_unprepare(core->parent);
 }
 
-static bool clk_ignore_unused __initdata;
+/*
+ * jagar: default to ON. With MFD_SYSCON enabled the clock framework finally
+ * manages the MT6789 clocks, and gates the DSI/display clocks LK left running
+ * because nothing in mainline claims them -- which blanks the panel that is
+ * currently our only debug channel. arm64 has no CMDLINE_EXTEND, so this is
+ * defaulted here rather than passed on the cmdline.
+ */
+static bool clk_ignore_unused __initdata = true;
 static int __init clk_ignore_unused_setup(char *__unused)
 {
 	clk_ignore_unused = true;

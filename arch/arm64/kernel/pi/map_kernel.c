@@ -20,6 +20,12 @@ extern const u8 __eh_frame_start[], __eh_frame_end[];
 
 extern void idmap_cpu_replace_ttbr1(phys_addr_t pgdir);
 
+static __always_inline void jagar_wdt_checkpoint(u32 seconds)
+{
+	/* disabled: this write faults once the MMU is on, hanging boot */
+	(void)seconds;
+}
+
 static void __init map_segment(pgd_t *pg_dir, phys_addr_t *pgd, u64 va_offset,
 			       void *start, void *end, pgprot_t prot,
 			       bool may_use_cont, int root_level)
@@ -246,14 +252,20 @@ asmlinkage void __init early_map_kernel(u64 boot_status, phys_addr_t fdt)
 	int root_level = 4 - CONFIG_PGTABLE_LEVELS;
 	int va_bits = VA_BITS;
 	int chosen;
-	void *fdt_mapped = map_fdt(fdt);
+	void *fdt_mapped;
+
+	jagar_wdt_checkpoint(5);
+	fdt_mapped = map_fdt(fdt);
+	jagar_wdt_checkpoint(6);
 
 	/* Clear BSS and the initial page tables */
 	memset(__bss_start, 0, (char *)init_pg_end - (char *)__bss_start);
+	jagar_wdt_checkpoint(7);
 
 	/* Parse the command line for CPU feature overrides */
 	chosen = fdt_path_offset(fdt_mapped, chosen_str);
 	init_feature_override(boot_status, fdt_mapped, chosen);
+	jagar_wdt_checkpoint(8);
 
 	if (IS_ENABLED(CONFIG_ARM64_64K_PAGES) && !cpu_has_lva()) {
 		va_bits = VA_BITS_MIN;
@@ -284,6 +296,8 @@ asmlinkage void __init early_map_kernel(u64 boot_status, phys_addr_t fdt)
 	if (IS_ENABLED(CONFIG_ARM64_LPA2) && va_bits > VA_BITS_MIN)
 		remap_idmap_for_lpa2();
 
+	jagar_wdt_checkpoint(9);
 	va_base = KIMAGE_VADDR + kaslr_offset;
 	map_kernel(kaslr_offset, va_base - pa_base, root_level);
+	jagar_wdt_checkpoint(10);
 }

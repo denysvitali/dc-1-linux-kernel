@@ -1,0 +1,371 @@
+# Kernel CI for denysvitali/dc-1-linux-kernel.
+#
+# Lives here in the firmware repo as the tracked master copy; it is installed
+# into the kernel repo as .github/workflows/kernel-build.yml. Keep the two in
+# sync -- the same two-copies-of-rc.sh trap applies.
+#
+# TOOLCHAIN: clang + LLD (LLVM=-19), NOT GCC. This is not a preference -- a
+# GCC-built kernel from this exact tree was flashed to slot B on 2026-08-04 and
+# did not boot, while the clang-built #101 boots reliably. The working kernel
+# reports "Alpine clang 19.1.4, LLD 19.1.4". Do not "simplify" this to gcc.
+#
+# Runner choice: ubuntu-24.04-arm, NATIVE aarch64. The repo is public, so ARM
+# runners are free and unmetered. Native means no cross-compiler and no second
+# toolchain whose codegen differences we would have to reason about when a CI
+# kernel behaves differently from a locally built one. To move to x86 instead,
+# set runs-on: ubuntu-latest, install gcc-aarch64-linux-gnu and pass
+# CROSS_COMPILE=aarch64-linux-gnu- -- nothing else changes.
+name: kernel
+
+on:
+  push:
+    # Build upstream master and the single device integration branch on push.
+    branches: ['master', 'jagar']
+  pull_request:
+  workflow_dispatch:
+
+# A new push makes an in-flight build of the same branch pointless.
+concurrency:
+  group: kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+
+    # contents: write is needed for the rolling prerelease below. Actions
+    # ARTIFACTS require an authenticated API call to download (anonymous GET
+    # returns 401), which makes them useless to anything that just wants to
+    # fetch the kernel and flash it. Release assets are plain public URLs.
+    permissions:
+      contents: write
+
+    # CCACHE_DIR is set EXPLICITLY and used by both cache steps. ccache >= 4.0
+    # defaults to the XDG path ~/.cache/ccache, NOT ~/.ccache -- so caching
+    # ~/.ccache silently archived an empty directory. The symptom was a "Save
+    # ccache" step completing in 0s while the build stayed cold, which reads
+    # like a working cache right up until you look at the timings.
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+    steps:
+      # fetch-depth: 1 is worth a comment because the obvious instinct is
+      # fetch-depth: 0 "so setlocalversion can see the tags". That cost ~14
+      # MINUTES per run here -- this repo is a fork of torvalds/linux, so depth
+      # 0 clones the ENTIRE kernel history on every build. We do not need it:
+      # jagar_defconfig has "# CONFIG_LOCALVERSION_AUTO is not set", so
+      # scripts/setlocalversion never invokes git describe. If LOCALVERSION_AUTO
+      # is ever turned on, add `fetch-tags: true` rather than depth 0.
+      # ref: the PR HEAD, not the merge commit. On pull_request events
+      # actions/checkout defaults to refs/pull/N/merge -- jagar merged into the
+      # fork's master, which tracks upstream. That silently built a DIFFERENT
+      # tree than the branch: the artifact reported 7.2.0-rc6+ while the branch
+      # is based on v7.2-rc5. CI must build what we are actually shipping.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison ccache flex libelf-dev libssl-dev lz4 \
+            device-tree-compiler kmod cpio
+          # Pin clang 19 to match the toolchain the device is KNOWN to boot
+          # (Alpine clang 19.1.4 / LLD 19.1.4). ubuntu-24.04 defaults to clang
+          # 18, and this project has already lost a boot cycle to a toolchain
+          # mismatch (a GCC build of this exact tree does not boot at all), so
+          # "a clang" is not good enough -- it has to be the same major.
+          sudo apt-get install -y --no-install-recommends clang-19 lld-19 llvm-19
+          clang-19 --version | head -1
+
+      # CACHING. A cold build of this tree is ~40 min; a warm one should be a
+      # few minutes. Everything below exists to keep the hit rate high --
+      # ccache is only as good as the things that are ALLOWED to vary between
+      # runs, and a kernel build has several that will silently poison it.
+      #
+      # RESTORE/SAVE ARE SPLIT DELIBERATELY. actions/cache only saves on a
+      # SUCCESSFUL job, which is precisely backwards: a build that failed
+      # halfway still compiled thousands of objects, and throwing those away
+      # means the next attempt pays full price again. The save step below runs
+      # with if: always().
+      #
+      # The key carries github.run_id so every run writes a NEW entry (cache
+      # entries are immutable -- reusing a key makes the save a silent no-op).
+      # The restore-keys prefixes then pick the most recent entry that shares
+      # the defconfig, falling back to any arm64 entry.
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-
+            ccache-arm64-llvm-
+
+      - name: Configure ccache
+        run: |
+          # 8G: the repo-wide GitHub cache budget is 10G and this is the only
+          # thing we cache. Too small is the classic way to get a 20% hit rate.
+          ccache --set-config max_size=8G
+          ccache --set-config compression=true
+          ccache --set-config compression_level=1
+          # Hash the compiler by CONTENT, not mtime -- apt can reinstall an
+          # identical clang and invalidate the entire cache on mtime alone.
+          ccache --set-config compiler_check=content
+          # Kernel-specific poison, all of it safe to ignore here:
+          #   time_macros        __DATE__/__TIME__ (we pin the timestamp below)
+          #   include_file_mtime the checkout has fresh mtimes EVERY run, so
+          #                      without this literally nothing ever hits
+          #   include_file_ctime same, for ctime
+          #   file_stat_matches  compare content, not stat
+          ccache --set-config sloppiness=time_macros,include_file_mtime,include_file_ctime,file_stat_matches,pch_defines,system_headers
+          ccache --zero-stats
+          ccache --show-config | head -20
+
+      - name: Configure kernel
+        run: make ARCH=arm64 LLVM=-19 jagar_defconfig
+
+      # The bug that cost a boot cycle on 2026-08-04: the running kernel had
+      # been built without CONFIG_MULTIUSER, so dropbear died with "Failed to
+      # set euid" straight after key exchange -- indistinguishable from an auth
+      # failure. olddefconfig can silently drop a symbol when its dependencies
+      # change, so assert the ones we cannot afford to lose RATHER than trust
+      # that the defconfig still implies them.
+      - name: Assert load-bearing config symbols
+        run: |
+          fail=0
+          # FILE_LOCKING: without it flock/fcntl return ENOSYS and apk fails with
+          # "Unable to lock database: Function not implemented" -- which reads as a
+          # broken package manager, not a missing kernel option.
+          # ADVISE_SYSCALLS: madvise/fadvise ENOSYS breaks userspace equally opaquely.
+          # BINFMT_SCRIPT: DHCP and normal Alpine hooks are shebang scripts;
+          # without it udhcpc obtains a lease but silently fails to apply it.
+          # The factory FDT already describes the two board NTCs and S35390A;
+          # losing these symbols silently removes all read-only thermal/RTC data.
+          # SHMEM/MEMFD_CREATE: Wayland clients abort when creating their shared
+          # pixel buffers; foot reports "Function not implemented".
+          # INPUT_EVDEV/TOUCHSCREEN_ILITEK: libinput otherwise sees no DC-1 touch
+          # device even if the controller and IRQ both probe successfully.
+          for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD \
+                     CONFIG_MODULES CONFIG_KEXEC CONFIG_OF_OVERLAY \
+                     CONFIG_BINFMT_SCRIPT \
+                     CONFIG_EPOLL CONFIG_SIGNALFD CONFIG_TIMERFD CONFIG_EVENTFD \
+                     CONFIG_SECCOMP CONFIG_SECCOMP_FILTER \
+                     CONFIG_SHMEM CONFIG_MEMFD_CREATE \
+                     CONFIG_FILE_LOCKING CONFIG_ADVISE_SYSCALLS \
+                     CONFIG_THERMAL CONFIG_THERMAL_OF CONFIG_GENERIC_ADC_THERMAL \
+                     CONFIG_RTC_CLASS CONFIG_RTC_DRV_S35390A \
+                     CONFIG_INPUT_EVDEV CONFIG_INPUT_MISC CONFIG_INPUT_HALL_SWITCH \
+                     CONFIG_TOUCHSCREEN_ILITEK \
+                     CONFIG_USB_CONFIGFS_ECM CONFIG_CHARGER_MT6375_READONLY \
+                     CONFIG_BACKLIGHT_RT4539; do
+            if ! grep -q "^${sym}=y" .config; then
+              echo "::error::${sym} is not =y in the generated .config"
+              fail=1
+            fi
+          done
+          if ! grep -q '^CONFIG_DRM_PANFROST=m' .config; then
+            echo "::error::CONFIG_DRM_PANFROST is not =m in the generated .config"
+            fail=1
+          fi
+          if ! grep -q '^CONFIG_MTK_MT6789_LIVE_GPU_OVERLAY=m' .config; then
+            echo "::error::CONFIG_MTK_MT6789_LIVE_GPU_OVERLAY is not =m in the generated .config"
+            fail=1
+          fi
+          if ! grep -q '^CONFIG_COMMON_CLK_MT6789_MFGCFG=y' .config; then
+            echo "::error::CONFIG_COMMON_CLK_MT6789_MFGCFG is not =y in the generated .config"
+            fail=1
+          fi
+          exit $fail
+
+      # HOSTCC is clang too, NOT gcc: LLVM=-19 switches the host toolchain to
+      # LLVM as well, so a gcc HOSTCC ends up driving lld and dies with
+      # "collect2: fatal error: cannot find 'ld'" while building fixdep --
+      # before a single kernel object is compiled.
+      #
+      # CC="ccache clang" rather than the /usr/lib/ccache PATH trick: that
+      # directory ships gcc/g++ symlinks and does NOT reliably contain clang,
+      # so the PATH approach silently builds WITHOUT ccache and every run looks
+      # like a cold cache for no visible reason.
+      #
+      # KBUILD_BUILD_TIMESTAMP/USER/HOST are pinned because they land in the
+      # kernel via __DATE__-style macros; letting them float changes compiler
+      # input on every single run and defeats the cache no matter how it is
+      # keyed. This is also why the running kernel's version string shows a
+      # fixed build identity rather than the wall clock.
+      - name: Build Image, DTBs and modules
+        env:
+          KBUILD_BUILD_TIMESTAMP: '@0'
+          KBUILD_BUILD_USER: ci
+          KBUILD_BUILD_HOST: github
+        run: |
+          make ARCH=arm64 LLVM=-19 \
+            CC="ccache clang-19" HOSTCC="ccache clang-19" \
+            -j"$(nproc)" Image dtbs modules
+          make ARCH=arm64 LLVM=-19 \
+            INSTALL_MOD_PATH="$PWD/modules-staging" modules_install
+          tar -C modules-staging -czf "jagar-modules-${GITHUB_SHA}.tar.gz" \
+            lib/modules
+
+      # Reported so a collapsing hit rate is VISIBLE rather than showing up
+      # only as "CI got slower". A healthy warm run is >90% direct hits.
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats --verbose || ccache --show-stats
+
+      # if: always() -- see the restore step. A failed build still populated
+      # the cache and that work is worth keeping.
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-arm64-llvm-${{ hashFiles('arch/arm64/configs/jagar_defconfig') }}-${{ github.run_id }}
+
+      # Assert the artifacts exist and are non-trivial. A make that "succeeded"
+      # while producing no Image has happened often enough elsewhere in this
+      # project that it is not worth assuming.
+      - name: Verify artifacts
+        run: |
+          Image=arch/arm64/boot/Image
+          dtb=arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar.dtb
+          probe_dtb=arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar-gpu-probe.dtb
+          live_probe_dtbo=arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar-live-gpu-probe.dtbo
+          modules="jagar-modules-${GITHUB_SHA}.tar.gz"
+          for f in "$Image" "$dtb" "$probe_dtb" "$live_probe_dtbo" "$modules"; do
+            [ -s "$f" ] || { echo "::error::missing or empty: $f"; exit 1; }
+          done
+          panfrost=$(find modules-staging -type f -name 'panfrost.ko*' -print -quit)
+          [ -n "$panfrost" ] || {
+            echo "::error::Panfrost module missing from modules installation"
+            exit 1
+          }
+          overlay_loader=$(find modules-staging -type f \
+            -name 'mt6789-live-gpu-overlay.ko*' -print -quit)
+          [ -n "$overlay_loader" ] || {
+            echo "::error::MT6789 live GPU overlay loader missing from modules installation"
+            exit 1
+          }
+          normal_status=$(fdtget -t s "$dtb" /soc/gpu@13000000 status)
+          probe_status=$(fdtget -t s "$probe_dtb" /soc/gpu@13000000 status)
+          [ "$normal_status" = disabled ] || {
+            echo "::error::normal jagar DTB unexpectedly enables the GPU"
+            exit 1
+          }
+          [ "$probe_status" = okay ] || {
+            echo "::error::GPU probe DTB does not enable the GPU"
+            exit 1
+          }
+          opp_nodes=$(fdtget -l "$probe_dtb" /opp-table-gpu-jagar-probe |
+            grep -c '^opp-')
+          [ "$opp_nodes" -eq 1 ] || {
+            echo "::error::GPU probe DTB must contain exactly one OPP"
+            exit 1
+          }
+          opp_hz=$(fdtget -t i "$probe_dtb" \
+            /opp-table-gpu-jagar-probe/opp-390000000 opp-hz)
+          opp_uv=$(fdtget -t i "$probe_dtb" \
+            /opp-table-gpu-jagar-probe/opp-390000000 opp-microvolt)
+          [ "$opp_hz" = "0 390000000" ] && [ "$opp_uv" = 675000 ] || {
+            echo "::error::GPU probe OPP is not exactly 390MHz/675mV"
+            exit 1
+          }
+          for symbol in scpsys soc topckgen_clk infracfg_ao_clk \
+                        mfg_top_config_clk gic mali mt6358_vgpu_reg \
+                        mt6358_vsram_gpu_reg; do
+            fdtget -p "$live_probe_dtbo" /__fixups__ | grep -qx "$symbol" || {
+              echo "::error::live-DT GPU probe overlay has no $symbol fixup"
+              exit 1
+            }
+          done
+          live_opp=/fragment@1/__overlay__/opp-table-jagar-live-gpu-probe/opp-390000000
+          live_opp_hz=$(fdtget -t i "$live_probe_dtbo" "$live_opp" opp-hz)
+          live_opp_uv=$(fdtget -t i "$live_probe_dtbo" "$live_opp" opp-microvolt)
+          [ "$live_opp_hz" = "0 390000000" ] && [ "$live_opp_uv" = 850000 ] || {
+            echo "::error::live-DT GPU probe OPP is not exactly 390MHz/850mV"
+            exit 1
+          }
+          for fragment in fragment@2 fragment@3; do
+            min_uv=$(fdtget -t i "$live_probe_dtbo" "/$fragment/__overlay__" \
+              regulator-min-microvolt)
+            max_uv=$(fdtget -t i "$live_probe_dtbo" "/$fragment/__overlay__" \
+              regulator-max-microvolt)
+            [ "$min_uv" = 850000 ] && [ "$max_uv" = 850000 ] || {
+              echo "::error::$fragment does not pin the live GPU rail at 850mV"
+              exit 1
+            }
+          done
+          ls -l "$Image" "$dtb" "$probe_dtb" "$live_probe_dtbo" \
+            "$panfrost" "$overlay_loader" "$modules"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jagar-kernel-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            arch/arm64/boot/Image
+            arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar*.dtb
+            arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar*.dtbo
+            jagar-modules-${{ github.sha }}.tar.gz
+            .config
+
+      # POSITIVE CONTROL for the cache itself. A build that bypasses ccache
+      # entirely -- wrong CCACHE_DIR, no clang symlink, CC= override ignored --
+      # produces a green job, a 0s cache save and a permanently cold cache,
+      # which is indistinguishable from "working" unless something asserts it.
+      # If ccache saw zero cacheable calls, the caching is broken, not slow.
+      # Rolling prerelease so the built kernel is fetchable WITHOUT a token:
+      #   curl -sL https://github.com/denysvitali/dc-1-linux-kernel/releases/download/jagar-latest/Image
+      # The tag is deleted and recreated each run: this is explicitly a
+      # "latest build" pointer, not a version history, and a stale asset here
+      # would be worse than none -- flashing a kernel you believe is current
+      # but is not is exactly the failure this project keeps hitting.
+      - name: Publish Image as rolling prerelease
+        # head_ref is set on pull_request events (github.ref is refs/pull/N/merge
+        # there, so the old refs/heads/jagar test silently skipped this step and
+        # the release was never published).
+        if: github.ref_name == 'jagar' || github.head_ref == 'jagar'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp arch/arm64/boot/Image Image
+          cp arch/arm64/boot/dts/mediatek/mt8781-daylight-jagar.dtb . || true
+          sha256sum Image *.dtb > SHA256SUMS
+          cat SHA256SUMS
+          gh release delete jagar-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create jagar-latest \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "jagar kernel (latest build)" \
+            --notes "Built from $GITHUB_SHA by run $GITHUB_RUN_ID. LLVM=-19 (clang 19), jagar_defconfig. Rolling tag: contents change every push to jagar." \
+            Image *.dtb SHA256SUMS
+
+      - name: Assert ccache was actually used
+        run: |
+          # Field names verified against ccache 4.10.2 --print-stats, and the
+          # arithmetic verified with two throwaway compiles (miss then hit).
+          # The previous version of this step parsed "cacheable_calls", which
+          # DOES NOT EXIST -- awk returned empty, the check saw 0, and it
+          # failed a perfectly good build. A checker that cannot fail correctly
+          # is worse than no checker.
+          stats=$(ccache --print-stats)
+          echo "$stats" | grep -E 'direct_cache_hit|preprocessed_cache_hit|cache_miss|files_in_cache|cache_size_kibibyte'
+          calls=$(echo "$stats" | awk '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"||$1=="cache_miss"{t+=$2} END{print t+0}')
+          files=$(echo "$stats" | awk '$1=="files_in_cache"{print $2+0}')
+          hits=$(echo "$stats" | awk '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"{t+=$2} END{print t+0}')
+          echo "calls=$calls files_in_cache=${files:-0} hits=$hits dir=$CCACHE_DIR"
+          if [ "$calls" -eq 0 ]; then
+            echo "::error::ccache saw ZERO compiles -- the build is bypassing ccache entirely"
+            exit 1
+          fi
+          if [ "${files:-0}" -eq 0 ]; then
+            echo "::error::ccache stored nothing ($calls compiles seen) -- cache dir is not being written"
+            exit 1
+          fi
+          # Informational only: a cold run legitimately has 0 hits.
+          echo "::notice::ccache $hits hits / $calls compiles"

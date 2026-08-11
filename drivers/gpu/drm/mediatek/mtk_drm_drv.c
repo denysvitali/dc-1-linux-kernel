@@ -37,6 +37,16 @@
 #define DRIVER_MAJOR 1
 #define DRIVER_MINOR 0
 
+static bool jagar_skip_drm_client;
+module_param(jagar_skip_drm_client, bool, 0644);
+MODULE_PARM_DESC(jagar_skip_drm_client,
+		 "Request skipping DRM client setup during master bind");
+
+static bool jagar_drm_client_skipped;
+module_param(jagar_drm_client_skipped, bool, 0444);
+MODULE_PARM_DESC(jagar_drm_client_skipped,
+		 "Whether DRM client setup was skipped during master bind");
+
 static const struct drm_mode_config_helper_funcs mtk_drm_mode_config_helpers = {
 	.atomic_commit_tail = drm_atomic_helper_commit_tail_rpm,
 };
@@ -120,6 +130,29 @@ static unsigned int mt8167_mtk_ddp_main[] = {
 	DDP_COMPONENT_DITHER0,
 	DDP_COMPONENT_RDMA0,
 	DDP_COMPONENT_DSI0,
+};
+
+/*
+ * MT6789 display path. NOTE the donor port had DDP_COMPONENT_DRM_OVL_ADAPTOR at
+ * the head of this list, but MT6789 has no ovl_adaptor hardware (no ethdr /
+ * merge / padding / mdp_rdma nodes exist for it). Leaving it in makes
+ * mtk_drm_kms_init() register a spurious "mediatek-disp-ovl-adaptor" platform
+ * device, add it to the component match, and displaces OVL0 from the head of
+ * the path -- so it is deliberately omitted here.
+ */
+static const unsigned int mt6789_mtk_ddp_main[] = {
+	DDP_COMPONENT_OVL0,
+	DDP_COMPONENT_RDMA0,
+	DDP_COMPONENT_COLOR0,
+	DDP_COMPONENT_DITHER0,
+	/* DSC deliberately omitted: we drive the panel's 60Hz non-DSC mode, and
+	 * pulling DSC in would mean borrowing mt8195's disp-dsc binding for
+	 * hardware we are not exercising. */
+	DDP_COMPONENT_DSI0
+};
+
+static const struct mtk_drm_route mt6789_mtk_ddp_main_routes[] = {
+	{0, DDP_COMPONENT_DSI0},
 };
 
 static const unsigned int mt8173_mtk_ddp_main[] = {
@@ -259,6 +292,15 @@ static const struct mtk_mmsys_driver_data mt2712_mmsys_driver_data = {
 	.mmsys_dev_num = 1,
 };
 
+static const struct mtk_mmsys_driver_data mt6789_mmsys_driver_data = {
+	.main_path = mt6789_mtk_ddp_main,
+	.main_len = ARRAY_SIZE(mt6789_mtk_ddp_main),
+	.conn_routes = mt6789_mtk_ddp_main_routes,
+	.num_conn_routes = ARRAY_SIZE(mt6789_mtk_ddp_main_routes),
+	.quiesce_mutex_first = true,
+	.mmsys_dev_num = 1,
+};
+
 static const struct mtk_mmsys_driver_data mt8167_mmsys_driver_data = {
 	.main_path = mt8167_mtk_ddp_main,
 	.main_len = ARRAY_SIZE(mt8167_mtk_ddp_main),
@@ -338,6 +380,8 @@ static const struct of_device_id mtk_drm_of_ids[] = {
 	  .data = &mt7623_mmsys_driver_data},
 	{ .compatible = "mediatek,mt2712-mmsys",
 	  .data = &mt2712_mmsys_driver_data},
+	{ .compatible = "mediatek,mt6789-mmsys",
+	  .data = &mt6789_mmsys_driver_data},
 	{ .compatible = "mediatek,mt8167-mmsys",
 	  .data = &mt8167_mmsys_driver_data},
 	{ .compatible = "mediatek,mt8173-mmsys",
@@ -568,6 +612,7 @@ static int mtk_drm_kms_init(struct drm_device *drm)
 
 	drm_dev_set_dma_dev(drm, dma_dev);
 
+
 	/*
 	 * Configure the DMA segment size to make sure we get contiguous IOVA
 	 * when importing PRIME buffers.
@@ -664,7 +709,12 @@ static int mtk_drm_bind(struct device *dev)
 	if (ret < 0)
 		goto err_deinit;
 
-	drm_client_setup(drm, NULL);
+	if (jagar_skip_drm_client) {
+		jagar_drm_client_skipped = true;
+		dev_info(dev, "skipped DRM client setup\n");
+	} else {
+		drm_client_setup(drm, NULL);
+	}
 
 	return 0;
 

@@ -619,5 +619,6 @@ static inline const char *musb_otg_state_string(struct musb *musb)
  * if the property is not found or not recognized returns MUSB_OTG
  */
 extern enum musb_mode musb_get_mode(struct device *dev);
+int musb_probe(struct platform_device *pdev);
 
 #endif	/* __MUSB_CORE_H__ */

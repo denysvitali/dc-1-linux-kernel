@@ -19,6 +19,8 @@
 #include <linux/errno.h>
 #include <linux/acpi.h>
 #include <linux/input/touchscreen.h>
+#include <linux/of.h>
+#include <linux/regulator/consumer.h>
 #include <linux/unaligned.h>
 
 
@@ -49,6 +51,7 @@ struct ilitek_protocol_info {
 struct ilitek_ts_data {
 	struct i2c_client		*client;
 	struct gpio_desc		*reset_gpio;
+	bool				vendor_reset_gpio;
 	struct input_dev		*input_dev;
 	struct touchscreen_properties	prop;
 
@@ -396,6 +399,17 @@ static const struct ilitek_protocol_map ptl_func_map[] = {
 static void ilitek_reset(struct ilitek_ts_data *ts, int delay)
 {
 	if (ts->reset_gpio) {
+		if (ts->vendor_reset_gpio) {
+			/* Exact high-low-high sequence used by the shipped driver. */
+			gpiod_set_value_cansleep(ts->reset_gpio, 0);
+			fsleep(10000);
+			gpiod_set_value_cansleep(ts->reset_gpio, 1);
+			fsleep(11000);
+			gpiod_set_value_cansleep(ts->reset_gpio, 0);
+			fsleep(delay * 1000);
+			return;
+		}
+
 		gpiod_set_value_cansleep(ts->reset_gpio, 1);
 		fsleep(10000);
 		gpiod_set_value_cansleep(ts->reset_gpio, 0);
@@ -562,12 +576,16 @@ static int ilitek_ts_i2c_probe(struct i2c_client *client)
 	ts->client = client;
 	i2c_set_clientdata(client, ts);
 
+	error = devm_regulator_get_enable_optional(dev, "vdd");
+	if (error < 0 && error != -ENODEV)
+		return dev_err_probe(dev, error, "enable VDD failed\n");
+
+	ts->vendor_reset_gpio = dev->of_node &&
+		of_device_is_compatible(dev->of_node, "tchip,ilitek");
 	ts->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(ts->reset_gpio)) {
-		error = PTR_ERR(ts->reset_gpio);
-		dev_err(dev, "request gpiod failed: %d", error);
-		return error;
-	}
+	if (IS_ERR(ts->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(ts->reset_gpio),
+				     "request reset GPIO failed\n");
 
 	ilitek_reset(ts, 1000);
 
@@ -596,6 +614,12 @@ static int ilitek_ts_i2c_probe(struct i2c_client *client)
 		dev_err(dev, "request threaded irq failed: %d\n", error);
 		return error;
 	}
+
+	dev_info(dev,
+		 "ILI%04X protocol %#04x, firmware %*ph, %dx%d, %d contacts\n",
+		 ts->mcu_ver, ts->ptl.ver, (int)sizeof(ts->firmware_ver),
+		 ts->firmware_ver, ts->screen_max_x, ts->screen_max_y,
+		 ts->max_tp);
 
 	return 0;
 }
@@ -654,6 +678,7 @@ MODULE_DEVICE_TABLE(acpi, ilitekts_acpi_id);
 
 #ifdef CONFIG_OF
 static const struct of_device_id ilitek_ts_i2c_match[] = {
+	{.compatible = "tchip,ilitek",},
 	{.compatible = "ilitek,ili2130",},
 	{.compatible = "ilitek,ili2131",},
 	{.compatible = "ilitek,ili2132",},

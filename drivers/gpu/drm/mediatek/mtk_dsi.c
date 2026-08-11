@@ -194,6 +194,8 @@ struct mtk_dsi_driver_data {
 	bool has_size_ctl;
 	bool cmdq_long_packet_ctl;
 	bool support_per_frame_lp;
+	bool use_mt6789_timings;
+	bool needs_cmd_mode_init;
 };
 
 struct mtk_dsi {
@@ -212,6 +214,7 @@ struct mtk_dsi {
 	struct clk *hs_clk;
 
 	u32 data_rate;
+	u32 hs_rate;
 
 	unsigned long mode_flags;
 	enum mipi_dsi_pixel_format format;
@@ -243,11 +246,86 @@ static void mtk_dsi_mask(struct mtk_dsi *dsi, u32 offset, u32 mask, u32 data)
 	writel((temp & ~mask) | (data & mask), dsi->regs + offset);
 }
 
+static void mtk_dsi_phy_timconfig_mt6789(struct mtk_dsi *dsi)
+{
+	u32 timcon0, timcon1, timcon2, timcon3;
+	u32 data_rate_mhz = dsi->data_rate / HZ_PER_MHZ;
+	u32 ui, cycle_time, hs_zero, clk_zero;
+	struct mtk_phy_timing *timing = &dsi->phy_timing;
+
+	if (!data_rate_mhz || data_rate_mhz > 8000) {
+		dev_err(dsi->dev, "invalid MT6789 DSI data rate %u Hz\n",
+			dsi->data_rate);
+		return;
+	}
+
+	/* Match the MT6789 vendor driver's integer-MHz calculations. */
+	ui = max(1000 / data_rate_mhz, 1U);
+	cycle_time = 8000 / data_rate_mhz;
+
+	timing->lpx = 75 / cycle_time + 1;
+	timing->da_hs_prepare = (64 + 5 * ui) / cycle_time + 1;
+	hs_zero = (200 + 10 * ui) / cycle_time;
+	timing->da_hs_zero = hs_zero > timing->da_hs_prepare ?
+			     hs_zero - timing->da_hs_prepare : hs_zero;
+	timing->da_hs_trail = max(9 * ui / cycle_time,
+				  (80 + 5 * ui) / cycle_time);
+
+	/* These use the pre-constraint LPX value in the vendor driver. */
+	timing->ta_get = 5 * timing->lpx;
+	timing->ta_sure = 3 * timing->lpx / 2;
+	timing->ta_go = 4 * timing->lpx;
+	timing->da_hs_exit = 125 / cycle_time + 1;
+
+	timing->clk_hs_prepare = 64 / cycle_time;
+	clk_zero = 350 / cycle_time;
+	timing->clk_hs_zero = clk_zero > timing->clk_hs_prepare ?
+			      clk_zero - timing->clk_hs_prepare : clk_zero;
+	timing->clk_hs_trail = 80 / cycle_time;
+	timing->clk_hs_exit = 125 / cycle_time + 1;
+	timing->clk_hs_post = (90 + 52 * ui) / cycle_time;
+
+	/* MT6789 takes the vendor default branch and applies N4/N5 limits. */
+	if (timing->lpx & 1)
+		timing->lpx++;
+	if (timing->da_hs_prepare & 1)
+		timing->da_hs_prepare++;
+	timing->da_hs_prepare = max(timing->da_hs_prepare, 6U);
+	if (!(timing->da_hs_exit & 1))
+		timing->da_hs_exit++;
+
+	timcon0 = FIELD_PREP(LPX, timing->lpx) |
+		  FIELD_PREP(HS_PREP, timing->da_hs_prepare) |
+		  FIELD_PREP(HS_ZERO, timing->da_hs_zero) |
+		  FIELD_PREP(HS_TRAIL, timing->da_hs_trail);
+	timcon1 = FIELD_PREP(TA_GO, timing->ta_go) |
+		  FIELD_PREP(TA_SURE, timing->ta_sure) |
+		  FIELD_PREP(TA_GET, timing->ta_get) |
+		  FIELD_PREP(DA_HS_EXIT, timing->da_hs_exit);
+	timcon2 = FIELD_PREP(CONT_DET, 3) |
+		  FIELD_PREP(DA_HS_SYNC, 1) |
+		  FIELD_PREP(CLK_ZERO, timing->clk_hs_zero) |
+		  FIELD_PREP(CLK_TRAIL, timing->clk_hs_trail);
+	timcon3 = FIELD_PREP(CLK_HS_PREP, timing->clk_hs_prepare) |
+		  FIELD_PREP(CLK_HS_POST, timing->clk_hs_post) |
+		  FIELD_PREP(CLK_HS_EXIT, timing->clk_hs_exit);
+
+	writel(timcon0, dsi->regs + DSI_PHY_TIMECON0);
+	writel(timcon1, dsi->regs + DSI_PHY_TIMECON1);
+	writel(timcon2, dsi->regs + DSI_PHY_TIMECON2);
+	writel(timcon3, dsi->regs + DSI_PHY_TIMECON3);
+}
+
 static void mtk_dsi_phy_timconfig(struct mtk_dsi *dsi)
 {
 	u32 timcon0, timcon1, timcon2, timcon3;
 	u32 data_rate_mhz = DIV_ROUND_UP(dsi->data_rate, HZ_PER_MHZ);
 	struct mtk_phy_timing *timing = &dsi->phy_timing;
+
+	if (dsi->driver_data->use_mt6789_timings) {
+		mtk_dsi_phy_timconfig_mt6789(dsi);
+		return;
+	}
 
 	timing->lpx = (60 * data_rate_mhz / (8 * 1000)) + 1;
 	timing->da_hs_prepare = (80 * data_rate_mhz + 4 * 1000) / 8000;
@@ -427,7 +505,8 @@ static void mtk_dsi_ps_control(struct mtk_dsi *dsi, bool config_vact)
 	if (config_vact) {
 		vact_nl = FIELD_PREP(VACT_NL, dsi->vm.vactive);
 		writel(vact_nl, dsi->regs + DSI_VACT_NL);
-		writel(ps_wc, dsi->regs + DSI_HSTX_CKL_WC);
+		if (!dsi->driver_data->use_mt6789_timings)
+			writel(ps_wc, dsi->regs + DSI_HSTX_CKL_WC);
 	}
 	writel(ps_val, dsi->regs + DSI_PSCTRL);
 }
@@ -565,6 +644,33 @@ static void mtk_dsi_config_vdo_timing_per_line_lp(struct mtk_dsi *dsi)
 	writel(horizontal_frontporch_byte, dsi->regs + DSI_HFP_WC);
 }
 
+static void mtk_dsi_config_vdo_timing_mt6789(struct mtk_dsi *dsi)
+{
+	struct videomode *vm = &dsi->vm;
+	u32 hsa_byte, hbp_byte, hfp_byte;
+	u32 dsi_buf_bpp;
+
+	if (dsi->format == MIPI_DSI_FMT_RGB565)
+		dsi_buf_bpp = 2;
+	else
+		dsi_buf_bpp = 3;
+
+	if (dsi->mode_flags & MIPI_DSI_MODE_VIDEO_SYNC_PULSE) {
+		hsa_byte = ALIGN(vm->hsync_len * dsi_buf_bpp - 10, 4);
+		hbp_byte = ALIGN(vm->hback_porch * dsi_buf_bpp - 10, 4);
+	} else {
+		hsa_byte = ALIGN(vm->hsync_len * dsi_buf_bpp - 4, 4);
+		hbp_byte = ALIGN((vm->hback_porch + vm->hsync_len) *
+				 dsi_buf_bpp - 10, 4);
+	}
+
+	hfp_byte = ALIGN(vm->hfront_porch * dsi_buf_bpp - 12, 4);
+
+	writel(hsa_byte, dsi->regs + DSI_HSA_WC);
+	writel(hbp_byte, dsi->regs + DSI_HBP_WC);
+	writel(hfp_byte, dsi->regs + DSI_HFP_WC);
+}
+
 static void mtk_dsi_config_vdo_timing(struct mtk_dsi *dsi)
 {
 	struct videomode *vm = &dsi->vm;
@@ -579,7 +685,9 @@ static void mtk_dsi_config_vdo_timing(struct mtk_dsi *dsi)
 			FIELD_PREP(DSI_WIDTH, vm->hactive),
 			dsi->regs + DSI_SIZE_CON);
 
-	if (dsi->driver_data->support_per_frame_lp)
+	if (dsi->driver_data->use_mt6789_timings)
+		mtk_dsi_config_vdo_timing_mt6789(dsi);
+	else if (dsi->driver_data->support_per_frame_lp)
 		mtk_dsi_config_vdo_timing_per_frame_lp(dsi);
 	else
 		mtk_dsi_config_vdo_timing_per_line_lp(dsi);
@@ -707,8 +815,14 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	}
 	bit_per_pixel = ret;
 
-	dsi->data_rate = DIV_ROUND_UP_ULL(dsi->vm.pixelclock * bit_per_pixel,
-					  dsi->lanes);
+	if (dsi->hs_rate) {
+		dsi->data_rate = dsi->hs_rate;
+		dev_info(dev, "using peripheral HS data rate %u Hz\n",
+			 dsi->data_rate);
+	} else {
+		dsi->data_rate = DIV_ROUND_UP_ULL(dsi->vm.pixelclock * bit_per_pixel,
+						  dsi->lanes);
+	}
 
 	ret = clk_set_rate(dsi->hs_clk, dsi->data_rate);
 	if (ret < 0) {
@@ -737,6 +851,19 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		       dsi->regs + dsi->driver_data->reg_shadow_dbg_off);
 
 	mtk_dsi_reset_engine(dsi);
+
+	/*
+	 * LK leaves MT6789 DSI running in video mode.  An engine reset does not
+	 * reset DSI_MODE_CTRL on this SoC, so the first panel command otherwise
+	 * tries to wait for a VM_DONE transition from bootloader-owned state and
+	 * times out.  Stop that inherited transfer and establish command mode;
+	 * atomic_enable() selects and starts the requested video mode later.
+	 */
+	if (dsi->driver_data->needs_cmd_mode_init) {
+		mtk_dsi_stop(dsi);
+		mtk_dsi_set_cmd_mode(dsi);
+	}
+
 	mtk_dsi_phy_timconfig(dsi);
 
 	mtk_dsi_ps_control(dsi, true);
@@ -995,6 +1122,9 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
 	dsi->lanes = device->lanes;
 	dsi->format = device->format;
 	dsi->mode_flags = device->mode_flags;
+	if (device->hs_rate > U32_MAX)
+		return -EINVAL;
+	dsi->hs_rate = device->hs_rate;
 	dsi->next_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 1, 0);
 	if (IS_ERR(dsi->next_bridge)) {
 		ret = PTR_ERR(dsi->next_bridge);
@@ -1272,6 +1402,19 @@ static void mtk_dsi_remove(struct platform_device *pdev)
 	mipi_dsi_host_unregister(&dsi->host);
 }
 
+static const struct mtk_dsi_driver_data mt6789_dsi_driver_data = {
+	.reg_cmdq_off = 0xd00,
+	/* donor omitted these two: reg_vm_cmd_off defaulting to 0 makes
+	 * mtk_dsi_set_vm_cmd() write DSI_START during poweron. */
+	.reg_vm_cmd_off = 0x200,
+	.reg_shadow_dbg_off = 0xc00,
+	.has_shadow_ctl = false,
+	.has_size_ctl = true,
+	.support_per_frame_lp = false,
+	.use_mt6789_timings = true,
+	.needs_cmd_mode_init = true,
+};
+
 static const struct mtk_dsi_driver_data mt8173_dsi_driver_data = {
 	.reg_cmdq_off = 0x200,
 	.reg_vm_cmd_off = 0x130,
@@ -1313,6 +1456,7 @@ static const struct mtk_dsi_driver_data mt8188_dsi_driver_data = {
 static const struct of_device_id mtk_dsi_of_match[] = {
 	{ .compatible = "mediatek,mt2701-dsi", .data = &mt2701_dsi_driver_data },
 	{ .compatible = "mediatek,mt8167-dsi", .data = &mt2701_dsi_driver_data },
+	{ .compatible = "mediatek,mt6789-dsi", .data = &mt6789_dsi_driver_data },
 	{ .compatible = "mediatek,mt8173-dsi", .data = &mt8173_dsi_driver_data },
 	{ .compatible = "mediatek,mt8183-dsi", .data = &mt8183_dsi_driver_data },
 	{ .compatible = "mediatek,mt8186-dsi", .data = &mt8186_dsi_driver_data },

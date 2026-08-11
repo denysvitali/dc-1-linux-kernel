@@ -188,3 +188,7 @@ DTC_FLAGS_mt7988a-bananapi-bpi-r4-2g5 := -@
 DTC_FLAGS_mt7988a-bananapi-bpi-r4-pro-4e := -@
 DTC_FLAGS_mt7988a-bananapi-bpi-r4-pro-8x := -@
 DTC_FLAGS_mt8395-radxa-nio-12l := -@
+dtb-$(CONFIG_ARCH_MEDIATEK) += mt6789-xiaomi-emerald.dtb
+dtb-$(CONFIG_ARCH_MEDIATEK) += mt8781-daylight-jagar.dtb
+dtb-$(CONFIG_ARCH_MEDIATEK) += mt8781-daylight-jagar-gpu-probe.dtb
+dtb-$(CONFIG_ARCH_MEDIATEK) += mt8781-daylight-jagar-live-gpu-probe.dtbo

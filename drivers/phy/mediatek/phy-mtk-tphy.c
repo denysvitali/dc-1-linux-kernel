@@ -15,6 +15,7 @@
 #include <linux/nvmem-consumer.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_platform.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -1673,6 +1674,36 @@ static struct platform_driver mtk_tphy_driver = {
 };
 
 module_platform_driver(mtk_tphy_driver);
+
+#ifndef MODULE
+/*
+ * Jagar diagnostic: the stock-DTB platform device is populated but does not
+ * bind through driver core.  Register the upstream provider late if it remains
+ * unbound, before the corresponding late MUSB fallback runs.
+ */
+static int __init jagar_force_tphy_probe(void)
+{
+	struct device_node *np;
+	struct platform_device *pdev;
+
+	np = of_find_compatible_node(NULL, NULL,
+				     "mediatek,generic-tphy-v2");
+	if (!np)
+		return 0;
+
+	pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!pdev)
+		return 0;
+
+	if (!pdev->dev.driver)
+		mtk_tphy_probe(pdev);
+
+	put_device(&pdev->dev);
+	return 0;
+}
+late_initcall(jagar_force_tphy_probe);
+#endif
 
 MODULE_AUTHOR("Chunfeng Yun <chunfeng.yun@mediatek.com>");
 MODULE_DESCRIPTION("MediaTek T-PHY driver");

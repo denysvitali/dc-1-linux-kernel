@@ -40,6 +40,9 @@ struct mtk_plane_state {
 	struct mtk_plane_pending_state	pending;
 };
 
+void mtk_plane_update_new_state(struct drm_plane_state *new_state,
+				struct mtk_plane_state *mtk_plane_state);
+
 static inline struct mtk_plane_state *
 to_mtk_plane_state(struct drm_plane_state *state)
 {

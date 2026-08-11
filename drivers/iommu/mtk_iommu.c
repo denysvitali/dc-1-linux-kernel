@@ -168,6 +168,7 @@
 enum mtk_iommu_plat {
 	M4U_MT2712,
 	M4U_MT6779,
+	M4U_MT6789,
 	M4U_MT6795,
 	M4U_MT8167,
 	M4U_MT8173,
@@ -241,6 +242,8 @@ struct mtk_iommu_plat_data {
 	};
 
 	unsigned char       larbid_remap[MTK_LARB_COM_MAX][MTK_LARB_SUBCOM_MAX];
+	/* Probe every DT larb when zero, otherwise only the selected larbs. */
+	u32                 probe_larb_mask;
 };
 
 struct mtk_iommu_bank_data {
@@ -350,10 +353,54 @@ static const struct mtk_iommu_iova_region single_domain[] = {
 	{.iova_base = 0,		.size = MTK_IOMMU_IOVA_SZ_4G},
 };
 
+#define MT6789_MULTI_REGION_NR_MAX	3
 #define MT8192_MULTI_REGION_NR_MAX	6
 
+#define MT6789_MULTI_REGION_NR	(IS_ENABLED(CONFIG_ARCH_DMA_ADDR_T_64BIT) ? \
+				 MT6789_MULTI_REGION_NR_MAX : 1)
 #define MT8192_MULTI_REGION_NR	(IS_ENABLED(CONFIG_ARCH_DMA_ADDR_T_64BIT) ? \
 				 MT8192_MULTI_REGION_NR_MAX : 1)
+
+/*
+ * MT6789 (marketed as Helio G99; the tablet variant is MT8781).
+ *
+ * DERIVED: the three domains and their bases come from the vendor MT8781
+ * kernel, drivers/iommu/mtk_iommu.c::mt6789_multi_dom[]:
+ *	{0, SZ_4G} disp / {SZ_4G, SZ_4G} vdec / {2*SZ_4G, SZ_4G} cam+mdp
+ * and are corroborated by the NORMAL_DOM/VDEC_DOM/CAMMDP_DOM numbering in
+ * include/dt-bindings/memory/mediatek,mt6789-memory-port.h (0/1/2).
+ *
+ * DELIBERATE DEVIATION: the vendor uses a full SZ_4G per region, we use
+ * MTK_IOMMU_IOVA_SZ_4G (SZ_4G - SZ_8M), the mainline convention used by every
+ * other multi-domain SoC here. That only shrinks each region, so it cannot
+ * create an out-of-range IOVA that the vendor layout would not also create.
+ */
+static const struct mtk_iommu_iova_region mt6789_multi_dom[MT6789_MULTI_REGION_NR] = {
+	{ .iova_base = 0x0,		.size = MTK_IOMMU_IOVA_SZ_4G},	/* disp:     0 ~ 4G */
+	#if IS_ENABLED(CONFIG_ARCH_DMA_ADDR_T_64BIT)
+	{ .iova_base = SZ_4G,		.size = MTK_IOMMU_IOVA_SZ_4G},	/* vdec:    4G ~ 8G */
+	{ .iova_base = SZ_4G * 2,	.size = MTK_IOMMU_IOVA_SZ_4G},	/* cam/mdp: 8G ~ 12G */
+	#endif
+};
+
+/*
+ * DERIVED, not guessed: every port define in
+ * include/dt-bindings/memory/mediatek,mt6789-memory-port.h carries its domain
+ * in the MTK_M4U_PORT_ID() macro, and each larb uses exactly one domain:
+ *	NORMAL_DOM (0): larb0, larb1
+ *	VDEC_DOM   (1): larb4, larb7
+ *	CAMMDP_DOM (2): larb2, larb9, larb13, larb14, larb16, larb17, larb19, larb20
+ * (verified mechanically over all 132 port defines in that header; the header's
+ * own top-of-file comment states the same grouping). Larbs 3/5/6/8/10/11/12/15/18
+ * do not exist on this SoC, hence the zero rows.
+ */
+static const unsigned int mt6789_larb_region_msk[MT6789_MULTI_REGION_NR_MAX][MTK_LARB_NR_MAX] = {
+	[0] = {~0, ~0},				/* Region0: larb0/1 (display) */
+	[1] = {0, 0, 0, 0, ~0, 0, 0, ~0},	/* Region1: larb4/7 (vdec/venc) */
+	[2] = {0, 0, ~0, 0, 0, 0, 0, 0,		/* Region2: larb2/9/13/14/16/17/19/20 */
+	       0, ~0, 0, 0, 0, ~0, ~0, 0,
+	       ~0, ~0, 0, ~0, ~0},
+};
 
 static const struct mtk_iommu_iova_region mt8189_multi_dom_apu[] = {
 	{ .iova_base = 0x200000ULL,	.size = SZ_512M},	/* APU SECURE */
@@ -895,11 +942,19 @@ static struct iommu_device *mtk_iommu_probe_device(struct device *dev)
 	larbid = MTK_M4U_TO_LARB(fwspec->ids[0]);
 	if (larbid >= MTK_LARB_NR_MAX)
 		return ERR_PTR(-EINVAL);
+	if (data->plat_data->probe_larb_mask &&
+	    !(data->plat_data->probe_larb_mask & BIT(larbid)))
+		return ERR_PTR(-ENODEV);
 
 	larbid_msk |= BIT(larbid);
 
 	for (i = 1; i < fwspec->num_ids; i++) {
 		larbidx = MTK_M4U_TO_LARB(fwspec->ids[i]);
+		if (larbidx >= MTK_LARB_NR_MAX)
+			return ERR_PTR(-EINVAL);
+		if (data->plat_data->probe_larb_mask &&
+		    !(data->plat_data->probe_larb_mask & BIT(larbidx)))
+			return ERR_PTR(-ENODEV);
 		if (MTK_IOMMU_HAS_FLAG(data->plat_data, DL_WITH_MULTI_LARB)) {
 			larbid_msk |= BIT(larbidx);
 		} else if (larbid != larbidx) {
@@ -1204,6 +1259,11 @@ static int mtk_iommu_mm_dts_parse(struct device *dev, struct component_match **m
 			ret = -EINVAL;
 			goto err_larbdev_put;
 		}
+		if (data->plat_data->probe_larb_mask &&
+		    !(data->plat_data->probe_larb_mask & BIT(id))) {
+			of_node_put(larbnode);
+			continue;
+		}
 
 		plarbdev = of_find_device_by_node(larbnode);
 		of_node_put(larbnode);
@@ -1218,7 +1278,16 @@ static int mtk_iommu_mm_dts_parse(struct device *dev, struct component_match **m
 		}
 		data->larb_imu[id].dev = &plarbdev->dev;
 
-		if (!plarbdev->dev.driver) {
+		/*
+		 * MT6789's component framework can wait for its display larbs.
+		 * Requiring them to be bound here delays IOMMU registration until
+		 * the late deferred-probe sweep, after OVL has already fallen back
+		 * to direct DMA.  Keep the platform-device reference and let
+		 * component_master_add_with_match() complete when the SMI driver
+		 * registers the larb components.
+		 */
+		if (!plarbdev->dev.driver &&
+		    data->plat_data->m4u_plat != M4U_MT6789) {
 			ret = -EPROBE_DEFER;
 			goto err_larbdev_put;
 		}
@@ -1589,6 +1658,82 @@ static const struct mtk_iommu_plat_data mt6779_data = {
 	.larbid_remap  = {{0}, {1}, {2}, {3}, {5}, {7, 8}, {10}, {9}},
 };
 
+/*
+ * MT6789 / MT8781 multimedia (display) IOMMU at 0x14016000.
+ *
+ * flags: DERIVED from the vendor MT8781 kernel's mt6789_data:
+ *	HAS_SUB_COMM | OUT_ORDER_WR_EN | NOT_STD_AXI_MODE | IOVA_34_EN |
+ *	SHARE_PGTABLE | WR_THROT_EN | HAS_BCLK  (+ vendor-only flags
+ *	GET_DOM_ID_LEGACY / IOMMU_NO_SMCCC / IOMMU_SEC_BK_EN / HAS_SMI_SUB_COMM
+ *	which have no mainline equivalent).
+ *   - HAS_SUB_COMM -> HAS_SUB_COMM_2BITS: the vendor driver decodes the
+ *     sub-common id as F_MMU_INT_ID_SUB_COMM_ID(a) = ((a) >> 7) & 0x3, i.e.
+ *     two bits, which is exactly mainline's HAS_SUB_COMM_2BITS.
+ *   - NOT_STD_AXI_MODE is the vendor spelling of "do not set STD_AXI_MODE",
+ *     so mainline simply omits STD_AXI_MODE here.
+ *   - MTK_IOMMU_TYPE_MM matches the vendor's .iommu_type = MM_IOMMU.
+ *   The resulting set is byte-for-byte the same as mainline's mt6893_data,
+ *   which was translated from the same vendor flag vocabulary.
+ *
+ * DELIBERATE OMISSIONS (both are "off" == the conservative direction):
+ *   - SHARE_PGTABLE is NOT set even though the vendor sets it. Mainline's
+ *     SHARE_PGTABLE requires a non-NULL plat_data->hw_list and only matters
+ *     when two mtk_iommu instances share one page table; MT6789 exposes a
+ *     single MM IOMMU (only iommu@14016000 in the vendor DT), so there is
+ *     nothing to share with and setting it would dereference a NULL hw_list.
+ *   - PGTABLE_PA_35_EN is NOT set. UNVERIFIED either way: the vendor kernel
+ *     predates IO_PGTABLE_QUIRK_ARM_MTK_TTBR_EXT so its absence there is not
+ *     evidence. Leaving it clear keeps the page table itself in 32-bit PA
+ *     space, which is always safe; it does not restrict the 35-bit output
+ *     address of the mappings (cfg.oas is 35 regardless).
+ *
+ * banks_num = 1: the vendor DT does describe four extra bank windows
+ * (0x14017000..0x1401a000, "mediatek,common-disp-iommu-bank1..4"), but they
+ * are driven by vendor-only code via "mediatek,iommu_banks". Using bank0 only
+ * is what mt8186/mt6893 do and is sufficient for every master we bind.
+ */
+static const struct mtk_iommu_plat_data mt6789_data_mm = {
+	.m4u_plat       = M4U_MT6789,
+	.flags          = HAS_BCLK | HAS_SUB_COMM_2BITS | OUT_ORDER_WR_EN |
+			  WR_THROT_EN | IOVA_34_EN | MTK_IOMMU_TYPE_MM,
+	.inv_sel_reg    = REG_MMU_INV_SEL_GEN2,
+	.banks_num      = 1,
+	.banks_enable   = {true},
+	.iova_region    = mt6789_multi_dom,
+	.iova_region_nr = ARRAY_SIZE(mt6789_multi_dom),
+	.iova_region_larb_msk = mt6789_larb_region_msk,
+	/* The legacy firmware handoff currently powers display larbs only. */
+	.probe_larb_mask = BIT(0) | BIT(1),
+	/*
+	 * PARTIALLY GUESSED. larbid_remap is used *only* to pretty-print the
+	 * larb id in a translation-fault message (mtk_iommu_isr()); a wrong
+	 * entry mis-labels a fault log, it cannot cause a fault or a hang.
+	 *
+	 * Both the vendor MT8781 kernel and the out-of-tree MT6789 mainline
+	 * port leave this table empty, so there is no authoritative source.
+	 * What is here:
+	 *  - {0} and {1}: REQUIRED by the display path (larb0 -> 0,
+	 *    larb1 -> 1) and consistent with every MTK SoC of this generation.
+	 *  - {4}, {7}, {2}: same common-port order as mt6893/mt8186; larb5 does
+	 *    not exist on MT6789 so mt6893's {4, 5} becomes {4}.
+	 *  - {9, ..., 20}: GUESS, but corroborated - the vendor DT chains
+	 *    larb9 -> img0_sub_comm -> img1_sub_comm and larb20 -> ipe_sub_comm
+	 *    -> img1_sub_comm, i.e. one common port fanning out to both, and
+	 *    mt6893 puts 9 and 20 at the same sub-common offsets. larb11 does
+	 *    not exist on MT6789; larb19 is listed in the port header but has
+	 *    no DT node, its sub-common offset is a guess.
+	 *  - {_, 14, 16} and {_, 13, _, 17}: corroborated by the vendor DT -
+	 *    cam_smi_3x1_sub_comm1 feeds larb14+larb16 and cam_smi_4x1_sub_comm0
+	 *    feeds larb13+larb17, matching mt6893/mt8186 offsets exactly.
+	 * To confirm: trigger a translation fault on a known master and check
+	 * the larb id printed by mtk_iommu_isr().
+	 */
+	.larbid_remap   = {{0}, {1}, {4}, {7}, {2},
+			   {9, MTK_INVALID_LARBID, 19, 20},
+			   {MTK_INVALID_LARBID, 14, 16},
+			   {MTK_INVALID_LARBID, 13, MTK_INVALID_LARBID, 17}},
+};
+
 static const struct mtk_iommu_plat_data mt6795_data = {
 	.m4u_plat     = M4U_MT6795,
 	.flags	      = HAS_4GB_MODE | HAS_BCLK | RESET_AXI |
@@ -1902,6 +2047,7 @@ static const struct mtk_iommu_plat_data mt8365_data = {
 static const struct of_device_id mtk_iommu_of_ids[] = {
 	{ .compatible = "mediatek,mt2712-m4u", .data = &mt2712_data},
 	{ .compatible = "mediatek,mt6779-m4u", .data = &mt6779_data},
+	{ .compatible = "mediatek,mt6789-disp-iommu", .data = &mt6789_data_mm},
 	{ .compatible = "mediatek,mt6795-m4u", .data = &mt6795_data},
 	{ .compatible = "mediatek,mt6893-iommu-mm", .data = &mt6893_data},
 	{ .compatible = "mediatek,mt8167-m4u", .data = &mt8167_data},

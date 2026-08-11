@@ -15,6 +15,7 @@
 #include <linux/platform_device.h>
 #include <linux/usb/role.h>
 #include <linux/usb/usb_phy_generic.h>
+#include <asm/setup.h>
 #include "musb_core.h"
 #include "musb_dma.h"
 
@@ -274,15 +275,17 @@ static int mtk_musb_init(struct musb *musb)
 			return ret;
 	}
 
-	ret = phy_init(glue->phy);
-	if (ret)
-		goto err_phy_init;
+	if (glue->phy) {
+		ret = phy_init(glue->phy);
+		if (ret)
+			goto err_phy_init;
 
-	ret = phy_power_on(glue->phy);
-	if (ret)
-		goto err_phy_power_on;
+		ret = phy_power_on(glue->phy);
+		if (ret)
+			goto err_phy_power_on;
 
-	phy_set_mode(glue->phy, glue->phy_mode);
+		phy_set_mode(glue->phy, glue->phy_mode);
+	}
 
 #if defined(CONFIG_USB_INVENTRA_DMA)
 	musb_writel(musb->mregs, MUSB_HSDMA_INTR,
@@ -293,7 +296,8 @@ static int mtk_musb_init(struct musb *musb)
 	return 0;
 
 err_phy_power_on:
-	phy_exit(glue->phy);
+	if (glue->phy)
+		phy_exit(glue->phy);
 err_phy_init:
 	if (musb->port_mode == MUSB_OTG)
 		mtk_otg_switch_exit(glue);
@@ -337,8 +341,10 @@ static int mtk_musb_exit(struct musb *musb)
 	struct mtk_glue *glue = dev_get_drvdata(dev->parent);
 
 	mtk_otg_switch_exit(glue);
-	phy_power_off(glue->phy);
-	phy_exit(glue->phy);
+	if (glue->phy) {
+		phy_power_off(glue->phy);
+		phy_exit(glue->phy);
+	}
 	clk_bulk_disable_unprepare(MTK_MUSB_CLKS_NUM, glue->clks);
 
 	pm_runtime_put_sync(dev);
@@ -406,6 +412,7 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	int ret;
 
+
 	glue = devm_kzalloc(dev, sizeof(*glue), GFP_KERNEL);
 	if (!glue)
 		return -ENOMEM;
@@ -454,7 +461,7 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	glue->phy = devm_of_phy_get_by_index(dev, np, 0);
 	if (IS_ERR(glue->phy))
 		return dev_err_probe(dev, PTR_ERR(glue->phy),
-				"fail to getting phy\n");
+				     "fail to getting phy\n");
 
 	glue->usb_phy = usb_phy_generic_register();
 	if (IS_ERR(glue->usb_phy))
@@ -531,6 +538,13 @@ static struct platform_driver mtk_musb_driver = {
 };
 
 module_platform_driver(mtk_musb_driver);
+
+/*
+ * Jagar finite-watchdog diagnostic.  The stock DT reaches userspace and its
+ * patched MUSB node is populated, but driver-core matching never invokes this
+ * probe.  Retry the exact upstream probe late, only while the device is still
+ * unbound, so dependency failures become visible through the stage oracle.
+ */
 
 MODULE_DESCRIPTION("MediaTek MUSB Glue Layer");
 MODULE_AUTHOR("Min Guo <min.guo@mediatek.com>");

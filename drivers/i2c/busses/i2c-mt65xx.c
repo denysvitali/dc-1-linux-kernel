@@ -165,6 +165,8 @@ enum I2C_REGS_OFFSET {
 	OFFSET_STA_STO_AC_TIMING,
 	OFFSET_HS_STA_STO_AC_TIMING,
 	OFFSET_SDA_TIMING,
+	/* MT6789/MT6983: the target address lives here, not at OFFSET_SLAVE_ADDR */
+	OFFSET_SLAVE_ADDR1,
 };
 
 static const u16 mt_i2c_regs_v1[] = {
@@ -203,6 +205,7 @@ static const u16 mt_i2c_regs_v1[] = {
 static const u16 mt_i2c_regs_v2[] = {
 	[OFFSET_DATA_PORT] = 0x0,
 	[OFFSET_SLAVE_ADDR] = 0x4,
+	[OFFSET_SLAVE_ADDR1] = 0x94,
 	[OFFSET_INTR_MASK] = 0x8,
 	[OFFSET_INTR_STAT] = 0xc,
 	[OFFSET_CONTROL] = 0x10,
@@ -269,6 +272,15 @@ struct mtk_i2c_compatible {
 	unsigned char dma_sync: 1;
 	unsigned char ltiming_adjust: 1;
 	unsigned char apdma_sync: 1;
+	/*
+	 * MT6789/MT6983 program the transfer's target address into a
+	 * DIFFERENT register (v2 offset 0x94) than earlier parts (0x4).
+	 * The vendor driver calls this slave_addr_ver. Without it the
+	 * controller never drives the intended address, so nothing ACKs
+	 * and every transfer times out -- a full 0x08..0x77 scan on this
+	 * board returned "0 device(s) responded".
+	 */
+	unsigned char slave_addr_reg1: 1;
 	unsigned char max_dma_support;
 };
 
@@ -509,6 +521,27 @@ static const struct mtk_i2c_compatible mt8188_compat = {
 	.max_dma_support = 36,
 };
 
+/*
+ * MT6983 -- and MT6789/MT8781, whose stock DT declares this same compatible.
+ * Field-for-field the vendor's mt6983_compat for everything mainline models;
+ * the vendor additionally sets dma_ver=1 and fifo_size=16, which mainline has
+ * no concept of, and slave_addr_ver=1, which is slave_addr_reg1 here.
+ */
+static const struct mtk_i2c_compatible mt6983_compat = {
+	.quirks = &mt8183_i2c_quirks,
+	.regs = mt_i2c_regs_v2,
+	.pmic_i2c = 0,
+	.dcm = 0,
+	.auto_restart = 1,
+	.aux_len_reg = 1,
+	.timing_adjust = 1,
+	.dma_sync = 1,
+	.ltiming_adjust = 1,
+	.apdma_sync = 1,
+	.slave_addr_reg1 = 1,
+	.max_dma_support = 36,
+};
+
 static const struct mtk_i2c_compatible mt8192_compat = {
 	.quirks = &mt8183_i2c_quirks,
 	.regs = mt_i2c_regs_v2,
@@ -531,6 +564,7 @@ static const struct of_device_id mtk_i2c_of_match[] = {
 	{ .compatible = "mediatek,mt7981-i2c", .data = &mt7981_compat },
 	{ .compatible = "mediatek,mt7986-i2c", .data = &mt7986_compat },
 	{ .compatible = "mediatek,mt8168-i2c", .data = &mt8168_compat },
+	{ .compatible = "mediatek,mt6983-i2c", .data = &mt6983_compat },
 	{ .compatible = "mediatek,mt8173-i2c", .data = &mt8173_compat },
 	{ .compatible = "mediatek,mt8183-i2c", .data = &mt8183_compat },
 	{ .compatible = "mediatek,mt8186-i2c", .data = &mt8186_compat },
@@ -1049,7 +1083,10 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 	mtk_i2c_writew(i2c, control_reg, OFFSET_CONTROL);
 
 	addr_reg = i2c_8bit_addr_from_msg(msgs);
-	mtk_i2c_writew(i2c, addr_reg, OFFSET_SLAVE_ADDR);
+	if (i2c->dev_comp->slave_addr_reg1)
+		mtk_i2c_writew(i2c, addr_reg, OFFSET_SLAVE_ADDR1);
+	else
+		mtk_i2c_writew(i2c, addr_reg, OFFSET_SLAVE_ADDR);
 
 	/* Clear interrupt status */
 	mtk_i2c_writew(i2c, restart_flag | I2C_HS_NACKERR | I2C_ACKERR |

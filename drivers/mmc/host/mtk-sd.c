@@ -19,6 +19,7 @@
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/pm_wakeirq.h>
+#include <linux/ratelimit.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -35,6 +36,19 @@
 
 #include "cqhci.h"
 #include "mmc_hsq.h"
+
+/*
+ * JAGAR (DC-1 / MT6789): raw CMD-response dump for the intermittent SDIO
+ * bring-up failure. It fires from the IRQ path on *every* failed command,
+ * including the CMD8/CMD52 that fail by design during card init, so it is
+ * NOT free: leave it off unless a trace is being taken.
+ *   builtin: mtk_sd.cmd_trace=1 on the kernel cmdline
+ *   runtime: /sys/module/mtk_sd/parameters/cmd_trace
+ */
+static bool msdc_cmd_trace;
+module_param_named(cmd_trace, msdc_cmd_trace, bool, 0644);
+MODULE_PARM_DESC(cmd_trace,
+		 "dump raw response/status registers on failed commands (perturbs timing, default off)");
 
 #define MAX_BD_NUM          1024
 #define MSDC_NR_CLOCKS      3
@@ -724,6 +738,8 @@ static const struct of_device_id msdc_of_ids[] = {
 	{ .compatible = "mediatek,mt8135-mmc", .data = &mt8135_compat},
 	{ .compatible = "mediatek,mt8173-mmc", .data = &mt8173_compat},
 	{ .compatible = "mediatek,mt8183-mmc", .data = &mt8183_compat},
+	/* MT8781 is the vendor name for the MT6789 family used by jagar. */
+	{ .compatible = "mediatek,mt8781-sd", .data = &mt8183_compat},
 	{ .compatible = "mediatek,mt8189-mmc", .data = &mt8189_compat},
 	{ .compatible = "mediatek,mt8196-mmc", .data = &mt8196_compat},
 	{ .compatible = "mediatek,mt8516-mmc", .data = &mt8516_compat},
@@ -1396,6 +1412,28 @@ static bool msdc_cmd_done(struct msdc_host *host, int events,
 	}
 
 	if (!sbc_error && !(events & MSDC_INT_CMDRDY)) {
+		/*
+		 * Dump the raw response BEFORE msdc_reset_hw() clobbers it, so a
+		 * corrupt frame can be told apart from a dead CMD line.
+		 *
+		 * Off by default: this runs in the msdc IRQ path and CMD8/CMD52
+		 * are expected to fail during SDIO card init, so an unconditional
+		 * ~150-byte printk here lands inside the exact window the
+		 * intermittent bug lives in.
+		 */
+		if (unlikely(msdc_cmd_trace)) {
+			static DEFINE_RATELIMIT_STATE(cmd_trace_rs, HZ, 20);
+
+			if (__ratelimit(&cmd_trace_rs))
+				dev_info(host->dev,
+					 "JAGAR cmd%d events=%08x resp=%08x %08x %08x %08x ps=%08x cfg=%08x iocon=%08x actual_clk=%u\n",
+					 cmd->opcode, events,
+					 readl(host->base + SDC_RESP0), readl(host->base + SDC_RESP1),
+					 readl(host->base + SDC_RESP2), readl(host->base + SDC_RESP3),
+					 readl(host->base + MSDC_PS), readl(host->base + MSDC_CFG),
+					 readl(host->base + MSDC_IOCON),
+					 mmc_from_priv(host)->actual_clock);
+		}
 		if ((events & MSDC_INT_CMDTMO && !host->hs400_tuning) ||
 		    (!mmc_op_tuning(cmd->opcode) && !host->hs400_tuning))
 			/*
@@ -2985,6 +3023,9 @@ static int msdc_drv_probe(struct platform_device *pdev)
 	struct msdc_host *host;
 	int ret;
 
+	dev_info(&pdev->dev, "JAGAR: msdc_drv_probe ENTERED np=%pOF\n",
+		 pdev->dev.of_node);
+
 	if (!pdev->dev.of_node) {
 		dev_err(&pdev->dev, "No DT found\n");
 		return -EINVAL;
@@ -2998,45 +3039,54 @@ static int msdc_drv_probe(struct platform_device *pdev)
 	host = mmc_priv(mmc);
 	ret = mmc_of_parse(mmc);
 	if (ret)
-		return ret;
+		return dev_err_probe(&pdev->dev, ret,
+				     "JAGAR: mmc_of_parse failed\n");
 
 	host->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(host->base))
-		return PTR_ERR(host->base);
+		return dev_err_probe(&pdev->dev, PTR_ERR(host->base),
+				     "JAGAR: ioremap of reg[0] (base) failed\n");
 
 	host->dev_comp = of_device_get_match_data(&pdev->dev);
 
 	if (host->dev_comp->needs_top_base) {
 		host->top_base = devm_platform_ioremap_resource(pdev, 1);
 		if (IS_ERR(host->top_base))
-			return PTR_ERR(host->top_base);
+			return dev_err_probe(&pdev->dev, PTR_ERR(host->top_base),
+					     "JAGAR: ioremap of reg[1] (top_base) failed\n");
 	}
 
 	ret = mmc_regulator_get_supply(mmc);
 	if (ret)
-		return ret;
+		/* -EPROBE_DEFER here is normal; dev_err_probe demotes it. */
+		return dev_err_probe(&pdev->dev, ret,
+				     "JAGAR: mmc_regulator_get_supply failed\n");
 
 	ret = msdc_of_clock_parse(pdev, host);
 	if (ret)
-		return ret;
+		return dev_err_probe(&pdev->dev, ret,
+				     "JAGAR: msdc_of_clock_parse failed\n");
 
 	host->reset = devm_reset_control_get_optional_exclusive(&pdev->dev,
 								"hrst");
 	if (IS_ERR(host->reset))
-		return PTR_ERR(host->reset);
+		return dev_err_probe(&pdev->dev, PTR_ERR(host->reset),
+				     "JAGAR: reset control 'hrst' failed\n");
 
 	/* only eMMC has crypto property */
 	if (!(mmc->caps2 & MMC_CAP2_NO_MMC)) {
 		host->crypto_clk = devm_clk_get_optional(&pdev->dev, "crypto");
 		if (IS_ERR(host->crypto_clk))
-			return PTR_ERR(host->crypto_clk);
+			return dev_err_probe(&pdev->dev, PTR_ERR(host->crypto_clk),
+					     "JAGAR: clk 'crypto' failed\n");
 		else if (host->crypto_clk)
 			mmc->caps2 |= MMC_CAP2_CRYPTO;
 	}
 
 	host->irq = platform_get_irq(pdev, 0);
 	if (host->irq < 0)
-		return host->irq;
+		return dev_err_probe(&pdev->dev, host->irq,
+				     "JAGAR: platform_get_irq failed\n");
 
 	host->pinctrl = devm_pinctrl_get(&pdev->dev);
 	if (IS_ERR(host->pinctrl))
@@ -3044,8 +3094,12 @@ static int msdc_drv_probe(struct platform_device *pdev)
 				     "Cannot find pinctrl");
 
 	host->pins_default = pinctrl_lookup_state(host->pinctrl, "default");
+	if (IS_ERR(host->pins_default))
+		host->pins_default = pinctrl_lookup_state(host->pinctrl,
+							  "state_normal");
 	if (IS_ERR(host->pins_default)) {
-		dev_err(&pdev->dev, "Cannot find pinctrl default!\n");
+		dev_err(&pdev->dev,
+			"Cannot find pinctrl default or state_normal!\n");
 		return PTR_ERR(host->pins_default);
 	}
 
@@ -3201,6 +3255,12 @@ release_mem:
 		dma_free_coherent(&pdev->dev,
 				  MAX_BD_NUM * sizeof(struct mt_bdma_desc),
 				  host->dma.bd, host->dma.bd_addr);
+	/*
+	 * Every goto label above falls through to here, so this is the single
+	 * exit for the late failures (dma alloc, ungate, cqhci/hsq init,
+	 * request_irq, mmc_add_host). None of them printed anything before.
+	 */
+	dev_err(&pdev->dev, "JAGAR: msdc_drv_probe failed late: %d\n", ret);
 	return ret;
 }
 

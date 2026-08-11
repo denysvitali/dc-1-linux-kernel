@@ -2472,11 +2472,14 @@ static int pwrap_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	const struct of_device_id *of_slave_id = NULL;
 
+	dev_err(&pdev->dev, "JAGAR: pwrap_probe ENTERED, np=%pOF child=%pOF\n",
+		np, np ? np->child : NULL);
+
 	if (np->child)
 		of_slave_id = of_match_node(of_slave_match_tbl, np->child);
 
 	if (!of_slave_id) {
-		dev_dbg(&pdev->dev, "slave pmic should be defined in dts\n");
+		dev_err(&pdev->dev, "JAGAR: slave pmic match failed (first child)\n");
 		return -EINVAL;
 	}
 
@@ -2491,14 +2494,16 @@ static int pwrap_probe(struct platform_device *pdev)
 	wrp->dev = &pdev->dev;
 
 	wrp->base = devm_platform_ioremap_resource_byname(pdev, "pwrap");
-	if (IS_ERR(wrp->base))
+	if (IS_ERR(wrp->base)) {
+		dev_err(&pdev->dev, "JAGAR: ioremap 'pwrap' failed %ld\n", PTR_ERR(wrp->base));
 		return PTR_ERR(wrp->base);
+	}
 
 	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_RESET)) {
 		wrp->rstc = devm_reset_control_get(wrp->dev, "pwrap");
 		if (IS_ERR(wrp->rstc)) {
 			ret = PTR_ERR(wrp->rstc);
-			dev_dbg(wrp->dev, "cannot get pwrap reset: %d\n", ret);
+			dev_err(wrp->dev, "JAGAR: cannot get pwrap reset: %d\n", ret);
 			return ret;
 		}
 	}
@@ -2512,8 +2517,8 @@ static int pwrap_probe(struct platform_device *pdev)
 							  "pwrap-bridge");
 		if (IS_ERR(wrp->rstc_bridge)) {
 			ret = PTR_ERR(wrp->rstc_bridge);
-			dev_dbg(wrp->dev,
-				"cannot get pwrap-bridge reset: %d\n", ret);
+			dev_err(wrp->dev,
+				"JAGAR: cannot get pwrap-bridge reset: %d\n", ret);
 			return ret;
 		}
 	}
@@ -2536,7 +2541,7 @@ static int pwrap_probe(struct platform_device *pdev)
 	if (!pwrap_readl(wrp, PWRAP_INIT_DONE2)) {
 		ret = pwrap_init(wrp);
 		if (ret) {
-			dev_dbg(wrp->dev, "init failed with %d\n", ret);
+			dev_err(wrp->dev, "JAGAR: pwrap_init failed with %d\n", ret);
 			return ret;
 		}
 	}
@@ -2549,7 +2554,9 @@ static int pwrap_probe(struct platform_device *pdev)
 		mask_done = PWRAP_STATE_INIT_DONE0;
 
 	if (!(pwrap_readl(wrp, PWRAP_WACS2_RDATA) & mask_done)) {
-		dev_dbg(wrp->dev, "initialization isn't finished\n");
+		dev_err(wrp->dev, "JAGAR: init not finished: WACS2_RDATA=%08x mask_done=%08x INIT_DONE2=%08x\n",
+			pwrap_readl(wrp, PWRAP_WACS2_RDATA), mask_done,
+			pwrap_readl(wrp, PWRAP_INIT_DONE2));
 		return -ENODEV;
 	}
 
@@ -2579,26 +2586,33 @@ static int pwrap_probe(struct platform_device *pdev)
 		pwrap_writel(wrp, wrp->master->int1_en_all, PWRAP_INT1_EN);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
+	if (irq < 0) {
+		dev_err(wrp->dev, "JAGAR: platform_get_irq failed %d\n", irq);
 		return irq;
+	}
 
 	ret = devm_request_irq(wrp->dev, irq, pwrap_interrupt,
 			       IRQF_TRIGGER_HIGH,
 			       "mt-pmic-pwrap", wrp);
-	if (ret)
-		return ret;
-
-	wrp->regmap = devm_regmap_init(wrp->dev, NULL, wrp, wrp->slave->regops->regmap);
-	if (IS_ERR(wrp->regmap))
-		return PTR_ERR(wrp->regmap);
-
-	ret = of_platform_populate(np, NULL, NULL, wrp->dev);
 	if (ret) {
-		dev_dbg(wrp->dev, "failed to create child devices at %pOF\n",
-				np);
+		dev_err(wrp->dev, "JAGAR: request_irq failed %d\n", ret);
 		return ret;
 	}
 
+	wrp->regmap = devm_regmap_init(wrp->dev, NULL, wrp, wrp->slave->regops->regmap);
+	if (IS_ERR(wrp->regmap)) {
+		dev_err(wrp->dev, "JAGAR: regmap_init failed %ld\n", PTR_ERR(wrp->regmap));
+		return PTR_ERR(wrp->regmap);
+	}
+
+	ret = of_platform_populate(np, NULL, NULL, wrp->dev);
+	if (ret) {
+		dev_err(wrp->dev, "JAGAR: of_platform_populate failed %d at %pOF\n",
+				ret, np);
+		return ret;
+	}
+
+	dev_err(wrp->dev, "JAGAR: pwrap_probe SUCCESS\n");
 	return 0;
 }
 
@@ -2610,7 +2624,37 @@ static struct platform_driver pwrap_drv = {
 	.probe = pwrap_probe,
 };
 
-module_platform_driver(pwrap_drv);
+static int __init jagar_pwrap_init(void)
+{
+	struct device_node *np;
+	struct platform_device *pdev;
+	int ret;
+
+	np = of_find_compatible_node(NULL, NULL, "mediatek,mt8186-pwrap");
+	pr_err("JAGAR: of_find_compatible(mt8186-pwrap) np=%pOF available=%d\n",
+	       np, np ? of_device_is_available(np) : -1);
+	if (np) {
+		pdev = of_find_device_by_node(np);
+		pr_err("JAGAR: of_find_device_by_node pdev=%s drv=%s\n",
+		       pdev ? dev_name(&pdev->dev) : "NULL",
+		       (pdev && pdev->dev.driver) ? pdev->dev.driver->name : "none");
+		if (pdev)
+			put_device(&pdev->dev);
+		of_node_put(np);
+	}
+
+	ret = platform_driver_register(&pwrap_drv);
+	pr_err("JAGAR: platform_driver_register(%s) = %d\n",
+	       pwrap_drv.driver.name, ret);
+	return ret;
+}
+module_init(jagar_pwrap_init);
+
+static void __exit jagar_pwrap_exit(void)
+{
+	platform_driver_unregister(&pwrap_drv);
+}
+module_exit(jagar_pwrap_exit);
 
 MODULE_AUTHOR("Flora Fu, MediaTek");
 MODULE_DESCRIPTION("MediaTek MT8135 PMIC Wrapper Driver");

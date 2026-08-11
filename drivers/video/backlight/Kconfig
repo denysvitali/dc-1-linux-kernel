@@ -343,6 +343,15 @@ config BACKLIGHT_RT4831
 	  It's commonly used to drive the display WLED. There're four channels
 	  inisde, and each channel can provide up to 30mA current.
 
+config BACKLIGHT_RT4539
+	tristate "Backlight Driver for Richtek RT4539"
+	depends on I2C && GPIOLIB
+	select REGMAP_I2C
+	help
+	  Say Y here to enable the backlight driver for the Richtek RT4539
+	  six-channel boost LED driver. Brightness is controlled over I2C and
+	  the hardware enable GPIO keeps the converter off while unused.
+
 config BACKLIGHT_SAHARA
 	tristate "Tabletkiosk Sahara Touch-iT Backlight Driver"
 	depends on X86

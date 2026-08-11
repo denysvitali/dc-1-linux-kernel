@@ -680,10 +680,49 @@ static int mt6358_sync_vcn33_setting(struct device *dev)
 	return 0;
 }
 
+static struct device_node *
+mt6358_find_regulator_name_fallback(struct device *dev,
+				    const struct regulator_desc *desc)
+{
+	struct device_node *child;
+	const char *name;
+
+	if (!dev->of_node || !desc->of_match)
+		return NULL;
+
+	/*
+	 * Keep the regulator core's standard node-name/regulator-compatible
+	 * matching authoritative.  Some shipped MediaTek trees instead use
+	 * hardware-style child names such as "buck_vgpu" while identifying the
+	 * logical rail only through regulator-name.  In that case the core would
+	 * register an OF-less regulator, making later phandle lookups defer
+	 * forever.  Use regulator-name only as a fallback when no standard match
+	 * exists.
+	 */
+	for_each_available_child_of_node(dev->of_node, child) {
+		name = of_get_property(child, "regulator-compatible", NULL);
+		if (!name)
+			name = child->name;
+		if (!strcmp(name, desc->of_match)) {
+			of_node_put(child);
+			return NULL;
+		}
+	}
+
+	for_each_available_child_of_node(dev->of_node, child) {
+		if (!of_property_read_string(child, "regulator-name", &name) &&
+		    !strcasecmp(name, desc->name))
+			return child;
+	}
+
+	return NULL;
+}
+
 static int mt6358_regulator_probe(struct platform_device *pdev)
 {
 	struct mt6397_chip *mt6397 = dev_get_drvdata(pdev->dev.parent);
 	struct regulator_config config = {};
+	struct device_node *fallback_node;
 	struct regulator_dev *rdev;
 	const struct mt6358_regulator_info *mt6358_info;
 	int i, max_regulator, ret;
@@ -707,12 +746,35 @@ static int mt6358_regulator_probe(struct platform_device *pdev)
 		return ret;
 
 	for (i = 0; i < max_regulator; i++) {
+		config = (struct regulator_config) {};
 		config.dev = &pdev->dev;
 		config.regmap = mt6397->regmap;
+		fallback_node = NULL;
+
+		/* Only the two DC-1 GPU rails need the shipped-DT fallback. */
+		if (mt6397->chip_id == MT6366_CHIP_ID &&
+		    (i == MT6366_ID_VGPU || i == MT6366_ID_VSRAM_GPU)) {
+			fallback_node = mt6358_find_regulator_name_fallback(
+						&pdev->dev, &mt6358_info[i].desc);
+			if (fallback_node) {
+				config.init_data = of_get_regulator_init_data(
+						&pdev->dev, fallback_node,
+						&mt6358_info[i].desc);
+				if (!config.init_data) {
+					dev_err(&pdev->dev,
+						"failed to parse fallback node for %s\n",
+						mt6358_info[i].desc.name);
+					of_node_put(fallback_node);
+					return -EINVAL;
+				}
+				config.of_node = fallback_node;
+			}
+		}
 
 		rdev = devm_regulator_register(&pdev->dev,
 					       &mt6358_info[i].desc,
 					       &config);
+		of_node_put(fallback_node);
 		if (IS_ERR(rdev)) {
 			dev_err(&pdev->dev, "failed to register %s\n",
 				mt6358_info[i].desc.name);

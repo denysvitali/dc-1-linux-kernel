@@ -215,6 +215,18 @@ int mt7921_register_device(struct mt792x_dev *dev)
 		dev->pm.ds_enable = true;
 	}
 
+	/* JAGAR bring-up diagnostic. MEASURED on this board:
+	 *   chip=7902 rev=79020000 is_mt7902=1 pm.enable=0 ds=0
+	 * i.e. the MT7902 exclusion above DOES match and power management is
+	 * already off -- so the "driver own failed" seen at ndo_open is NOT
+	 * fw_own idling. Forcing pm.enable=false here changed nothing. Keep the
+	 * print; the radio-start path is the thing still to fix.
+	 */
+	dev_info(dev->mt76.dev,
+		 "JAGAR: chip=%04x rev=%08x is_mt7902=%d pm.enable=%d ds=%d\n",
+		 mt76_chip(&dev->mt76), dev->mt76.rev,
+		 is_mt7902(&dev->mt76), dev->pm.enable, dev->pm.ds_enable);
+
 	if (!mt76_is_mmio(&dev->mt76))
 		hw->extra_tx_headroom += MT_SDIO_TXD_SIZE + MT_SDIO_HDR_SIZE;
 

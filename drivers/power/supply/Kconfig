@@ -731,6 +731,18 @@ config CHARGER_MT6370
 	  This driver can also be built as a module. If so, the module
 	  will be called "mt6370-charger".
 
+config CHARGER_MT6375_READONLY
+	tristate "MediaTek MT6375 read-only charger telemetry"
+	depends on I2C && OF
+	select REGMAP_I2C
+	help
+	  Say Y here to report the autonomous MT6375 charger's status and
+	  bootloader-programmed current/voltage limits through the power-supply
+	  class. The driver never writes a register and does not control charging,
+	  the charger watchdog, interrupts, USB Type-C, or Power Delivery.
+
+	  If built as a module, it will be called mt6375-charger-readonly.
+
 config CHARGER_QCOM_SMBB
 	tristate "Qualcomm Switch-Mode Battery Charger and Boost"
 	depends on MFD_SPMI_PMIC || COMPILE_TEST
