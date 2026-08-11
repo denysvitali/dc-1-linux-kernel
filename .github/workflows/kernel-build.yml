@@ -19,9 +19,8 @@ name: kernel
 
 on:
   push:
-    # Only master on push: any other branch that matters is in a PR, and
-    # 'push' + 'pull_request' together build every PR branch twice.
-    branches: ['master', 'jagar-display-test']
+    # Build upstream master and the single device integration branch on push.
+    branches: ['master', 'jagar']
   pull_request:
   workflow_dispatch:
 
