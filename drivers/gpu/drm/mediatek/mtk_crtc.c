@@ -406,7 +406,14 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
 
-		if (i == 1)
+		/*
+		 * The first OVL has no upstream compositor and must use its local
+		 * background.  Boot firmware may have left it consuming a secondary
+		 * OVL's background as part of a cascaded topology.
+		 */
+		if (i == 0)
+			mtk_ddp_comp_bgclr_in_off(comp);
+		else if (i == 1)
 			mtk_ddp_comp_bgclr_in_on(comp);
 
 		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);

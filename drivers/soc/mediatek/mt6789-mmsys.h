@@ -5,6 +5,10 @@
 
 #define MT6789_MMSYS_SW0_RST_B 0x160
 
+#define MT6789_MMSYS_OVL_CON 0xf04
+#define MT6789_MMSYS_OVL_CON_MASK GENMASK(3, 0)
+#define MT6789_MMSYS_OVL_CON_OVL0_GO_BLEND BIT(0)
+
 #define MT6789_DISP_OVL0_2L_MOUT 0xf14
 #define MT6789_DISP_OVL0_MOUT 0xf18
 
@@ -52,6 +56,14 @@
  */
 static const struct mtk_mmsys_routes mmsys_mt6789_routing_table[] = {
 	/* OVL0 Routes */
+	/*
+	 * LK leaves the factory OVL0_2L -> OVL0 cascade selected here (0x9).
+	 * The maintained path starts at OVL0, so replace the complete low-nibble
+	 * topology instead of preserving OVL0_2L as OVL0's background source.
+	 */
+	MMSYS_ROUTE(OVL0, RDMA0, MT6789_MMSYS_OVL_CON,
+		    MT6789_MMSYS_OVL_CON_MASK,
+		    MT6789_MMSYS_OVL_CON_OVL0_GO_BLEND),
 	MMSYS_ROUTE(OVL0, RDMA0, MT6789_DISP_OVL0_MOUT, MT6789_DISP_OVL_MOUT_TO_RDMA0, MT6789_DISP_OVL_MOUT_TO_RDMA0),
 	//MMSYS_ROUTE(OVL0, RSZ0, MT6789_DISP_OVL0_MOUT, MT6789_DISP_OVL_MOUT_TO_RSZ0, MT6789_DISP_OVL_MOUT_TO_RSZ0),
 	MMSYS_ROUTE(OVL0, WDMA0, MT6789_DISP_OVL0_MOUT, MT6789_DISP_OVL_MOUT_TO_WDMA0, MT6789_DISP_OVL_MOUT_TO_WDMA0),
