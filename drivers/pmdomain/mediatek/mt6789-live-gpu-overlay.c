@@ -35,10 +35,6 @@
 #define DC1_SCPSYS_PATH		"/power-controller@10006000"
 #define DC1_GPU_PATH		"/soc/mali@13000000"
 #define DC1_MFG_CONTROLLER_NAME	"power-controller"
-#define DC1_MFG0_NAME		"power-domain@2"
-#define DC1_MFG1_NAME		"power-domain@3"
-#define DC1_MFG2_NAME		"power-domain@4"
-#define DC1_MFG3_NAME		"power-domain@5"
 
 #define DC1_GPU_UV		850000
 #define DC1_SPM_PWR_STATUS	0x16c
@@ -122,6 +118,26 @@ static int dc1_require_leaf_domain(struct device_node *node, u32 expected_id)
 		return -EINVAL;
 
 	return 0;
+}
+
+static struct device_node *dc1_get_domain_child(struct device_node *parent,
+						 u32 expected_id)
+{
+	struct device_node *child;
+	u32 id;
+
+	/*
+	 * child->name is "power-domain", without the unit address.  Looking up
+	 * "power-domain@2" with of_get_child_by_name() therefore misses a node
+	 * whose full path visibly contains that exact string.  The binding's reg
+	 * value is the stable identity and is validated again below.
+	 */
+	for_each_child_of_node(parent, child) {
+		if (!of_property_read_u32(child, "reg", &id) && id == expected_id)
+			return child;
+	}
+
+	return NULL;
 }
 
 static int dc1_check_cold_base(struct device_node **scpsys_out,
@@ -255,35 +271,50 @@ out_free_tfm:
 
 static int dc1_set_enable_rail(struct regulator *regulator, const char *name)
 {
+	int voltage;
 	int ret;
 
 	ret = regulator_is_enabled(regulator);
-	if (ret < 0)
+	if (ret < 0) {
+		pr_err("DC-1 GPU: %s is-enabled query failed: %d\n", name, ret);
 		return ret;
-	if (ret) {
-		pr_err("DC-1 GPU: refusing unexpectedly enabled %s rail\n", name);
-		return -EBUSY;
 	}
+	if (ret)
+		pr_info("DC-1 GPU: %s inherited enabled; acquiring a consumer hold\n",
+			name);
 
-	ret = regulator_get_voltage(regulator);
-	if (ret < 0)
-		return ret;
-	if (ret != DC1_GPU_UV) {
-		pr_err("DC-1 GPU: refusing %s at unexpected %d uV\n", name, ret);
+	voltage = regulator_get_voltage(regulator);
+	if (voltage < 0) {
+		pr_err("DC-1 GPU: %s voltage query failed: %d\n", name,
+		       voltage);
+		return voltage;
+	}
+	if (voltage != DC1_GPU_UV) {
+		pr_err("DC-1 GPU: refusing %s at unexpected %d uV\n", name,
+		       voltage);
 		return -ERANGE;
 	}
 
 	ret = regulator_set_voltage(regulator, DC1_GPU_UV, DC1_GPU_UV);
-	if (ret)
+	if (ret) {
+		pr_err("DC-1 GPU: %s voltage set failed: %d\n", name, ret);
 		return ret;
-	if (regulator_get_voltage(regulator) != DC1_GPU_UV)
+	}
+	voltage = regulator_get_voltage(regulator);
+	if (voltage != DC1_GPU_UV) {
+		pr_err("DC-1 GPU: %s voltage verify failed: %d\n", name,
+		       voltage);
 		return -ERANGE;
+	}
 
 	ret = regulator_enable(regulator);
-	if (ret)
+	if (ret) {
+		pr_err("DC-1 GPU: %s enable failed: %d\n", name, ret);
 		return ret;
+	}
 	ret = regulator_is_enabled(regulator);
 	if (ret <= 0) {
+		pr_err("DC-1 GPU: %s enable verify failed: %d\n", name, ret);
 		regulator_disable(regulator);
 		return ret ? ret : -EIO;
 	}
@@ -306,6 +337,15 @@ static void dc1_put_nodes(struct device_node *mfg3,
 	of_node_put(controller);
 	of_node_put(gpu);
 	of_node_put(scpsys);
+}
+
+static void dc1_log_children(struct device_node *parent, const char *label)
+{
+	struct device_node *child;
+
+	pr_err("DC-1 GPU: children below %s (%pOF):\n", label, parent);
+	for_each_child_of_node(parent, child)
+		pr_err("DC-1 GPU:   %pOF\n", child);
 }
 
 static int __init dc1_gpu_overlay_init(void)
@@ -335,6 +375,7 @@ static int __init dc1_gpu_overlay_init(void)
 		pr_err("DC-1 GPU: cold-DT preflight failed: %d\n", ret);
 		return ret;
 	}
+	pr_info("DC-1 GPU: cold-DT preflight passed\n");
 
 	ret = request_firmware_direct(&firmware, DC1_GPU_OVERLAY_FIRMWARE,
 				      &scpsys_pdev->dev);
@@ -344,6 +385,8 @@ static int __init dc1_gpu_overlay_init(void)
 		goto out_put_base;
 	}
 	ret = dc1_check_overlay_firmware(firmware);
+	if (ret)
+		pr_err("DC-1 GPU: overlay firmware validation failed: %d\n", ret);
 	if (!ret)
 		ret = of_overlay_fdt_apply(firmware->data, firmware->size,
 					   &overlay_id, NULL);
@@ -352,34 +395,69 @@ static int __init dc1_gpu_overlay_init(void)
 		pr_err("DC-1 GPU: overlay apply failed: %d\n", ret);
 		goto out_remove_overlay;
 	}
+	pr_info("DC-1 GPU: overlay applied as id %d\n", overlay_id);
 
 	controller = of_get_child_by_name(scpsys, DC1_MFG_CONTROLLER_NAME);
 	if (!controller) {
+		pr_err("DC-1 GPU: overlay controller child is missing\n");
+		dc1_log_children(scpsys, "SCPSYS");
 		ret = -EINVAL;
 		goto out_bad_overlay;
 	}
-	mfg0 = of_get_child_by_name(controller, DC1_MFG0_NAME);
+	mfg0 = dc1_get_domain_child(controller, 2);
 	if (!mfg0) {
+		pr_err("DC-1 GPU: overlay MFG0 child is missing\n");
+		dc1_log_children(controller, "MFG controller");
 		ret = -EINVAL;
 		goto out_bad_overlay;
 	}
-	mfg1 = of_get_child_by_name(mfg0, DC1_MFG1_NAME);
+	mfg1 = dc1_get_domain_child(mfg0, 3);
 	if (!mfg1) {
+		pr_err("DC-1 GPU: overlay MFG1 child is missing\n");
+		dc1_log_children(mfg0, "MFG0");
 		ret = -EINVAL;
 		goto out_bad_overlay;
 	}
-	mfg2 = of_get_child_by_name(mfg1, DC1_MFG2_NAME);
-	mfg3 = of_get_child_by_name(mfg1, DC1_MFG3_NAME);
+	mfg2 = dc1_get_domain_child(mfg1, 4);
+	mfg3 = dc1_get_domain_child(mfg1, 5);
 	if (!of_device_is_compatible(controller,
-				     "mediatek,mt6789-power-controller") ||
-	    dc1_require_domain(mfg0, 2) || dc1_require_domain(mfg1, 3) ||
-	    dc1_require_leaf_domain(mfg2, 4) ||
-	    dc1_require_leaf_domain(mfg3, 5) ||
-	    !dc1_string_list_is(scpsys, "compatible",
+				     "mediatek,mt6789-power-controller")) {
+		pr_err("DC-1 GPU: overlay controller compatible mismatch\n");
+		ret = -EINVAL;
+		goto out_bad_overlay;
+	}
+	ret = dc1_require_domain(mfg0, 2);
+	if (ret) {
+		pr_err("DC-1 GPU: overlay MFG0 semantic mismatch: %d\n", ret);
+		goto out_bad_overlay;
+	}
+	ret = dc1_require_domain(mfg1, 3);
+	if (ret) {
+		pr_err("DC-1 GPU: overlay MFG1 semantic mismatch: %d\n", ret);
+		goto out_bad_overlay;
+	}
+	ret = dc1_require_leaf_domain(mfg2, 4);
+	if (ret) {
+		pr_err("DC-1 GPU: overlay MFG2 semantic mismatch: %d\n", ret);
+		goto out_bad_overlay;
+	}
+	ret = dc1_require_leaf_domain(mfg3, 5);
+	if (ret) {
+		pr_err("DC-1 GPU: overlay MFG3 semantic mismatch: %d\n", ret);
+		goto out_bad_overlay;
+	}
+	if (!dc1_string_list_is(scpsys, "compatible",
 				dc1_scpsys_overlay_compat,
-				ARRAY_SIZE(dc1_scpsys_overlay_compat)) ||
-	    !dc1_string_list_is(gpu, "compatible", dc1_gpu_panfrost_compat,
+				ARRAY_SIZE(dc1_scpsys_overlay_compat))) {
+		pr_err("DC-1 GPU: overlay SCPSYS compatible mismatch (count %d)\n",
+		       of_property_count_strings(scpsys, "compatible"));
+		ret = -EINVAL;
+		goto out_bad_overlay;
+	}
+	if (!dc1_string_list_is(gpu, "compatible", dc1_gpu_panfrost_compat,
 				ARRAY_SIZE(dc1_gpu_panfrost_compat))) {
+		pr_err("DC-1 GPU: overlay Mali compatible mismatch (count %d)\n",
+		       of_property_count_strings(gpu, "compatible"));
 		ret = -EINVAL;
 		goto out_bad_overlay;
 	}
@@ -387,12 +465,14 @@ static int __init dc1_gpu_overlay_init(void)
 	vgpu = of_regulator_get(&scpsys_pdev->dev, mfg0, "domain");
 	if (IS_ERR(vgpu)) {
 		ret = PTR_ERR(vgpu);
+		pr_err("DC-1 GPU: VGPU regulator lookup failed: %d\n", ret);
 		vgpu = NULL;
 		goto out_remove_overlay;
 	}
 	vsram = of_regulator_get(&scpsys_pdev->dev, mfg1, "domain");
 	if (IS_ERR(vsram)) {
 		ret = PTR_ERR(vsram);
+		pr_err("DC-1 GPU: VSRAM_GPU regulator lookup failed: %d\n", ret);
 		vsram = NULL;
 		goto out_put_regulators;
 	}
@@ -401,11 +481,13 @@ static int __init dc1_gpu_overlay_init(void)
 	if (ret)
 		goto out_put_regulators;
 	vgpu_enabled = true;
+	pr_info("DC-1 GPU: VGPU enabled at 850 mV\n");
 
 	ret = dc1_set_enable_rail(vsram, "VSRAM_GPU");
 	if (ret)
 		goto out_disable_rails;
 	vsram_enabled = true;
+	pr_info("DC-1 GPU: VSRAM_GPU enabled at 850 mV\n");
 
 	/* This is the last check from which complete rollback is possible. */
 	if (device_is_bound(&gpu_pdev->dev)) {
@@ -421,8 +503,12 @@ static int __init dc1_gpu_overlay_init(void)
 	 */
 	populated = true;
 	ret = of_platform_populate(scpsys, NULL, NULL, &scpsys_pdev->dev);
-	if (ret)
+	if (ret) {
+		pr_err("DC-1 GPU: nested controller population failed: %d\n",
+		       ret);
 		goto out_depopulate;
+	}
+	pr_info("DC-1 GPU: nested controller populated\n");
 
 	controller_pdev = of_find_device_by_node(controller);
 	if (!controller_pdev || !device_is_bound(&controller_pdev->dev)) {
@@ -478,6 +564,17 @@ out_put_regulators:
 	if (vgpu)
 		regulator_put(vgpu);
 out_remove_overlay:
+	/* Drop every reference to overlay-created nodes before removal. */
+	of_node_put(mfg3);
+	mfg3 = NULL;
+	of_node_put(mfg2);
+	mfg2 = NULL;
+	of_node_put(mfg1);
+	mfg1 = NULL;
+	of_node_put(mfg0);
+	mfg0 = NULL;
+	of_node_put(controller);
+	controller = NULL;
 	if (overlay_id >= 0) {
 		rollback_ret = of_overlay_remove(&overlay_id);
 		if (rollback_ret)
