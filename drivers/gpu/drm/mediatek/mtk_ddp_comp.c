@@ -71,12 +71,13 @@ void mtk_ddp_write(struct cmdq_pkt *cmdq_pkt, unsigned int value,
 		   unsigned int offset)
 {
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
-	if (cmdq_pkt)
-		cmdq_pkt_write(cmdq_pkt, cmdq_reg->subsys,
-			       cmdq_reg->offset + offset, value);
-	else
+	if (cmdq_pkt && cmdq_reg->pkt_write &&
+	    !cmdq_reg->pkt_write(cmdq_pkt, cmdq_reg->subsys,
+				 cmdq_reg->pa_base,
+				 cmdq_reg->offset + offset, value))
+		return;
 #endif
-		writel(value, regs + offset);
+	writel(value, regs + offset);
 }
 
 void mtk_ddp_write_relaxed(struct cmdq_pkt *cmdq_pkt, unsigned int value,
@@ -84,31 +85,32 @@ void mtk_ddp_write_relaxed(struct cmdq_pkt *cmdq_pkt, unsigned int value,
 			   unsigned int offset)
 {
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
-	if (cmdq_pkt)
-		cmdq_pkt_write(cmdq_pkt, cmdq_reg->subsys,
-			       cmdq_reg->offset + offset, value);
-	else
+	if (cmdq_pkt && cmdq_reg->pkt_write &&
+	    !cmdq_reg->pkt_write(cmdq_pkt, cmdq_reg->subsys,
+				 cmdq_reg->pa_base,
+				 cmdq_reg->offset + offset, value))
+		return;
 #endif
-		writel_relaxed(value, regs + offset);
+	writel_relaxed(value, regs + offset);
 }
 
 void mtk_ddp_write_mask(struct cmdq_pkt *cmdq_pkt, unsigned int value,
 			struct cmdq_client_reg *cmdq_reg, void __iomem *regs,
 			unsigned int offset, unsigned int mask)
 {
-#if IS_REACHABLE(CONFIG_MTK_CMDQ)
-	if (cmdq_pkt) {
-		cmdq_pkt_write_mask(cmdq_pkt, cmdq_reg->subsys,
-				    cmdq_reg->offset + offset, value, mask);
-	} else {
-#endif
-		u32 tmp = readl(regs + offset);
+	u32 tmp;
 
-		tmp = (tmp & ~mask) | (value & mask);
-		writel(tmp, regs + offset);
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
-	}
+	if (cmdq_pkt && cmdq_reg->pkt_write_mask &&
+	    !cmdq_reg->pkt_write_mask(cmdq_pkt, cmdq_reg->subsys,
+				      cmdq_reg->pa_base,
+				      cmdq_reg->offset + offset, value, mask))
+		return;
 #endif
+	tmp = readl(regs + offset);
+
+	tmp = (tmp & ~mask) | (value & mask);
+	writel(tmp, regs + offset);
 }
 
 static int mtk_ddp_clk_enable(struct device *dev)

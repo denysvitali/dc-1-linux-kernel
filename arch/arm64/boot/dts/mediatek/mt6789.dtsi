@@ -552,8 +552,10 @@
 						#size-cells = <0>;
 						#power-domain-cells = <1>;
 
-						power-domain@MT6789_POWER_DOMAIN_MFG2 {
+						mfg2: power-domain@MT6789_POWER_DOMAIN_MFG2 {
 							reg = <MT6789_POWER_DOMAIN_MFG2>;
+							clocks = <&mfgcfg CLK_MFGCFG_BG3D>;
+							clock-names = "mfg";
 							#power-domain-cells = <0>;
 						};
 
@@ -1446,8 +1448,7 @@
 		};
 
 		mipi_tx0: dsi-phy@11f60000 {
-			compatible = "mediatek,mt6789-mipi-tx",
-			             "mediatek,mt8183-mipi-tx";
+			compatible = "mediatek,mt6789-mipi-tx";
 			reg = <0 0x11f60000 0 0x1000>;
 			clocks = <&clk26m>;
 			#clock-cells = <0>;
@@ -1544,7 +1545,7 @@
 		};
 
 		ovl_2l0: ovl@14006000 {
-			compatible = "mediatek,mt6789-disp-ovl", "mediatek,mt8192-disp-ovl-2l";
+			compatible = "mediatek,mt6789-disp-ovl-2l", "mediatek,mt8192-disp-ovl-2l";
 			reg = <0 0x14006000 0 0x1000>;
 			interrupts = <GIC_SPI 288 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>;
 			power-domains = <&spm MT6789_POWER_DOMAIN_DISP>;

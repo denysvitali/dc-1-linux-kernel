@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Daylight DC-1 bounded GPU probe DT
+ *
+ * This is intentionally distinct from the normal jagar DTB.  It is an
+ * offline Phase 5 boot-DT transition candidate, not a DTB for the current
+ * shipped-DT boot chain.  Keep the initial probe at 390 MHz and fixed coupled
+ * rails, and do not run a sustained workload before calibrated LVTS exists.
+ */
+
+#include "mt8781-daylight-jagar.dts"
+
+/ {
+	gpu_opp_table_jagar_probe: opp-table-gpu-jagar-probe {
+		compatible = "operating-points-v2";
+
+		opp-390000000 {
+			opp-hz = /bits/ 64 <390000000>;
+			opp-microvolt = <675000>;
+		};
+	};
+};
+
+/* Both rails are established before MFG0; domain supplies retain ownership. */
+&mt6366_vgpu_reg {
+	regulator-always-on;
+	regulator-min-microvolt = <675000>;
+	regulator-max-microvolt = <675000>;
+};
+
+&mt6366_vsram_gpu_reg {
+	regulator-always-on;
+	regulator-min-microvolt = <750000>;
+	regulator-max-microvolt = <750000>;
+};
+
+/* Match the established MT6789/Emerald domain-supply ownership. */
+&mfg0 {
+	domain-supply = <&mt6366_vgpu_reg>;
+};
+
+&mfg1 {
+	domain-supply = <&mt6366_vsram_gpu_reg>;
+};
+
+&gpu {
+	mali-supply = <&mt6366_vgpu_reg>;
+	operating-points-v2 = <&gpu_opp_table_jagar_probe>;
+	status = "okay";
+};

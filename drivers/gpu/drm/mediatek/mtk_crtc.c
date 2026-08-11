@@ -341,6 +341,7 @@ ddp_cmdq_cb_out:
 static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 {
 	struct drm_crtc *crtc = &mtk_crtc->base;
+	struct mtk_drm_private *priv = crtc->dev->dev_private;
 	struct drm_connector *connector;
 	struct drm_encoder *encoder;
 	struct drm_connector_list_iter conn_iter;
@@ -389,6 +390,16 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		goto err_mutex_unprepare;
 	}
 
+	/*
+	 * LK leaves the MT6789 display path running.  Do not reconfigure or
+	 * restart OVL while the inherited DSI SOF source can still trigger the
+	 * mutex: that can strand OVL in its hardware-reset state.  Quiesce the
+	 * inherited trigger first and create a real OVL enable edge.
+	 */
+	if (priv->data->quiesce_mutex_first) {
+		mtk_mutex_disable(mtk_crtc->mutex);
+	}
+
 	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
 		if (!mtk_ddp_comp_connect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
 					  mtk_crtc->ddp_comp[i + 1]->id))
@@ -401,14 +412,38 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 	}
 	if (!mtk_ddp_comp_add(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
 		mtk_mutex_add_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
-	mtk_mutex_enable(mtk_crtc->mutex);
+	if (!priv->data->quiesce_mutex_first)
+		mtk_mutex_enable(mtk_crtc->mutex);
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
 
-		if (i == 1)
+		/*
+		 * MT6789's DSI start hook stops the inherited LK video stream.
+		 * Defer the first OVL stop/reset until that hook has run, while
+		 * DISP_MUTEX remains disabled, so no live DSI SOF can race it.
+		 */
+		if (priv->data->quiesce_mutex_first && i == 0)
+			continue;
+
+		/*
+		 * The first OVL has no upstream compositor and must use its local
+		 * background.  Boot firmware may have left it consuming a secondary
+		 * OVL's background as part of a cascaded topology.
+		 */
+		if (i == 0)
+			mtk_ddp_comp_bgclr_in_off(comp);
+		else if (i == 1)
 			mtk_ddp_comp_bgclr_in_on(comp);
 
+		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
+		mtk_ddp_comp_start(comp);
+	}
+	if (priv->data->quiesce_mutex_first) {
+		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
+
+		mtk_ddp_comp_bgclr_in_off(comp);
+		mtk_ddp_comp_stop(comp);
 		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
 		mtk_ddp_comp_start(comp);
 	}
@@ -422,13 +457,29 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 
 		plane_state = to_mtk_plane_state(plane->state);
 
-		/* should not enable layer before crtc enabled */
-		plane_state->pending.enable = false;
+		if (priv->data->quiesce_mutex_first &&
+		    plane_state->base.crtc == crtc &&
+		    plane_state->base.fb && plane_state->base.visible) {
+			/*
+			 * commit_tail_rpm enables the CRTC before its plane commit.
+			 * MT6789 must not see its first DSI SOF with every OVL layer
+			 * disabled, so program the already-validated atomic plane
+			 * state synchronously while the mutex remains quiesced.  The
+			 * later plane commit may safely repeat this configuration.
+			 */
+			mtk_plane_update_new_state(&plane_state->base, plane_state);
+		} else {
+			/* should not enable layer before crtc enabled */
+			plane_state->pending.enable = false;
+		}
 		comp = mtk_ddp_comp_for_plane(crtc, plane, &local_layer);
 		if (comp)
 			mtk_ddp_comp_layer_config(comp, local_layer,
 						  plane_state, NULL);
 	}
+
+	if (priv->data->quiesce_mutex_first)
+		mtk_mutex_enable(mtk_crtc->mutex);
 
 	return 0;
 
@@ -442,9 +493,14 @@ err_pm_runtime_put:
 static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 {
 	struct drm_device *drm = mtk_crtc->base.dev;
+	struct mtk_drm_private *priv = drm->dev_private;
 	struct drm_crtc *crtc = &mtk_crtc->base;
 	unsigned long flags;
 	int i;
+
+	/* Stop new MT6789 SOF triggers before stopping the OVL pipeline. */
+	if (priv->data->quiesce_mutex_first)
+		mtk_mutex_disable(mtk_crtc->mutex);
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		mtk_ddp_comp_stop(mtk_crtc->ddp_comp[i]);
@@ -456,7 +512,8 @@ static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 		if (!mtk_ddp_comp_remove(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
 			mtk_mutex_remove_comp(mtk_crtc->mutex,
 					      mtk_crtc->ddp_comp[i]->id);
-	mtk_mutex_disable(mtk_crtc->mutex);
+	if (!priv->data->quiesce_mutex_first)
+		mtk_mutex_disable(mtk_crtc->mutex);
 	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
 		if (!mtk_ddp_comp_disconnect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
 					     mtk_crtc->ddp_comp[i + 1]->id))

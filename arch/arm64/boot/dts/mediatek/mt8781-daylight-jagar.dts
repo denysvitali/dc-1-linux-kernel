@@ -549,9 +549,10 @@
 };
 
 /*
- * Mali-G57 (Valhall).  Left disabled as in the .dtsi: enabling it requires
- * mali-supply/domain-supply from the PMIC, and the GPU is irrelevant to first
- * boot.
+ * Mali-G57 stays disabled in the normal board DT.  The deliberately separate
+ * mt8781-daylight-jagar-gpu-probe.dtb fixes both coupled rails and the OPP to
+ * conservative values for a bounded first probe.  Do not deploy that DTB
+ * before the Phase 5 boot-DT transition and calibrated-thermal gates pass.
  */
 
 /*

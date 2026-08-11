@@ -42,6 +42,7 @@ struct panel_desc {
 
 	unsigned int bpc;
 	unsigned int lanes;
+	unsigned long hs_rate;
 	unsigned long mode_flags;
 	enum mipi_dsi_pixel_format format;
 
@@ -60,6 +61,39 @@ module_param_named(jagar_production_sequence,
 		   sharp_nt36523n_production_sequence, bool, 0644);
 MODULE_PARM_DESC(jagar_production_sequence,
 		 "Use the DC-1 production panel power and initialization sequence");
+
+/*
+ * The shipped FDT lets the jagar panel probe advance through several pieces of
+ * hardware ownership at once: inherited VDDI, the two bias regulators, and the
+ * reset GPIO. The staging exists so a live console can advance one resource
+ * group at a time, and a failed stage can be recovered through the other A/B
+ * slot without conflating those operations.
+ *
+ * Defaulting this to 3 was tried on 2026-08-09 and DOES NOT BOOT: the full
+ * sequence completes fine when advanced from a live console at t=275s, but
+ * running it from probe during boot never reaches userspace, and LK falls back
+ * to the other slot. Keep the default at the boot-proven hold and advance it at
+ * runtime (device/userspace/sway-test/panel-up.sh).
+ */
+/*
+ * The 850 MHz peripheral HS rate is the factory value, but the factory runs
+ * this panel at 120 Hz while sharp_nt36523n_modes programs 60 Hz. 60 Hz needs
+ * 128746 kHz * 24 bpp / 4 lanes = 772.5 Mbps/lane, so forcing 850 makes the
+ * link and the packet timing disagree -- a candidate for the stable vertical
+ * comb the panel shows for a uniform frame. 0 means "derive from the mode",
+ * which is what mtk_dsi does when hs_rate is unset. Settable at runtime so a
+ * rate can be tried without a flash cycle: write it before advancing
+ * jagar_probe_stage.
+ */
+static unsigned long sharp_nt36523n_hs_rate;
+module_param_named(jagar_hs_rate, sharp_nt36523n_hs_rate, ulong, 0644);
+MODULE_PARM_DESC(jagar_hs_rate,
+		 "DC-1 peripheral HS data rate in Hz (0 = derive from the mode)");
+
+static unsigned int sharp_nt36523n_probe_stage;
+module_param_named(jagar_probe_stage, sharp_nt36523n_probe_stage, uint, 0644);
+MODULE_PARM_DESC(jagar_probe_stage,
+		 "DC-1 panel probe stage: 0=hold, 1=VDDI, 2=bias, 3=reset/attach");
 
 static inline struct panel_info *to_panel_info(struct drm_panel *panel)
 {
@@ -1191,8 +1225,9 @@ static int sharp_nt36523n_pre_ts_init_sequence(struct panel_info *pinfo)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0x03);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x89, 0xa8, 0x00, 0x14, 0xd2, 0x00, 0x02, 0x45, 0x01, 0xec, 0x00, 0x08, 0x05, 0x7a, 0x04, 0x94);
+	/* no-DSC tail (init_pre_ts_60hz_no_dsc); this table carried the 3x DSC one. */
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x89, 0xa8, 0x00, 0x0c, 0xd2, 0x00, 0x02, 0x25, 0x01, 0x14, 0x00, 0x07, 0x09, 0x75, 0x08, 0x7a);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x92, 0x10, 0xf0);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xbb, 0x13);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11);
@@ -1215,6 +1250,29 @@ static int sharp_nt36523n_production_init_sequence(struct panel_info *pinfo)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
+
+	/*
+	 * Take the panel OUT of DSC.
+	 *
+	 * init_es3 -- the eight commands above, byte-for-byte what LK sends -- never
+	 * writes 0x90, so the panel keeps its MTP default. Every vendor mode for
+	 * MP-family samples is 120 Hz 3x DSC, so that default is DSC ON, and we then
+	 * transmit uncompressed RGB888: the panel latches 1200 bytes per line against
+	 * our 3600 and stretches the first third of each line to full width. That is
+	 * the stable full-screen comb, and it is why a saturated white frame still
+	 * looked clean (all-0xFF survives any decode).
+	 *
+	 * Values from init_pre_ts_60hz_no_dsc in the unstripped vendor module,
+	 * extracted/vendor_boot_a/vr/lib/modules/panel-sharp-nt36523n-vdo-120hz.ko.
+	 * 0x90 is latched at sleep-out, so this must precede 0x11.
+	 */
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x89, 0xa8, 0x00, 0x0c, 0xd2,
+				     0x00, 0x02, 0x25, 0x01, 0x14, 0x00, 0x07, 0x09,
+				     0x75, 0x08, 0x7a);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x92, 0x10, 0xf0);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xbb, 0x13);
+
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11);
 	mipi_dsi_msleep(&dsi_ctx, 122);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x29);
@@ -1256,8 +1314,18 @@ static const struct panel_desc sharp_nt36523n_desc = {
 	.height_mm = 213,
 	.bpc = 8,
 	.lanes = 4,
+	.hs_rate = 850000000,
 	.format = MIPI_DSI_FMT_RGB888,
-	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
+	/*
+	 * The shipped panel module writes 0xe05 to dsi->mode_flags in
+	 * sharp_probe(), but the shipped MT6789 host's video-mode RX/TX setup
+	 * ignores bit 9 (called MIPI_DSI_MODE_EOT_PACKET in that tree).  Setting
+	 * the modern NO_EOT_PACKET spelling would therefore change the actual
+	 * wire framing by setting DIS_EOT.  Reproduce the factory host behavior:
+	 * sync-pulse video with EoT packets, a non-continuous clock, and low-power
+	 * command transfers.
+	 */
+	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
 		      MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM,
 	.init_sequence = sharp_nt36523n_init_sequence,
 	.has_jagar_power_sequence = true,
@@ -1323,12 +1391,17 @@ static int sharp_nt36523n_power_on(struct panel_info *pinfo)
 	usleep_range(11000, 11055);
 
 	/*
-	 * Keep the reset cadence that already boots through the mainline DSI
-	 * handoff. The shipped microsecond pulse still needs an isolated hardware
-	 * test; applying it together with first-time bias ownership prevented Linux
-	 * from reaching its USB console.
+	 * Exact production reset from the shipped driver. GPIO85 is active-high in
+	 * the factory FDT: the old generic cadence ended low and left the controller
+	 * physically held in reset while every DCS command was sent.
 	 */
-	nt36523_reset(pinfo);
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 1);
+	usleep_range(12, 13);
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 0);
+	usleep_range(12, 13);
+	gpiod_set_raw_value_cansleep(pinfo->reset_gpio, 1);
+	msleep(92);
+	dev_info(dev, "production power sequence complete; reset released\n");
 	pinfo->jagar_bias_enabled = true;
 
 	return 0;
@@ -1555,6 +1628,11 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 	if (!pinfo->desc)
 		return -ENODEV;
 
+	if (pinfo->desc->has_jagar_power_sequence &&
+	    sharp_nt36523n_probe_stage < 1)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "jagar panel probe held before VDDI\n");
+
 	vddio_supply = pinfo->desc->has_jagar_power_sequence ? "vddi" : "vddio";
 	pinfo->vddio = devm_regulator_get(dev, vddio_supply);
 	if (pinfo->desc->has_jagar_power_sequence &&
@@ -1573,6 +1651,11 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 				     "failed to get panel I/O regulator\n");
 	}
 
+	if (pinfo->desc->has_jagar_power_sequence &&
+	    sharp_nt36523n_probe_stage < 2)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "jagar panel probe held before bias regulators\n");
+
 	if (pinfo->desc->has_jagar_power_sequence) {
 		pinfo->bias_supplies[0].supply = "vpos";
 		pinfo->bias_supplies[1].supply = "vneg";
@@ -1583,6 +1666,11 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 			return dev_err_probe(dev, ret,
 					     "failed to get panel bias supplies\n");
 	}
+
+	if (pinfo->desc->has_jagar_power_sequence &&
+	    sharp_nt36523n_probe_stage < 3)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "jagar panel probe held before reset GPIO\n");
 
 	reset_flags = GPIOD_OUT_HIGH;
 	pinfo->reset_gpio = devm_gpiod_get(dev, "reset", reset_flags);
@@ -1637,6 +1725,9 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 
 	for (i = 0; i < DSI_NUM_MIN + pinfo->desc->is_dual_dsi; i++) {
 		pinfo->dsi[i]->lanes = pinfo->desc->lanes;
+		pinfo->dsi[i]->hs_rate = pinfo->desc->has_jagar_power_sequence
+					 ? sharp_nt36523n_hs_rate
+					 : pinfo->desc->hs_rate;
 		pinfo->dsi[i]->format = pinfo->desc->format;
 		pinfo->dsi[i]->mode_flags = pinfo->desc->mode_flags;
 

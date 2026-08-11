@@ -26,6 +26,24 @@ config MTK_SCPSYS_PM_DOMAINS
 	  Control Processor System (SCPSYS) has several power management related
 	  tasks in the system.
 
+config MTK_MT6789_LIVE_GPU_OVERLAY
+	tristate "MT6789 shipped-DT GPU overlay loader"
+	depends on MTK_SCPSYS_PM_DOMAINS
+	depends on OF_OVERLAY
+	depends on FW_LOADER
+	depends on REGULATOR
+	depends on CRYPTO_SHA256
+	help
+	  Build the opt-in Daylight DC-1 loader for the exact, separately
+	  packaged MT6789 live-DT GPU overlay.  The production firmware passes a
+	  legacy flat power-domain node, so the overlay adds a second, nested
+	  provider containing only MFG0 through MFG3 before Panfrost is loaded.
+
+	  This is a one-shot bring-up module: after validating the cold-boot DT
+	  and overlay identity, it fixes and enables both GPU rails, instantiates
+	  the nested power controller, and retains those resources until reboot.
+	  It deliberately has no module exit path.  Say N on other MT6789 boards.
+
 config MTK_MFG_PM_DOMAIN
 	bool "MediaTek MFlexGraphics power domain"
 	default ARCH_MEDIATEK

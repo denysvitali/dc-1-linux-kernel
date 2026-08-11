@@ -24,6 +24,7 @@
 #define OVL_FME_CPL_INT					BIT(1)
 #define DISP_REG_OVL_INTSTA			0x0008
 #define DISP_REG_OVL_EN				0x000c
+#define OVL_EN_BYPASS_SHADOW			BIT(22)
 #define DISP_REG_OVL_RST			0x0014
 #define DISP_REG_OVL_ROI_SIZE			0x0020
 #define DISP_REG_OVL_DATAPATH_CON		0x0024
@@ -150,6 +151,9 @@ struct mtk_disp_ovl_data {
 	const u32 *formats;
 	size_t num_formats;
 	bool supports_clrfmt_ext;
+	bool bypass_shadow;
+	bool skip_config_reset;
+	bool reset_on_stop;
 };
 
 /*
@@ -268,6 +272,7 @@ void mtk_ovl_clk_disable(struct device *dev)
 void mtk_ovl_start(struct device *dev)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	u32 en = BIT(0);
 
 	if (ovl->data->smi_id_en) {
 		unsigned int reg;
@@ -276,14 +281,31 @@ void mtk_ovl_start(struct device *dev)
 		reg = reg | OVL_LAYER_SMI_ID_EN;
 		writel_relaxed(reg, ovl->regs + DISP_REG_OVL_DATAPATH_CON);
 	}
-	writel_relaxed(0x1, ovl->regs + DISP_REG_OVL_EN);
+	if (ovl->data->bypass_shadow)
+		en |= OVL_EN_BYPASS_SHADOW;
+	writel_relaxed(en, ovl->regs + DISP_REG_OVL_EN);
 }
 
 void mtk_ovl_stop(struct device *dev)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	u32 en = ovl->data->bypass_shadow ? OVL_EN_BYPASS_SHADOW : 0;
 
-	writel_relaxed(0x0, ovl->regs + DISP_REG_OVL_EN);
+	if (ovl->data->reset_on_stop) {
+		/*
+		 * Match the MT6789 vendor stop sequence while the caller has the
+		 * display mutex quiesced: mask interrupts, stop, reset, clear latched
+		 * status, then release reset.  Keep BYPASS_SHADOW set while EN itself
+		 * is clear.
+		 */
+		writel(0, ovl->regs + DISP_REG_OVL_INTEN);
+		writel(en, ovl->regs + DISP_REG_OVL_EN);
+		writel(1, ovl->regs + DISP_REG_OVL_RST);
+		writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
+		writel(0, ovl->regs + DISP_REG_OVL_RST);
+	} else {
+		writel_relaxed(en, ovl->regs + DISP_REG_OVL_EN);
+	}
 	if (ovl->data->smi_id_en) {
 		unsigned int reg;
 
@@ -335,8 +357,12 @@ void mtk_ovl_config(struct device *dev, unsigned int w,
 	mtk_ddp_write_relaxed(cmdq_pkt, OVL_COLOR_ALPHA, &ovl->cmdq_reg,
 			      ovl->regs, DISP_REG_OVL_ROI_BGCLR);
 
-	mtk_ddp_write(cmdq_pkt, 0x1, &ovl->cmdq_reg, ovl->regs, DISP_REG_OVL_RST);
-	mtk_ddp_write(cmdq_pkt, 0x0, &ovl->cmdq_reg, ovl->regs, DISP_REG_OVL_RST);
+	if (!ovl->data->skip_config_reset) {
+		mtk_ddp_write(cmdq_pkt, 0x1, &ovl->cmdq_reg, ovl->regs,
+			      DISP_REG_OVL_RST);
+		mtk_ddp_write(cmdq_pkt, 0x0, &ovl->cmdq_reg, ovl->regs,
+			      DISP_REG_OVL_RST);
+	}
 }
 
 unsigned int mtk_ovl_layer_nr(struct device *dev)
@@ -716,6 +742,32 @@ static const struct mtk_disp_ovl_data mt8183_ovl_2l_driver_data = {
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 };
 
+static const struct mtk_disp_ovl_data mt6789_ovl_driver_data = {
+	.addr = DISP_REG_OVL_ADDR_MT8173,
+	.gmc_bits = 10,
+	.layer_nr = 4,
+	.fmt_rgb565_is_0 = true,
+	.smi_id_en = true,
+	.formats = mt8173_formats,
+	.num_formats = ARRAY_SIZE(mt8173_formats),
+	.bypass_shadow = true,
+	.skip_config_reset = true,
+	.reset_on_stop = true,
+};
+
+static const struct mtk_disp_ovl_data mt6789_ovl_2l_driver_data = {
+	.addr = DISP_REG_OVL_ADDR_MT8173,
+	.gmc_bits = 10,
+	.layer_nr = 2,
+	.fmt_rgb565_is_0 = true,
+	.smi_id_en = true,
+	.formats = mt8173_formats,
+	.num_formats = ARRAY_SIZE(mt8173_formats),
+	.bypass_shadow = true,
+	.skip_config_reset = true,
+	.reset_on_stop = true,
+};
+
 static const struct mtk_disp_ovl_data mt8192_ovl_driver_data = {
 	.addr = DISP_REG_OVL_ADDR_MT8173,
 	.gmc_bits = 10,
@@ -758,6 +810,10 @@ static const struct mtk_disp_ovl_data mt8195_ovl_driver_data = {
 };
 
 static const struct of_device_id mtk_disp_ovl_driver_dt_match[] = {
+	{ .compatible = "mediatek,mt6789-disp-ovl",
+	  .data = &mt6789_ovl_driver_data},
+	{ .compatible = "mediatek,mt6789-disp-ovl-2l",
+	  .data = &mt6789_ovl_2l_driver_data},
 	{ .compatible = "mediatek,mt2701-disp-ovl",
 	  .data = &mt2701_ovl_driver_data},
 	{ .compatible = "mediatek,mt8167-disp-ovl",

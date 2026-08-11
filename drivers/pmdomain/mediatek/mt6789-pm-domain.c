@@ -17,11 +17,10 @@
 #include <linux/of.h>
 #include <linux/pm_domain.h>
 
+#include <dt-bindings/gce/mediatek,mt6789-gce.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/memory/mtk-memory-port.h>
 #include <dt-bindings/power/mediatek,mt6789-power.h>
-
-#define MT6789_POWER_DOMAIN_NR	(MT6789_POWER_DOMAIN_CAM_RAWB + 1)
 
 static struct generic_pm_domain mt6789_display_domain = {
 	.name = "disp",
@@ -42,6 +41,13 @@ static struct property mt6789_ovl_iommus = {
 	.name = "iommus",
 	.length = sizeof(mt6789_ovl_iommus_cells),
 	.value = mt6789_ovl_iommus_cells,
+};
+
+static __be32 mt6789_mutex_gce_event_cell;
+static struct property mt6789_mutex_gce_events = {
+	.name = "mediatek,gce-events",
+	.length = sizeof(mt6789_mutex_gce_event_cell),
+	.value = &mt6789_mutex_gce_event_cell,
 };
 
 static __be32 mt6789_touch_reset_cells[3];
@@ -93,6 +99,39 @@ out_put_node:
 	return ret;
 }
 
+static int __init mt6789_legacy_display_cmdq_fixup(void)
+{
+	struct device_node *mutex_node;
+	int ret = 0;
+
+	mutex_node = of_find_compatible_node(NULL, NULL,
+					     "mediatek,mt6789-disp-mutex");
+	if (!mutex_node) {
+		pr_warn("MT6789: cannot find legacy display mutex node\n");
+		return 0;
+	}
+
+	if (of_property_present(mutex_node, "mediatek,gce-events"))
+		goto out_put_node;
+
+	/*
+	 * The production DT publishes the display CMDQ mailbox but leaves the
+	 * mutex EOF event on MMSYS as a downstream-only gce-events property.
+	 * Upstream DRM reads this event from the mutex node instead.
+	 */
+	mt6789_mutex_gce_event_cell =
+		cpu_to_be32(CMDQ_EVENT_DISP_STREAM_DONE_ENG_EVENT_0);
+	ret = of_add_property(mutex_node, &mt6789_mutex_gce_events);
+	if (ret)
+		pr_warn("MT6789: failed to add display mutex GCE event: %d\n", ret);
+	else
+		pr_info("MT6789: added legacy display mutex GCE event\n");
+
+out_put_node:
+	of_node_put(mutex_node);
+	return ret;
+}
+
 static int __init mt6789_legacy_display_iommu_fixup(void)
 {
 	struct property *mmsys_iommus;
@@ -119,6 +158,7 @@ static int __init mt6789_legacy_display_iommu_fixup(void)
 		return 0;
 
 	mt6789_legacy_touch_fixup();
+	mt6789_legacy_display_cmdq_fixup();
 
 	iommu_node = of_find_compatible_node(NULL, NULL,
 					     "mediatek,mt6789-disp-iommu");

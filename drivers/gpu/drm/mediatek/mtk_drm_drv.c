@@ -37,6 +37,16 @@
 #define DRIVER_MAJOR 1
 #define DRIVER_MINOR 0
 
+static bool jagar_skip_drm_client;
+module_param(jagar_skip_drm_client, bool, 0644);
+MODULE_PARM_DESC(jagar_skip_drm_client,
+		 "Request skipping DRM client setup during master bind");
+
+static bool jagar_drm_client_skipped;
+module_param(jagar_drm_client_skipped, bool, 0444);
+MODULE_PARM_DESC(jagar_drm_client_skipped,
+		 "Whether DRM client setup was skipped during master bind");
+
 static const struct drm_mode_config_helper_funcs mtk_drm_mode_config_helpers = {
 	.atomic_commit_tail = drm_atomic_helper_commit_tail_rpm,
 };
@@ -287,6 +297,7 @@ static const struct mtk_mmsys_driver_data mt6789_mmsys_driver_data = {
 	.main_len = ARRAY_SIZE(mt6789_mtk_ddp_main),
 	.conn_routes = mt6789_mtk_ddp_main_routes,
 	.num_conn_routes = ARRAY_SIZE(mt6789_mtk_ddp_main_routes),
+	.quiesce_mutex_first = true,
 	.mmsys_dev_num = 1,
 };
 
@@ -698,7 +709,12 @@ static int mtk_drm_bind(struct device *dev)
 	if (ret < 0)
 		goto err_deinit;
 
-	drm_client_setup(drm, NULL);
+	if (jagar_skip_drm_client) {
+		jagar_drm_client_skipped = true;
+		dev_info(dev, "skipped DRM client setup\n");
+	} else {
+		drm_client_setup(drm, NULL);
+	}
 
 	return 0;
 

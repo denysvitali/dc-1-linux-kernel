@@ -15,14 +15,9 @@ static const struct mtk_gate_regs mfgcfg_cg_regs = {
 	.sta_ofs = 0x0,
 };
 
-#define GATE_MFGCFG(_id, _name, _parent, _shift) {	\
-		.id = _id,				\
-		.name = _name,				\
-		.parent_name = _parent,			\
-		.regs = &mfgcfg_cg_regs,			\
-		.shift = _shift,			\
-		.ops = &mtk_clk_gate_ops_setclr,	\
-	}
+#define GATE_MFGCFG(_id, _name, _parent, _shift)			\
+	GATE_MTK_FLAGS(_id, _name, _parent, &mfgcfg_cg_regs, _shift,\
+		       &mtk_clk_gate_ops_setclr, CLK_SET_RATE_PARENT)
 
 static const struct mtk_gate mfgcfg_clks[] = {
 	GATE_MFGCFG(CLK_MFGCFG_BG3D, "mfgcfg_bg3d", "mfg_pll_ck", 0),
@@ -34,6 +29,11 @@ static const struct mtk_clk_desc mfgcfg_desc = {
 };
 
 static const struct of_device_id of_match_clk_mt6789_mfgcfg[] = {
+	{
+		/* Compatible used by the shipped MT6789 device tree. */
+		.compatible = "mediatek,mt6789-mfg",
+		.data = &mfgcfg_desc,
+	},
 	{
 		.compatible = "mediatek,mt6789-mfgcfg",
 		.data = &mfgcfg_desc,

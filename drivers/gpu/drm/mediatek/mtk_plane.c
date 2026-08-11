@@ -110,8 +110,8 @@ static int mtk_plane_atomic_async_check(struct drm_plane *plane,
 						   true, true);
 }
 
-static void mtk_plane_update_new_state(struct drm_plane_state *new_state,
-				       struct mtk_plane_state *mtk_plane_state)
+void mtk_plane_update_new_state(struct drm_plane_state *new_state,
+				struct mtk_plane_state *mtk_plane_state)
 {
 	struct drm_framebuffer *fb = new_state->fb;
 	struct drm_gem_dma_object *dma_obj;
