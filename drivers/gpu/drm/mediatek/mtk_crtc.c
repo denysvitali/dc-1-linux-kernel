@@ -341,6 +341,7 @@ ddp_cmdq_cb_out:
 static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 {
 	struct drm_crtc *crtc = &mtk_crtc->base;
+	struct mtk_drm_private *priv = crtc->dev->dev_private;
 	struct drm_connector *connector;
 	struct drm_encoder *encoder;
 	struct drm_connector_list_iter conn_iter;
@@ -389,6 +390,17 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		goto err_mutex_unprepare;
 	}
 
+	/*
+	 * LK leaves the MT6789 display path running.  Do not reconfigure or
+	 * restart OVL while the inherited DSI SOF source can still trigger the
+	 * mutex: that can strand OVL in its hardware-reset state.  Quiesce the
+	 * inherited trigger first and create a real OVL enable edge.
+	 */
+	if (priv->data->quiesce_mutex_first) {
+		mtk_mutex_disable(mtk_crtc->mutex);
+		mtk_ddp_comp_stop(mtk_crtc->ddp_comp[0]);
+	}
+
 	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
 		if (!mtk_ddp_comp_connect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
 					  mtk_crtc->ddp_comp[i + 1]->id))
@@ -401,7 +413,8 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 	}
 	if (!mtk_ddp_comp_add(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
 		mtk_mutex_add_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
-	mtk_mutex_enable(mtk_crtc->mutex);
+	if (!priv->data->quiesce_mutex_first)
+		mtk_mutex_enable(mtk_crtc->mutex);
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
@@ -437,6 +450,9 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 						  plane_state, NULL);
 	}
 
+	if (priv->data->quiesce_mutex_first)
+		mtk_mutex_enable(mtk_crtc->mutex);
+
 	return 0;
 
 err_mutex_unprepare:
@@ -449,9 +465,14 @@ err_pm_runtime_put:
 static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 {
 	struct drm_device *drm = mtk_crtc->base.dev;
+	struct mtk_drm_private *priv = drm->dev_private;
 	struct drm_crtc *crtc = &mtk_crtc->base;
 	unsigned long flags;
 	int i;
+
+	/* Stop new MT6789 SOF triggers before stopping the OVL pipeline. */
+	if (priv->data->quiesce_mutex_first)
+		mtk_mutex_disable(mtk_crtc->mutex);
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		mtk_ddp_comp_stop(mtk_crtc->ddp_comp[i]);
@@ -463,7 +484,8 @@ static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 		if (!mtk_ddp_comp_remove(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
 			mtk_mutex_remove_comp(mtk_crtc->mutex,
 					      mtk_crtc->ddp_comp[i]->id);
-	mtk_mutex_disable(mtk_crtc->mutex);
+	if (!priv->data->quiesce_mutex_first)
+		mtk_mutex_disable(mtk_crtc->mutex);
 	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
 		if (!mtk_ddp_comp_disconnect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
 					     mtk_crtc->ddp_comp[i + 1]->id))

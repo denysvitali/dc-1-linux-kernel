@@ -297,6 +297,7 @@ static const struct mtk_mmsys_driver_data mt6789_mmsys_driver_data = {
 	.main_len = ARRAY_SIZE(mt6789_mtk_ddp_main),
 	.conn_routes = mt6789_mtk_ddp_main_routes,
 	.num_conn_routes = ARRAY_SIZE(mt6789_mtk_ddp_main_routes),
+	.quiesce_mutex_first = true,
 	.mmsys_dev_num = 1,
 };
 
