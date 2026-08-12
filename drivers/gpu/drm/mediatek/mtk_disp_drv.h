@@ -101,7 +101,6 @@ int mtk_ovl_handoff_stop(struct device *dev);
 int mtk_ovl_handoff_prepare(struct device *dev, unsigned int width,
 			    unsigned int height, u32 *fme_seq);
 int mtk_ovl_handoff_wait_for_fme(struct device *dev, u32 fme_seq);
-void mtk_ovl_handoff_abort(struct device *dev);
 unsigned int mtk_ovl_layer_nr(struct device *dev);
 void mtk_ovl_layer_on(struct device *dev, unsigned int idx,
 		      struct cmdq_pkt *cmdq_pkt);

@@ -28,6 +28,7 @@
 #define OVL_FME_CPL_INT					BIT(1)
 #define OVL_SWRST_DONE_INT				BIT(3)
 #define OVL_ABNORMAL_SOF_INT				BIT(13)
+#define OVL_INT_STATUS_MASK				GENMASK(14, 0)
 #define DISP_REG_OVL_INTSTA			0x0008
 #define DISP_REG_OVL_EN				0x000c
 #define OVL_EN_BYPASS_SHADOW			BIT(22)
@@ -51,9 +52,12 @@
 #define DISP_REG_OVL_ADDR_MT2701		0x0040
 #define DISP_REG_OVL_CLRFMT_EXT			0x02d0
 #define DISP_REG_OVL_FLOW_CTRL_DBG		0x0240
+#define DISP_REG_OVL_RDMA_DBG(n)		(0x024c + 0x4 * (n))
 #define OVL_FLOW_FSM_MASK			GENMASK(9, 0)
 #define OVL_FLOW_IDLE_MASK			GENMASK(1, 0)
 #define OVL_FLOW_H_W_RST			0x100
+#define OVL_RDMA_DBG_SMI_BUSY			BIT(30)
+#define OVL_RDMA_DBG_SMI_GREQ			BIT(31)
 #define OVL_CON_CLRFMT_BIT_DEPTH_MASK(n)		(GENMASK(1, 0) << (4 * (n)))
 #define OVL_CON_CLRFMT_BIT_DEPTH(depth, n)		((depth) << (4 * (n)))
 #define OVL_CON_CLRFMT_8_BIT				(0)
@@ -164,6 +168,7 @@ struct mtk_disp_ovl_data {
 	bool bypass_shadow;
 	bool skip_config_reset;
 	bool reset_on_stop;
+	bool defer_irq_enable;
 };
 
 /*
@@ -183,6 +188,7 @@ struct mtk_disp_ovl {
 	void				*vblank_cb_data;
 	atomic_t			fme_seq;
 	wait_queue_head_t		fme_wait_queue;
+	bool				irq_enabled;
 };
 
 static bool mtk_ovl_flow_operational(u32 flow)
@@ -196,21 +202,22 @@ static bool mtk_ovl_flow_operational(u32 flow)
 static irqreturn_t mtk_disp_ovl_irq_handler(int irq, void *dev_id)
 {
 	struct mtk_disp_ovl *priv = dev_id;
-	u32 status;
+	u32 pending, status;
 
 	status = readl(priv->regs + DISP_REG_OVL_INTSTA);
-	if (!status)
-		return IRQ_HANDLED;
+	pending = status & OVL_INT_STATUS_MASK;
+	if (!pending)
+		return IRQ_NONE;
 
-	/* OVL_INTSTA is write-zero-to-clear. */
-	writel(0x0, priv->regs + DISP_REG_OVL_INTSTA);
-	if (status & OVL_ABNORMAL_SOF_INT)
+	/* OVL_INTSTA is write-zero-to-clear; preserve newly arriving events. */
+	writel(~pending, priv->regs + DISP_REG_OVL_INTSTA);
+	if (pending & OVL_ABNORMAL_SOF_INT)
 		dev_err_ratelimited(priv->dev,
 				    "OVL abnormal SOF: status=%#x flow=%#x\n",
 				    status,
 				    readl(priv->regs + DISP_REG_OVL_FLOW_CTRL_DBG));
 
-	if (!(status & OVL_FME_CPL_INT))
+	if (!(pending & OVL_FME_CPL_INT))
 		return IRQ_HANDLED;
 
 	atomic_inc(&priv->fme_seq);
@@ -304,6 +311,14 @@ void mtk_ovl_clk_disable(struct device *dev)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
 
+	if (ovl->data->defer_irq_enable && ovl->irq_enabled) {
+		writel(0, ovl->regs + DISP_REG_OVL_INTEN);
+		readl(ovl->regs + DISP_REG_OVL_INTEN);
+		disable_irq(ovl->irq);
+		ovl->irq_enabled = false;
+		writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
+		readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	}
 	clk_disable_unprepare(ovl->clk);
 }
 
@@ -324,14 +339,50 @@ void mtk_ovl_start(struct device *dev)
 	writel_relaxed(en, ovl->regs + DISP_REG_OVL_EN);
 }
 
+static u32 mtk_ovl_handoff_dma_busy(struct mtk_disp_ovl *ovl)
+{
+	u32 active_layers = readl(ovl->regs + DISP_REG_OVL_SRC_CON) &
+			    GENMASK(ovl->data->layer_nr - 1, 0);
+	u32 flow = readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG);
+	u32 busy = 0;
+	unsigned int i;
+
+	if (!mtk_ovl_flow_operational(flow))
+		busy |= BIT(31);
+	for (i = 0; i < ovl->data->layer_nr; i++) {
+		if (!(active_layers & BIT(i)))
+			continue;
+		/* MT6789 reports L0..L3 idle in FLOW bits 19..16. */
+		if (!(flow & BIT(19 - i)))
+			busy |= BIT(i);
+		if (readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(i)) &
+		    (OVL_RDMA_DBG_SMI_BUSY | OVL_RDMA_DBG_SMI_GREQ))
+			busy |= BIT(i + 4);
+	}
+
+	return busy;
+}
+
+static void mtk_ovl_handoff_irq_enable(struct mtk_disp_ovl *ovl)
+{
+	if (!ovl->data->defer_irq_enable || ovl->irq_enabled)
+		return;
+
+	/* INTEN and stale status were cleared while the OVL clock was live. */
+	enable_irq(ovl->irq);
+	ovl->irq_enabled = true;
+}
+
 static int mtk_ovl_stop_checked(struct mtk_disp_ovl *ovl)
 {
 	u32 en = ovl->data->bypass_shadow ? OVL_EN_BYPASS_SHADOW : 0;
-	u32 val;
+	u32 busy, val;
 	int ret;
 
 	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
-	readl(ovl->regs + DISP_REG_OVL_INTEN);
+	val = readl(ovl->regs + DISP_REG_OVL_INTEN);
+	if (val)
+		return -EIO;
 	synchronize_irq(ovl->irq);
 	writel(en, ovl->regs + DISP_REG_OVL_EN);
 	ret = readl_poll_timeout(ovl->regs + DISP_REG_OVL_EN, val,
@@ -339,8 +390,22 @@ static int mtk_ovl_stop_checked(struct mtk_disp_ovl *ovl)
 	if (ret)
 		return ret;
 
+	/*
+	 * EN=0 prevents new overlay work, but it does not prove that a layer's
+	 * last SMI transaction has retired.  Resetting while SMI_BUSY/GREQ is
+	 * asserted is the failure that leaves MT6789 in h_w_rst.  Require every
+	 * implemented layer to report idle and no outstanding SMI request before
+	 * touching OVL_RST.
+	 */
+	ret = read_poll_timeout(mtk_ovl_handoff_dma_busy, busy, !busy,
+				10, 100000, false, ovl);
+	if (ret)
+		return ret;
+
 	writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
-	readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	val = readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	if (val & OVL_SWRST_DONE_INT)
+		return -EIO;
 	writel(1, ovl->regs + DISP_REG_OVL_RST);
 	ret = readl_poll_timeout(ovl->regs + DISP_REG_OVL_RST, val,
 				 val & 1, 1, 1000);
@@ -357,6 +422,9 @@ static int mtk_ovl_stop_checked(struct mtk_disp_ovl *ovl)
 	if (ret)
 		return ret;
 	writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
+	val = readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	if (val & OVL_INT_STATUS_MASK)
+		return -EIO;
 
 	return readl_poll_timeout(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG,
 				  val,
@@ -373,15 +441,24 @@ int mtk_ovl_handoff_stop(struct device *dev)
 		return -EOPNOTSUPP;
 
 	ret = mtk_ovl_stop_checked(ovl);
-	if (ret)
+	if (ret) {
 		dev_err(dev,
-			"OVL checked stop failed: %d en=%#x rst=%#x intsta=%#x flow=%#x\n",
+			"OVL checked stop failed: %d en=%#x rst=%#x intsta=%#x flow=%#x dma=%#x rdma0=%#x rdma1=%#x rdma2=%#x rdma3=%#x\n",
 			ret, readl(ovl->regs + DISP_REG_OVL_EN),
 			readl(ovl->regs + DISP_REG_OVL_RST),
 			readl(ovl->regs + DISP_REG_OVL_INTSTA),
-			readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG));
+			readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG),
+			mtk_ovl_handoff_dma_busy(ovl),
+			readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(0)),
+			readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(1)),
+			readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(2)),
+			readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(3)));
+		return ret;
+	}
 
-	return ret;
+	mtk_ovl_handoff_irq_enable(ovl);
+
+	return 0;
 }
 
 void mtk_ovl_stop(struct device *dev)
@@ -816,16 +893,6 @@ int mtk_ovl_handoff_wait_for_fme(struct device *dev, u32 fme_seq)
 	return 0;
 }
 
-void mtk_ovl_handoff_abort(struct device *dev)
-{
-	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
-	u32 en = ovl->data->bypass_shadow ? OVL_EN_BYPASS_SHADOW : 0;
-
-	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
-	writel(en, ovl->regs + DISP_REG_OVL_EN);
-	readl(ovl->regs + DISP_REG_OVL_EN);
-}
-
 void mtk_ovl_bgclr_in_on(struct device *dev)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
@@ -866,6 +933,7 @@ static int mtk_disp_ovl_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct mtk_disp_ovl *priv;
+	unsigned long irq_flags = IRQF_TRIGGER_NONE;
 	int irq;
 	int ret;
 
@@ -898,11 +966,14 @@ static int mtk_disp_ovl_probe(struct platform_device *pdev)
 
 	priv->data = of_device_get_match_data(dev);
 	platform_set_drvdata(pdev, priv);
+	if (priv->data->defer_irq_enable)
+		irq_flags |= IRQF_NO_AUTOEN;
 
 	ret = devm_request_irq(dev, irq, mtk_disp_ovl_irq_handler,
-			       IRQF_TRIGGER_NONE, dev_name(dev), priv);
+			       irq_flags, dev_name(dev), priv);
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "Failed to request irq %d\n", irq);
+	priv->irq_enabled = !priv->data->defer_irq_enable;
 
 	pm_runtime_enable(dev);
 
@@ -978,6 +1049,7 @@ static const struct mtk_disp_ovl_data mt6789_ovl_driver_data = {
 	.bypass_shadow = true,
 	.skip_config_reset = true,
 	.reset_on_stop = true,
+	.defer_irq_enable = true,
 };
 
 static const struct mtk_disp_ovl_data mt6789_ovl_2l_driver_data = {
@@ -991,6 +1063,7 @@ static const struct mtk_disp_ovl_data mt6789_ovl_2l_driver_data = {
 	.bypass_shadow = true,
 	.skip_config_reset = true,
 	.reset_on_stop = true,
+	.defer_irq_enable = true,
 };
 
 static const struct mtk_disp_ovl_data mt8192_ovl_driver_data = {

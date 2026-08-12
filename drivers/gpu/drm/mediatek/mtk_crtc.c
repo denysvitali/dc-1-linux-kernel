@@ -99,25 +99,20 @@ static inline struct mtk_crtc_state *to_mtk_crtc_state(struct drm_crtc_state *s)
 	return container_of(s, struct mtk_crtc_state, base);
 }
 
-static void mtk_crtc_handoff_inhibit(struct mtk_crtc *mtk_crtc)
+static void mtk_crtc_handoff_quarantine(struct mtk_crtc *mtk_crtc)
 {
-	struct mtk_ddp_comp *ovl = mtk_crtc->ddp_comp[0];
 	struct mtk_ddp_comp *dsi =
 		mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
-	int ret;
 
-	/* Gate IRQ-driven register updates before removing all display triggers. */
+	/*
+	 * Failure of a quiescence prerequisite is not permission to mutate the
+	 * inherited pipeline.  In particular, an unproven DSI EOF or mutex idle
+	 * state makes a best-effort DSI/OVL stop more dangerous than leaving the
+	 * clocks and the last hardware state held for the watchdog to recover.
+	 */
 	WRITE_ONCE(mtk_crtc->handoff_failed, true);
 	WRITE_ONCE(mtk_crtc->handoff_quarantined, true);
-	if (!mtk_crtc->resources_active)
-		return;
-
-	ret = mtk_mutex_disable_sync(mtk_crtc->mutex);
 	mtk_dsi_handoff_abort(dsi->dev);
-	mtk_ovl_handoff_abort(ovl->dev);
-	if (ret)
-		drm_err(mtk_crtc->base.dev,
-			"failed to read back mutex inhibition: %d\n", ret);
 }
 
 static void mtk_crtc_handoff_dump(struct mtk_crtc *mtk_crtc,
@@ -400,7 +395,6 @@ static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
 	struct mtk_ddp_comp *dsi;
 	enum mtk_ddp_comp_id components[DDP_COMPONENT_ID_MAX];
 	bool primary_seeded = false;
-	bool ovl_touched = false;
 	int ret;
 	int i;
 
@@ -428,7 +422,6 @@ static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
 	ret = mtk_dsi_handoff_quiesce(dsi->dev);
 	if (ret)
 		goto quarantine;
-	ovl_touched = true;
 	ret = mtk_ovl_handoff_stop(ovl->dev);
 	if (ret)
 		goto quarantine;
@@ -510,11 +503,9 @@ static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
 
 quarantine:
 	mtk_crtc_handoff_dump(mtk_crtc, "init-failed");
-	mtk_crtc_handoff_inhibit(mtk_crtc);
-	if (ovl_touched)
-		mtk_ovl_handoff_abort(ovl->dev);
+	mtk_crtc_handoff_quarantine(mtk_crtc);
 	drm_err(dev,
-		"MT6789 handoff quarantined: %d; clocks remain held and triggers are inhibited\n",
+		"MT6789 handoff quarantined: %d; clocks remain held and hardware state is untouched\n",
 		ret);
 	return ret;
 }
@@ -698,7 +689,7 @@ static int mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 
 quarantine:
 		mtk_crtc_handoff_dump(mtk_crtc, "teardown-failed");
-		mtk_crtc_handoff_inhibit(mtk_crtc);
+		mtk_crtc_handoff_quarantine(mtk_crtc);
 		drm_err(drm,
 			"MT6789 teardown quarantined: %d; refusing unsafe OVL reset or clock gating\n",
 			ret);
@@ -872,7 +863,7 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 				mtk_crtc_handoff_dump(mtk_crtc,
 						      "cmdq-reuse-failed");
 			if (priv->data->quiesce_mutex_first)
-				mtk_crtc_handoff_inhibit(mtk_crtc);
+				mtk_crtc_handoff_quarantine(mtk_crtc);
 			wake_up(&mtk_crtc->cb_blocking_queue);
 			drm_err(crtc->dev,
 				"CMDQ flush failed before packet reuse: %d\n",
@@ -1140,14 +1131,14 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 				if (ret) {
 					mtk_crtc_handoff_dump(mtk_crtc,
 							      "cmdq-disable-failed");
-					mtk_crtc_handoff_inhibit(mtk_crtc);
+					mtk_crtc_handoff_quarantine(mtk_crtc);
 					crtc->state->no_vblank = true;
 					mtk_crtc_send_state_event(crtc);
 					if (mtk_crtc->enabled)
 						drm_crtc_vblank_off(crtc);
 					mtk_crtc->enabled = false;
 					drm_err(dev,
-						"CMDQ flush failed during disable: %d; triggers inhibited\n",
+						"CMDQ flush failed during disable: %d; hardware quarantined\n",
 						ret);
 					return;
 				}
@@ -1259,7 +1250,7 @@ static void mtk_crtc_atomic_flush(struct drm_crtc *crtc,
 handoff_failed:
 	mtk_crtc->handoff_wait_pending = false;
 	mtk_crtc_handoff_dump(mtk_crtc, "first-frame-failed");
-	mtk_crtc_handoff_inhibit(mtk_crtc);
+	mtk_crtc_handoff_quarantine(mtk_crtc);
 	crtc->state->no_vblank = true;
 	mtk_crtc_finish_page_flip(mtk_crtc);
 	drm_err(crtc->dev,
