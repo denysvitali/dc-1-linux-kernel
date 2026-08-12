@@ -46,6 +46,7 @@ struct mtk_crtc {
 	bool				handoff_failed;
 	bool				handoff_quarantined;
 	bool				handoff_wait_pending;
+	bool				pipeline_known_off;
 	u32				handoff_fme_seq;
 
 	bool				pending_needs_vblank;
@@ -382,6 +383,64 @@ ddp_cmdq_cb_out:
 }
 #endif
 
+static int mtk_crtc_handoff_stop_pipeline(struct mtk_crtc *mtk_crtc,
+					  struct mtk_ddp_comp *ovl,
+					  struct mtk_ddp_comp *rdma,
+					  struct mtk_ddp_comp *dsi)
+{
+	struct drm_device *drm = mtk_crtc->base.dev;
+	u32 fme_seq, rdma_frame_seq;
+	bool ovl_touched = false;
+	bool rdma_touched = false;
+	int ret;
+
+	/*
+	 * Keep LK's complete pipeline running while fresh source, intermediate,
+	 * and sink frame boundaries are armed.  The DSI hard IRQ stops video at
+	 * the clean EOF; only then can MUTEX_EN be cleared without starving the
+	 * inherited OVL layer in the middle of an SMI transaction.
+	 */
+	ovl_touched = true;
+	ret = mtk_ovl_handoff_frame_arm(ovl->dev, &fme_seq);
+	if (ret)
+		goto cancel_irqs;
+	rdma_touched = true;
+	ret = mtk_rdma_handoff_frame_arm(rdma->dev, &rdma_frame_seq);
+	if (ret)
+		goto cancel_irqs;
+	ret = mtk_dsi_handoff_quiesce(dsi->dev);
+	if (ret)
+		goto cancel_irqs;
+	/* The clean sink EOF is now latched; block any later configuration SOF. */
+	ret = mtk_mutex_disable_sync(mtk_crtc->mutex);
+	if (ret)
+		goto cancel_irqs;
+	ret = mtk_ovl_handoff_frame_wait(ovl->dev, fme_seq);
+	if (ret)
+		goto cancel_irqs;
+	ret = mtk_rdma_handoff_frame_wait(rdma->dev, rdma_frame_seq);
+	if (ret)
+		goto cancel_irqs;
+	ret = mtk_ovl_handoff_stop(ovl->dev);
+	if (ret)
+		goto cancel_irqs;
+	ret = mtk_rdma_handoff_stop(rdma->dev);
+	if (ret)
+		goto cancel_irqs;
+
+	drm_info(drm,
+		 "MT6789 pipeline stopped at clean frame: ovl_seq=%u rdma_seq=%u\n",
+		 fme_seq, rdma_frame_seq);
+	return 0;
+
+cancel_irqs:
+	if (rdma_touched)
+		mtk_rdma_handoff_frame_cancel(rdma->dev);
+	if (ovl_touched)
+		mtk_ovl_handoff_frame_cancel(ovl->dev);
+	return ret;
+}
+
 static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
 					unsigned int width,
 					unsigned int height,
@@ -422,21 +481,10 @@ static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
 		components[i] = mtk_crtc->ddp_comp[i]->id;
 
-	/*
-	 * MUTEX_EN is not an idle indication.  It only prevents another
-	 * configuration trigger.  The fresh DSI frame and BUSY-clear below are
-	 * the proof that the inherited transaction has drained.
-	 */
-	ret = mtk_mutex_disable_sync(mtk_crtc->mutex);
-	if (ret)
-		goto quarantine;
-	ret = mtk_dsi_handoff_quiesce(dsi->dev);
-	if (ret)
-		goto quarantine;
-	ret = mtk_ovl_handoff_stop(ovl->dev);
-	if (ret)
-		goto quarantine;
-	ret = mtk_rdma_handoff_stop(rdma->dev);
+	if (mtk_crtc->pipeline_known_off)
+		ret = mtk_dsi_handoff_quiesce(dsi->dev);
+	else
+		ret = mtk_crtc_handoff_stop_pipeline(mtk_crtc, ovl, rdma, dsi);
 	if (ret)
 		goto quarantine;
 
@@ -508,6 +556,7 @@ static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
 	}
 
 	mtk_crtc->handoff_wait_pending = true;
+	mtk_crtc->pipeline_known_off = false;
 	drm_info(dev,
 		 "MT6789 handoff prepared: source seeded with mutex and DSI stopped\n");
 	return 0;
@@ -670,16 +719,7 @@ static int mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 		}
 #endif
 
-		ret = mtk_mutex_disable_sync(mtk_crtc->mutex);
-		if (ret)
-			goto quarantine;
-		ret = mtk_dsi_handoff_quiesce(dsi->dev);
-		if (ret)
-			goto quarantine;
-		ret = mtk_ovl_handoff_stop(ovl->dev);
-		if (ret)
-			goto quarantine;
-		ret = mtk_rdma_handoff_stop(rdma->dev);
+		ret = mtk_crtc_handoff_stop_pipeline(mtk_crtc, ovl, rdma, dsi);
 		if (ret)
 			goto quarantine;
 
@@ -733,6 +773,8 @@ disconnect:
 	pm_runtime_put(drm->dev);
 	mtk_crtc->resources_active = false;
 	mtk_crtc->handoff_wait_pending = false;
+	if (priv->data->quiesce_mutex_first)
+		mtk_crtc->pipeline_known_off = true;
 
 	if (crtc->state->event && !crtc->state->active) {
 		mtk_crtc_send_state_event(crtc);

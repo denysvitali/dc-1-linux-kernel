@@ -101,6 +101,9 @@ struct mtk_disp_rdma {
 	const struct mtk_disp_rdma_data	*data;
 	int				irq;
 	bool				irq_enabled;
+	atomic_t			frame_end_seq;
+	atomic_t			handoff_irq_status;
+	wait_queue_head_t		frame_end_wait_queue;
 	void				(*vblank_cb)(void *data);
 	void				*vblank_cb_data;
 	u32				fifo_size;
@@ -118,14 +121,19 @@ static irqreturn_t mtk_disp_rdma_irq_handler(int irq, void *dev_id)
 
 	/* RDMA_INT_STATUS is write-zero-to-clear. Preserve unrelated bits. */
 	writel(~pending, priv->regs + DISP_REG_RDMA_INT_STATUS);
+	atomic_or(pending, &priv->handoff_irq_status);
 
 	if (pending & (RDMA_FIFO_UNDERFLOW_INT | RDMA_EOF_ABNORMAL_INT))
 		dev_err_ratelimited(priv->dev,
 				    "RDMA abnormal interrupt: status=%#x\n",
 				    pending);
 
-	if ((pending & RDMA_FRAME_END_INT) && priv->vblank_cb)
-		priv->vblank_cb(priv->vblank_cb_data);
+	if (pending & RDMA_FRAME_END_INT) {
+		atomic_inc(&priv->frame_end_seq);
+		wake_up(&priv->frame_end_wait_queue);
+		if (priv->vblank_cb)
+			priv->vblank_cb(priv->vblank_cb_data);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -279,6 +287,84 @@ fail:
 		readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE),
 		readl(rdma->regs + DISP_REG_RDMA_INT_STATUS));
 	return ret;
+}
+
+int mtk_rdma_handoff_frame_arm(struct device *dev, u32 *frame_end_seq)
+{
+	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+
+	if (!rdma->data->checked_handoff || !frame_end_seq)
+		return -EINVAL;
+
+	writel(0, rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	if (readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE))
+		return -EIO;
+	if (rdma->irq_enabled)
+		synchronize_irq(rdma->irq);
+	writel(0, rdma->regs + DISP_REG_RDMA_INT_STATUS);
+	readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+	atomic_set(&rdma->handoff_irq_status, 0);
+
+	*frame_end_seq = atomic_read(&rdma->frame_end_seq);
+	if (!rdma->irq_enabled) {
+		enable_irq(rdma->irq);
+		rdma->irq_enabled = true;
+	}
+	writel(RDMA_FRAME_END_INT, rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	if (readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE) != RDMA_FRAME_END_INT)
+		return -EIO;
+
+	return 0;
+}
+
+int mtk_rdma_handoff_frame_wait(struct device *dev, u32 frame_end_seq)
+{
+	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+	u32 irq_status, val;
+	int idle_ret;
+	long ret;
+
+	ret = wait_event_timeout(rdma->frame_end_wait_queue,
+				 atomic_read(&rdma->frame_end_seq) != frame_end_seq,
+				 msecs_to_jiffies(100));
+	if (!ret) {
+		dev_err(dev,
+			"RDMA inherited frame timeout: seq=%u now=%u global=%#x intsta=%#x\n",
+			frame_end_seq, atomic_read(&rdma->frame_end_seq),
+			readl(rdma->regs + DISP_REG_RDMA_GLOBAL_CON),
+			readl(rdma->regs + DISP_REG_RDMA_INT_STATUS));
+		return -ETIMEDOUT;
+	}
+	irq_status = atomic_xchg(&rdma->handoff_irq_status, 0);
+	if (irq_status & (RDMA_FIFO_UNDERFLOW_INT | RDMA_EOF_ABNORMAL_INT)) {
+		dev_err(dev, "RDMA inherited frame abnormal: status=%#x\n",
+			irq_status);
+		return -EIO;
+	}
+	idle_ret = readl_poll_timeout(rdma->regs + DISP_REG_RDMA_GLOBAL_CON,
+				      val,
+				      (val & RDMA_ENGINE_EN) &&
+				      !(val & RDMA_SMI_BUSY) &&
+				      (val & RDMA_RESET_STATE_MASK) ==
+				      RDMA_RESET_STATE_IDLE,
+				      10, 10000);
+	if (idle_ret) {
+		dev_err(dev, "RDMA inherited frame did not become idle: global=%#x\n",
+			val);
+		return idle_ret;
+	}
+
+	return 0;
+}
+
+void mtk_rdma_handoff_frame_cancel(struct device *dev)
+{
+	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+
+	writel(0, rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	if (rdma->irq_enabled)
+		synchronize_irq(rdma->irq);
 }
 
 void mtk_rdma_handoff_dump(struct device *dev, const char *stage)
@@ -475,6 +561,9 @@ static int mtk_disp_rdma_probe(struct platform_device *pdev)
 
 	priv->data = of_device_get_match_data(dev);
 	platform_set_drvdata(pdev, priv);
+	atomic_set(&priv->frame_end_seq, 0);
+	atomic_set(&priv->handoff_irq_status, 0);
+	init_waitqueue_head(&priv->frame_end_wait_queue);
 
 	if (priv->data->checked_handoff) {
 		/* The inherited block is not clock-owned until component enable. */

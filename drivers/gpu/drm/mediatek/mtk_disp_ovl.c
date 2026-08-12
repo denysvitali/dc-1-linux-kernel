@@ -26,8 +26,15 @@
 
 #define DISP_REG_OVL_INTEN			0x0004
 #define OVL_FME_CPL_INT					BIT(1)
+#define OVL_FME_UND_INT					BIT(2)
 #define OVL_SWRST_DONE_INT				BIT(3)
+#define OVL_RDMA_EOF_ABNORMAL_INT			GENMASK(8, 5)
+#define OVL_RDMA_SMI_UNDERFLOW_INT			GENMASK(12, 9)
 #define OVL_ABNORMAL_SOF_INT				BIT(13)
+#define OVL_HANDOFF_ABNORMAL_INT			(OVL_FME_UND_INT | \
+							 OVL_RDMA_EOF_ABNORMAL_INT | \
+							 OVL_RDMA_SMI_UNDERFLOW_INT | \
+							 OVL_ABNORMAL_SOF_INT)
 #define OVL_INT_STATUS_MASK				GENMASK(14, 0)
 #define DISP_REG_OVL_INTSTA			0x0008
 #define DISP_REG_OVL_EN				0x000c
@@ -54,10 +61,14 @@
 #define DISP_REG_OVL_FLOW_CTRL_DBG		0x0240
 #define DISP_REG_OVL_RDMA_DBG(n)		(0x024c + 0x4 * (n))
 #define OVL_FLOW_FSM_MASK			GENMASK(9, 0)
-#define OVL_FLOW_IDLE_MASK			GENMASK(1, 0)
+#define OVL_FLOW_OUT_IDLE			BIT(15)
 #define OVL_FLOW_H_W_RST			0x100
 #define OVL_RDMA_DBG_SMI_BUSY			BIT(30)
 #define OVL_RDMA_DBG_SMI_GREQ			BIT(31)
+#define OVL_RDMA_DBG_LAYER_GREQ			BIT(3)
+#define OVL_RDMA_DBG_OUT_VALID			BIT(29)
+#define OVL_RDMA_DBG_WARM_RST_MASK		GENMASK(2, 0)
+#define OVL_RDMA_DBG_WARM_RST_IDLE		1
 #define OVL_CON_CLRFMT_BIT_DEPTH_MASK(n)		(GENMASK(1, 0) << (4 * (n)))
 #define OVL_CON_CLRFMT_BIT_DEPTH(depth, n)		((depth) << (4 * (n)))
 #define OVL_CON_CLRFMT_8_BIT				(0)
@@ -187,6 +198,7 @@ struct mtk_disp_ovl {
 	void				(*vblank_cb)(void *data);
 	void				*vblank_cb_data;
 	atomic_t			fme_seq;
+	atomic_t			handoff_irq_status;
 	wait_queue_head_t		fme_wait_queue;
 	bool				irq_enabled;
 };
@@ -197,6 +209,24 @@ static bool mtk_ovl_flow_operational(u32 flow)
 
 	/* The non-reset states are one-hot from idle through engine-active. */
 	return fsm && !(fsm & (fsm - 1)) && fsm <= 0x20;
+}
+
+static bool mtk_ovl_flow_terminal(u32 flow)
+{
+	u32 fsm = flow & OVL_FLOW_FSM_MASK;
+
+	return (fsm == 0x1 || fsm == 0x2) &&
+	       (flow & OVL_FLOW_OUT_IDLE) &&
+	       !(flow & (BIT(12) | BIT(21) | BIT(28) | BIT(29) |
+			 BIT(30) | BIT(31)));
+}
+
+static bool mtk_ovl_flow_stopped(u32 flow)
+{
+	return (flow & OVL_FLOW_FSM_MASK) == 0x1 &&
+	       (flow & OVL_FLOW_OUT_IDLE) &&
+	       !(flow & (BIT(12) | BIT(21) | BIT(28) | BIT(29) |
+			 BIT(30) | BIT(31)));
 }
 
 static irqreturn_t mtk_disp_ovl_irq_handler(int irq, void *dev_id)
@@ -211,6 +241,7 @@ static irqreturn_t mtk_disp_ovl_irq_handler(int irq, void *dev_id)
 
 	/* OVL_INTSTA is write-zero-to-clear; preserve newly arriving events. */
 	writel(~pending, priv->regs + DISP_REG_OVL_INTSTA);
+	atomic_or(pending, &priv->handoff_irq_status);
 	if (pending & OVL_ABNORMAL_SOF_INT)
 		dev_err_ratelimited(priv->dev,
 				    "OVL abnormal SOF: status=%#x flow=%#x\n",
@@ -345,18 +376,75 @@ static u32 mtk_ovl_handoff_dma_busy(struct mtk_disp_ovl *ovl)
 	u32 busy = 0;
 	unsigned int i;
 
-	if (!mtk_ovl_flow_operational(flow))
+	if (!mtk_ovl_flow_terminal(flow))
 		busy |= BIT(31);
+	if (!(flow & OVL_FLOW_OUT_IDLE))
+		busy |= BIT(30);
 	for (i = 0; i < ovl->data->layer_nr; i++) {
+		u32 rdma_dbg = readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(i));
+
 		/* MT6789 reports L0..L3 idle in FLOW bits 19..16. */
 		if (!(flow & BIT(19 - i)))
 			busy |= BIT(i);
-		if (readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(i)) &
-		    (OVL_RDMA_DBG_SMI_BUSY | OVL_RDMA_DBG_SMI_GREQ))
+		if ((rdma_dbg & OVL_RDMA_DBG_WARM_RST_MASK) !=
+		    OVL_RDMA_DBG_WARM_RST_IDLE ||
+		    (rdma_dbg & (OVL_RDMA_DBG_LAYER_GREQ |
+				 OVL_RDMA_DBG_OUT_VALID |
+				 OVL_RDMA_DBG_SMI_BUSY |
+				 OVL_RDMA_DBG_SMI_GREQ)))
 			busy |= BIT(i + 4);
 	}
 
 	return busy;
+}
+
+static u32 mtk_ovl_handoff_layer_busy(struct mtk_disp_ovl *ovl)
+{
+	u32 flow = readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG);
+	u32 busy = 0;
+	unsigned int i;
+
+	for (i = 0; i < ovl->data->layer_nr; i++) {
+		u32 rdma_dbg = readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(i));
+
+		if (!(flow & BIT(19 - i)))
+			busy |= BIT(i);
+		if ((rdma_dbg & OVL_RDMA_DBG_WARM_RST_MASK) !=
+		    OVL_RDMA_DBG_WARM_RST_IDLE ||
+		    (rdma_dbg & (OVL_RDMA_DBG_LAYER_GREQ |
+				 OVL_RDMA_DBG_OUT_VALID |
+				 OVL_RDMA_DBG_SMI_BUSY |
+				 OVL_RDMA_DBG_SMI_GREQ)))
+			busy |= BIT(i + 4);
+	}
+
+	return busy;
+}
+
+static u32 mtk_ovl_handoff_stopped_busy(struct mtk_disp_ovl *ovl)
+{
+	u32 flow = readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG);
+	u32 busy = mtk_ovl_handoff_layer_busy(ovl);
+
+	if (!mtk_ovl_flow_stopped(flow))
+		busy |= BIT(31);
+
+	return busy;
+}
+
+static int mtk_ovl_handoff_wait_stopped_stable(struct mtk_disp_ovl *ovl)
+{
+	u32 busy;
+	int ret;
+
+	ret = read_poll_timeout(mtk_ovl_handoff_stopped_busy, busy, !busy,
+				10, 100000, false, ovl);
+	if (ret)
+		return ret;
+
+	/* EN and reset FSM transitions can lag their MMIO readback. */
+	usleep_range(100, 200);
+	return mtk_ovl_handoff_stopped_busy(ovl) ? -EBUSY : 0;
 }
 
 static void mtk_ovl_handoff_irq_enable(struct mtk_disp_ovl *ovl)
@@ -369,10 +457,32 @@ static void mtk_ovl_handoff_irq_enable(struct mtk_disp_ovl *ovl)
 	ovl->irq_enabled = true;
 }
 
+static void mtk_ovl_handoff_log_state(struct mtk_disp_ovl *ovl,
+				      const char *stage)
+{
+	dev_info(ovl->dev,
+		 "OVL handoff %s: t=%llu en=%#x rst=%#x intsta=%#x src=%#x flow=%#x rdma=%#x/%#x/%#x/%#x dbg=%#x/%#x/%#x/%#x\n",
+		 stage, (unsigned long long)ktime_get_ns(),
+		 readl(ovl->regs + DISP_REG_OVL_EN),
+		 readl(ovl->regs + DISP_REG_OVL_RST),
+		 readl(ovl->regs + DISP_REG_OVL_INTSTA),
+		 readl(ovl->regs + DISP_REG_OVL_SRC_CON),
+		 readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG),
+		 readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(0)),
+		 readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(1)),
+		 readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(2)),
+		 readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(3)),
+		 readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(0)),
+		 readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(1)),
+		 readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(2)),
+		 readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(3)));
+}
+
 static int mtk_ovl_stop_checked(struct mtk_disp_ovl *ovl)
 {
 	u32 en = ovl->data->bypass_shadow ? OVL_EN_BYPASS_SHADOW : 0;
 	u32 busy, val;
+	unsigned int i;
 	int ret;
 
 	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
@@ -380,23 +490,49 @@ static int mtk_ovl_stop_checked(struct mtk_disp_ovl *ovl)
 	if (val)
 		return -EIO;
 	synchronize_irq(ovl->irq);
-	writel(en, ovl->regs + DISP_REG_OVL_EN);
-	ret = readl_poll_timeout(ovl->regs + DISP_REG_OVL_EN, val,
-				 val == en, 1, 1000);
-	if (ret)
-		return ret;
 
 	/*
-	 * EN=0 prevents new overlay work, but it does not prove that a layer's
-	 * last SMI transaction has retired.  Resetting while SMI_BUSY/GREQ is
-	 * asserted is the failure that leaves MT6789 in h_w_rst.  Require every
-	 * implemented layer to report idle and no outstanding SMI request before
-	 * touching OVL_RST.
+	 * A clean DSI EOF has removed further SOF triggers, but the inherited
+	 * source must still be proven idle before EN changes.  Clearing EN while
+	 * LK layer DMA is active is what traps MT6789 in h_w_rst.
 	 */
 	ret = read_poll_timeout(mtk_ovl_handoff_dma_busy, busy, !busy,
 				10, 100000, false, ovl);
 	if (ret)
 		return ret;
+	mtk_ovl_handoff_log_state(ovl, "pre-source-disable");
+
+	/* Remove every inherited LK source while the mutex and DSI are stopped. */
+	writel(0, ovl->regs + DISP_REG_OVL_SRC_CON);
+	if (readl(ovl->regs + DISP_REG_OVL_SRC_CON))
+		return -EIO;
+	for (i = 0; i < ovl->data->layer_nr; i++) {
+		writel(0, ovl->regs + DISP_REG_OVL_RDMA_CTRL(i));
+		if (readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(i)))
+			return -EIO;
+	}
+	ret = read_poll_timeout(mtk_ovl_handoff_layer_busy, busy, !busy,
+				10, 100000, false, ovl);
+	if (ret)
+		return ret;
+	ret = read_poll_timeout(mtk_ovl_handoff_dma_busy, busy, !busy,
+				10, 100000, false, ovl);
+	if (ret)
+		return ret;
+	mtk_ovl_handoff_log_state(ovl, "sources-disabled-idle");
+
+	writel(en, ovl->regs + DISP_REG_OVL_EN);
+	ret = readl_poll_timeout(ovl->regs + DISP_REG_OVL_EN, val,
+				 val == en, 1, 1000);
+	if (ret)
+		return ret;
+	mtk_ovl_handoff_log_state(ovl, "engine-disabled");
+	ret = mtk_ovl_handoff_wait_stopped_stable(ovl);
+	if (ret)
+		return ret;
+	mtk_ovl_handoff_log_state(ovl, "engine-disabled-idle");
+	if (mtk_ovl_handoff_stopped_busy(ovl))
+		return -EBUSY;
 
 	writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
 	val = readl(ovl->regs + DISP_REG_OVL_INTSTA);
@@ -422,10 +558,74 @@ static int mtk_ovl_stop_checked(struct mtk_disp_ovl *ovl)
 	if (val & OVL_INT_STATUS_MASK)
 		return -EIO;
 
-	return readl_poll_timeout(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG,
-				  val,
-				  val & OVL_FLOW_IDLE_MASK,
-				  1, 10000);
+	ret = mtk_ovl_handoff_wait_stopped_stable(ovl);
+	if (!ret)
+		mtk_ovl_handoff_log_state(ovl, "reset-complete");
+
+	return ret;
+}
+
+int mtk_ovl_handoff_frame_arm(struct device *dev, u32 *fme_seq)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+
+	if (!ovl->data->reset_on_stop || !fme_seq)
+		return -EINVAL;
+
+	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
+	if (readl(ovl->regs + DISP_REG_OVL_INTEN))
+		return -EIO;
+	if (ovl->irq_enabled)
+		synchronize_irq(ovl->irq);
+	writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
+	readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	atomic_set(&ovl->handoff_irq_status, 0);
+
+	*fme_seq = atomic_read(&ovl->fme_seq);
+	mtk_ovl_handoff_irq_enable(ovl);
+	writel(OVL_FME_CPL_INT, ovl->regs + DISP_REG_OVL_INTEN);
+	if (readl(ovl->regs + DISP_REG_OVL_INTEN) != OVL_FME_CPL_INT)
+		return -EIO;
+
+	return 0;
+}
+
+int mtk_ovl_handoff_frame_wait(struct device *dev, u32 fme_seq)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	u32 irq_status;
+	long ret;
+
+	ret = wait_event_timeout(ovl->fme_wait_queue,
+				 atomic_read(&ovl->fme_seq) != fme_seq,
+				 msecs_to_jiffies(100));
+	if (!ret) {
+		dev_err(dev,
+			"OVL inherited frame timeout: seq=%u now=%u flow=%#x\n",
+			fme_seq, atomic_read(&ovl->fme_seq),
+			readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG));
+		return -ETIMEDOUT;
+	}
+	irq_status = atomic_xchg(&ovl->handoff_irq_status, 0);
+	if (irq_status & OVL_HANDOFF_ABNORMAL_INT) {
+		dev_err(dev,
+			"OVL inherited frame abnormal: status=%#x flow=%#x\n",
+			irq_status,
+			readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG));
+		return -EIO;
+	}
+
+	return 0;
+}
+
+void mtk_ovl_handoff_frame_cancel(struct device *dev)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+
+	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
+	readl(ovl->regs + DISP_REG_OVL_INTEN);
+	if (ovl->irq_enabled)
+		synchronize_irq(ovl->irq);
 }
 
 int mtk_ovl_handoff_stop(struct device *dev)
@@ -938,6 +1138,7 @@ static int mtk_disp_ovl_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	priv->dev = dev;
 	atomic_set(&priv->fme_seq, 0);
+	atomic_set(&priv->handoff_irq_status, 0);
 	init_waitqueue_head(&priv->fme_wait_queue);
 
 	irq = platform_get_irq(pdev, 0);

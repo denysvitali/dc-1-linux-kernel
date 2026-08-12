@@ -98,6 +98,9 @@ void mtk_ovl_layer_config(struct device *dev, unsigned int idx,
 			  struct mtk_plane_state *state,
 			  struct cmdq_pkt *cmdq_pkt);
 int mtk_ovl_handoff_stop(struct device *dev);
+int mtk_ovl_handoff_frame_arm(struct device *dev, u32 *fme_seq);
+int mtk_ovl_handoff_frame_wait(struct device *dev, u32 fme_seq);
+void mtk_ovl_handoff_frame_cancel(struct device *dev);
 int mtk_ovl_handoff_prepare(struct device *dev, unsigned int width,
 			    unsigned int height, u32 *fme_seq);
 int mtk_ovl_handoff_wait_for_fme(struct device *dev, u32 fme_seq);
@@ -165,6 +168,9 @@ void mtk_rdma_layer_config(struct device *dev, unsigned int idx,
 void mtk_rdma_start(struct device *dev);
 void mtk_rdma_stop(struct device *dev);
 int mtk_rdma_handoff_stop(struct device *dev);
+int mtk_rdma_handoff_frame_arm(struct device *dev, u32 *frame_end_seq);
+int mtk_rdma_handoff_frame_wait(struct device *dev, u32 frame_end_seq);
+void mtk_rdma_handoff_frame_cancel(struct device *dev);
 void mtk_rdma_handoff_dump(struct device *dev, const char *stage);
 void mtk_rdma_register_vblank_cb(struct device *dev,
 				 void (*vblank_cb)(void *),

@@ -830,6 +830,8 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 	if (pending) {
 		/* Stop in hard IRQ context so CPU scheduling cannot miss the EOF gap. */
 		if ((pending & FRAME_DONE_INT_FLAG) &&
+		    !(pending & (BUFFER_UNDERRUN_INT_FLAG |
+				  INP_UNFINISH_INT_FLAG)) &&
 		    READ_ONCE(dsi->stop_on_frame)) {
 			writel(0, dsi->regs + DSI_INTEN);
 			readl(dsi->regs + DSI_INTEN);
@@ -913,6 +915,7 @@ static int mtk_dsi_wait_for_fresh_frame(struct mtk_dsi *dsi)
 {
 	u32 intsta;
 	u32 irq_data;
+	long waited;
 	int ret;
 
 	/* Replace, rather than inherit, LK's interrupt mask. */
@@ -940,13 +943,11 @@ static int mtk_dsi_wait_for_fresh_frame(struct mtk_dsi *dsi)
 		dsi->irq_enabled = true;
 	}
 
-	ret = mtk_dsi_wait_for_irq_done(dsi, FRAME_DONE_INT_FLAG, 100);
+	waited = wait_event_timeout(dsi->irq_wait_queue,
+				    !READ_ONCE(dsi->stop_on_frame),
+				    msecs_to_jiffies(100));
 	irq_data = atomic_read(&dsi->irq_data);
-	if (!ret && (irq_data & (BUFFER_UNDERRUN_INT_FLAG |
-				INP_UNFINISH_INT_FLAG)))
-		dev_warn(dsi->dev,
-			 "handoff frame boundary reported source starvation: status=%#x\n",
-			 irq_data);
+	ret = waited ? 0 : -ETIMEDOUT;
 	writel(0, dsi->regs + DSI_INTEN);
 	readl(dsi->regs + DSI_INTEN);
 	synchronize_irq(dsi->irq);
@@ -955,6 +956,10 @@ static int mtk_dsi_wait_for_fresh_frame(struct mtk_dsi *dsi)
 		disable_irq(dsi->irq);
 		dsi->irq_enabled = false;
 	}
+	if (ret)
+		dev_err(dsi->dev,
+			"handoff clean frame boundary timeout: status=%#x\n",
+			irq_data);
 
 	return ret;
 }
