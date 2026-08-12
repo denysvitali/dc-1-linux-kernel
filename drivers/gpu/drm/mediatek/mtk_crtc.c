@@ -1232,12 +1232,14 @@ static void mtk_crtc_atomic_flush(struct drm_crtc *crtc,
 					      &mtk_crtc->handoff_fme_seq);
 		if (ret)
 			goto handoff_failed;
-		ret = mtk_mutex_enable_sync(mtk_crtc->mutex);
-		if (ret)
-			goto handoff_failed;
 		ret = mtk_dsi_handoff_arm(dsi->dev);
 		if (ret)
 			goto handoff_failed;
+		ret = mtk_mutex_enable_sync(mtk_crtc->mutex);
+		if (ret) {
+			drm_err(crtc->dev, "MT6789 mutex enable failed: %d\n", ret);
+			goto handoff_failed;
+		}
 		ret = mtk_dsi_handoff_start(dsi->dev);
 		if (ret)
 			goto handoff_failed;

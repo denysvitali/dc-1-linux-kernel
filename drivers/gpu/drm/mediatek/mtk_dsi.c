@@ -1052,6 +1052,7 @@ int mtk_dsi_handoff_arm(struct device *dev)
 int mtk_dsi_handoff_start(struct device *dev)
 {
 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	u32 intsta, mode, start;
 	int ret = 0;
 
 	if (!dsi->driver_data->needs_cmd_mode_init)
@@ -1068,7 +1069,19 @@ int mtk_dsi_handoff_start(struct device *dev)
 
 	mtk_dsi_set_mode(dsi);
 	mtk_dsi_start(dsi);
+	start = readl(dsi->regs + DSI_START);
+	mode = readl(dsi->regs + DSI_MODE_CTRL);
+	intsta = readl(dsi->regs + DSI_INTSTA);
+	if (start != 1 || !(mode & MODE)) {
+		dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+		mtk_dsi_handoff_dump(dsi, "video-start-readback-failed");
+		ret = -EIO;
+		goto out_unlock;
+	}
 	dsi->handoff_phase = MTK_DSI_HANDOFF_RUNNING;
+	dev_info(dsi->dev,
+		 "handoff video started: t=%llu start=%#x mode=%#x intsta=%#x\n",
+		 (unsigned long long)ktime_get_ns(), start, mode, intsta);
 
 out_unlock:
 	mutex_unlock(&dsi->handoff_lock);
@@ -1157,6 +1170,16 @@ static int __mtk_dsi_poweron(struct mtk_dsi *dsi)
 		       dsi->regs + dsi->driver_data->reg_shadow_dbg_off);
 
 	mtk_dsi_reset_engine(dsi);
+	/*
+	 * An MT6789 engine reset does not reset MODE_CTRL.  Keep the handoff in
+	 * command mode with START deasserted while panel DCS traffic is sent;
+	 * the CRTC starts video only after the source and mutex are ready.
+	 */
+	if (dsi->driver_data->needs_cmd_mode_init) {
+		mtk_dsi_set_cmd_mode(dsi);
+		mtk_dsi_stop(dsi);
+		readl(dsi->regs + DSI_START);
+	}
 
 	mtk_dsi_phy_timconfig(dsi);
 
@@ -1685,6 +1708,30 @@ static ssize_t mtk_dsi_host_send_cmd(struct mtk_dsi *dsi,
 	return mtk_dsi_wait_for_irq_done(dsi, flag, 2000);
 }
 
+static int mtk_dsi_restore_quiesced(struct mtk_dsi *dsi)
+{
+	u32 val;
+	int ret;
+
+	/*
+	 * DSI_START is a retained command trigger, not an idle indication.  A
+	 * completed host transfer leaves it set, so normalize the post-command
+	 * state before the first video-mode arm check.
+	 */
+	writel(CMD_MODE, dsi->regs + DSI_MODE_CTRL);
+	writel(0, dsi->regs + DSI_START);
+	readl(dsi->regs + DSI_START);
+	ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val,
+				 !(val & DSI_BUSY), 10, 100000);
+	if (ret || readl(dsi->regs + DSI_START) ||
+	    (readl(dsi->regs + DSI_MODE_CTRL) & MODE)) {
+		mtk_dsi_handoff_dump(dsi, "host-quiesce-failed");
+		return ret ?: -EIO;
+	}
+
+	return 0;
+}
+
 static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 				     const struct mipi_dsi_msg *msg)
 {
@@ -1701,7 +1748,6 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 	if (dsi->driver_data->needs_cmd_mode_init &&
 	    (!dsi->refcount ||
 	     (dsi->handoff_phase != MTK_DSI_HANDOFF_QUIESCED &&
-	      dsi->handoff_phase != MTK_DSI_HANDOFF_ARMED &&
 	      dsi->handoff_phase != MTK_DSI_HANDOFF_RUNNING))) {
 		ret = -EIO;
 		goto out_unlock;
@@ -1758,9 +1804,17 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 		 recv_cnt, *((u8 *)(msg->tx_buf)));
 
 restore_dsi_mode:
-	if (dsi_mode & MODE) {
+	if ((dsi_mode & MODE) &&
+	    (!dsi->driver_data->needs_cmd_mode_init ||
+	     dsi->handoff_phase == MTK_DSI_HANDOFF_RUNNING)) {
 		mtk_dsi_set_mode(dsi);
 		mtk_dsi_start(dsi);
+	}
+	if (dsi->driver_data->needs_cmd_mode_init &&
+	    dsi->handoff_phase == MTK_DSI_HANDOFF_QUIESCED) {
+		ret = mtk_dsi_restore_quiesced(dsi);
+		if (ret)
+			goto transfer_failed;
 	}
 
 out_unlock:
