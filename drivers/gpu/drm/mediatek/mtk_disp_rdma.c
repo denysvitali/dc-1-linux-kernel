@@ -242,6 +242,7 @@ int mtk_rdma_handoff_stop(struct device *dev)
 
 	writel(RDMA_SOFT_RESET, rdma->regs + DISP_REG_RDMA_GLOBAL_CON);
 	ret = readl_poll_timeout(rdma->regs + DISP_REG_RDMA_GLOBAL_CON, val,
+				 (val & RDMA_SOFT_RESET) &&
 				 (val & RDMA_RESET_STATE_MASK) !=
 				 RDMA_RESET_STATE_IDLE, 1, 1000);
 	if (ret)
@@ -249,6 +250,7 @@ int mtk_rdma_handoff_stop(struct device *dev)
 	udelay(1);
 	writel(0, rdma->regs + DISP_REG_RDMA_GLOBAL_CON);
 	ret = readl_poll_timeout(rdma->regs + DISP_REG_RDMA_GLOBAL_CON, val,
+				 !(val & RDMA_SOFT_RESET) &&
 				 (val & RDMA_RESET_STATE_MASK) ==
 				 RDMA_RESET_STATE_IDLE, 1, 1000);
 	if (!ret) {
