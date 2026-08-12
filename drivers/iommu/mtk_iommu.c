@@ -374,7 +374,7 @@ static LIST_HEAD(m4ulist);	/* List all the M4U HWs */
 #define MT6789_JAGAR_FB_SLOT_SIZE	0x0076c000
 #define MT6789_JAGAR_FB_WIDTH		1200
 #define MT6789_JAGAR_FB_HEIGHT		1600
-#define MT6789_JAGAR_FB_PITCH		4864
+#define MT6789_JAGAR_FB_PITCH		4800
 
 /* MT6789 OVL0 registers needed before the DRM driver owns the block. */
 #define MT6789_OVL_EN			0x000c
@@ -1455,6 +1455,10 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	size = readl(regs + MT6789_OVL_SRC_SIZE(layer));
 	pitch_msb = readl(regs + MT6789_OVL_PITCH_MSB(layer));
 	pitch_lo = readl(regs + MT6789_OVL_PITCH(layer));
+	width = FIELD_GET(GENMASK(15, 0), size);
+	height = FIELD_GET(GENMASK(31, 16), size);
+	pitch = (FIELD_GET(GENMASK(3, 0), pitch_msb) << 16) |
+		FIELD_GET(GENMASK(15, 0), pitch_lo);
 	rdma_dbg = readl(regs + MT6789_OVL_RDMA_DBG(layer));
 	if (FIELD_GET(MT6789_OVL_RDMA_DBG_WARM_RST, rdma_dbg) !=
 	    MT6789_OVL_RDMA_DBG_IDLE) {
@@ -1462,11 +1466,6 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 		ret = -EBUSY;
 		goto out_log;
 	}
-	width = FIELD_GET(GENMASK(15, 0), size);
-	height = FIELD_GET(GENMASK(31, 16), size);
-	pitch = (FIELD_GET(GENMASK(3, 0), pitch_msb) << 16) |
-		FIELD_GET(GENMASK(15, 0), pitch_lo);
-
 	if (!(rdma & BIT(0)) || (datapath & BIT(4 + layer)) ||
 	    (pitch_msb & MT6789_OVL_PITCH_MSB_2ND_SUBBUF) ||
 	    !width || !height || !pitch || width > 8192 || height > 8192 ||
@@ -1555,9 +1554,9 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	ret = 0;
 out_log:
 	dev_info(dev,
-		 "LK OVL/IOMMU continuity: en=%#x src=%#x layer=%u flow=%#x rdma=%#x dbg=%#x con=%#x addr=%#x size=%#x pitch=%#x/%#x map=%pr reason=%s ret=%d\n",
+		 "LK OVL/IOMMU continuity: en=%#x src=%#x layer=%u flow=%#x rdma=%#x dbg=%#x con=%#x addr=%#x size=%#x pitch=%#x/%#x geom=%ux%u/%u map=%pr reason=%s ret=%d\n",
 		 en, src, layer, flow, rdma, rdma_dbg, con, addr, size,
-		 pitch_msb, pitch_lo, res, reason, ret);
+		 pitch_msb, pitch_lo, width, height, pitch, res, reason, ret);
 	iounmap(regs);
 	return ret;
 
