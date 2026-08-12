@@ -58,6 +58,9 @@
 #define DISP_REG_OVL_RDMA_GMC(n)		(0x00c8 + 0x20 * (n))
 #define DISP_REG_OVL_ADDR_MT2701		0x0040
 #define DISP_REG_OVL_CLRFMT_EXT			0x02d0
+#define DISP_REG_OVL_SMI_DBG			0x0230
+#define DISP_REG_OVL_GREQ_LAYER_CNT		0x0234
+#define DISP_REG_OVL_GDRDY_PRD_NUM		0x0238
 #define DISP_REG_OVL_FLOW_CTRL_DBG		0x0240
 #define DISP_REG_OVL_RDMA_DBG(n)		(0x024c + 0x4 * (n))
 #define OVL_FLOW_FSM_MASK			GENMASK(9, 0)
@@ -501,6 +504,7 @@ int mtk_ovl_handoff_wait_terminal(struct device *dev)
 	}
 
 fail:
+	mtk_ovl_handoff_log_state(ovl, "terminal-proof-failed");
 	dev_err(dev,
 		"OVL terminal proof failed: inten=%#x intsta=%#x status=%#x busy=%#x flow=%#x rst=%#x\n",
 		inten, intsta, irq_status, mtk_ovl_handoff_terminal_busy(ovl),
@@ -555,22 +559,33 @@ static void mtk_ovl_handoff_irq_enable(struct mtk_disp_ovl *ovl)
 static void mtk_ovl_handoff_log_state(struct mtk_disp_ovl *ovl,
 				      const char *stage)
 {
+	u32 rdma[4], dbg[4];
+	u32 en, rst, intsta, src, flow;
+	u32 smi_dbg, greq_layer_cnt, gdrdy_prd_num;
+	u64 begin, end;
+	unsigned int i;
+
+	begin = ktime_get_ns();
+	en = readl(ovl->regs + DISP_REG_OVL_EN);
+	rst = readl(ovl->regs + DISP_REG_OVL_RST);
+	intsta = readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	src = readl(ovl->regs + DISP_REG_OVL_SRC_CON);
+	flow = readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG);
+	for (i = 0; i < ARRAY_SIZE(rdma); i++) {
+		rdma[i] = readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(i));
+		dbg[i] = readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(i));
+	}
+	smi_dbg = readl(ovl->regs + DISP_REG_OVL_SMI_DBG);
+	greq_layer_cnt = readl(ovl->regs + DISP_REG_OVL_GREQ_LAYER_CNT);
+	gdrdy_prd_num = readl(ovl->regs + DISP_REG_OVL_GDRDY_PRD_NUM);
+	end = ktime_get_ns();
+
 	dev_info(ovl->dev,
-		 "OVL handoff %s: t=%llu en=%#x rst=%#x intsta=%#x src=%#x flow=%#x rdma=%#x/%#x/%#x/%#x dbg=%#x/%#x/%#x/%#x\n",
-		 stage, (unsigned long long)ktime_get_ns(),
-		 readl(ovl->regs + DISP_REG_OVL_EN),
-		 readl(ovl->regs + DISP_REG_OVL_RST),
-		 readl(ovl->regs + DISP_REG_OVL_INTSTA),
-		 readl(ovl->regs + DISP_REG_OVL_SRC_CON),
-		 readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG),
-		 readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(0)),
-		 readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(1)),
-		 readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(2)),
-		 readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(3)),
-		 readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(0)),
-		 readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(1)),
-		 readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(2)),
-		 readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(3)));
+		 "OVL handoff %s: t=%llu..%llu en=%#x rst=%#x intsta=%#x src=%#x flow=%#x rdma=%#x/%#x/%#x/%#x dbg=%#x/%#x/%#x/%#x smi=%#x/%#x/%#x\n",
+		 stage, (unsigned long long)begin, (unsigned long long)end,
+		 en, rst, intsta, src, flow, rdma[0], rdma[1], rdma[2],
+		 rdma[3], dbg[0], dbg[1], dbg[2], dbg[3], smi_dbg,
+		 greq_layer_cnt, gdrdy_prd_num);
 }
 
 static int mtk_ovl_stop_checked(struct mtk_disp_ovl *ovl)

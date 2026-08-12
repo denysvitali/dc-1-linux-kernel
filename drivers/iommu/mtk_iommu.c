@@ -273,6 +273,9 @@ struct mtk_iommu_data {
 
 	struct regmap			*pericfg;
 	struct mutex			mutex; /* Protect m4u_group/m4u_dom above */
+	atomic_t			jagar_handoff_fault_seq;
+	bool				jagar_handoff_pm_held;
+	bool				jagar_handoff_failed;
 
 	/*
 	 * In the sharing pgtable case, list data->list to the global list like m4ulist.
@@ -294,6 +297,19 @@ struct mtk_iommu_domain {
 	struct mutex			mutex; /* Protect "data" in this structure */
 };
 
+struct mtk_iommu_mt6789_regs {
+	u32 ttbr;
+	u32 ctrl;
+	u32 vld_pa_rng;
+	u32 dcm_dis;
+	u32 wr_len_ctrl;
+	u32 misc_ctrl;
+	u32 int_control;
+	u32 int_main_control;
+	u32 ivrp;
+	u32 inv_sel;
+};
+
 static int mtk_iommu_bind(struct device *dev)
 {
 	struct mtk_iommu_data *data = dev_get_drvdata(dev);
@@ -310,7 +326,10 @@ static void mtk_iommu_unbind(struct device *dev)
 
 static const struct iommu_ops mtk_iommu_ops;
 
-static int mtk_iommu_hw_init(const struct mtk_iommu_data *data, unsigned int bankid);
+static int mtk_iommu_hw_init(const struct mtk_iommu_data *data,
+			     unsigned int bankid, bool request_irq);
+static bool mtk_iommu_is_jagar_handoff(struct device *dev);
+static int mt6789_boot_fb_resource(struct device *dev, struct resource *res);
 
 #define MTK_IOMMU_TLB_ADDR(iova) ({					\
 	dma_addr_t _addr = iova;					\
@@ -348,6 +367,35 @@ static LIST_HEAD(m4ulist);	/* List all the M4U HWs */
 #define for_each_m4u(data, head)  list_for_each_entry(data, head, list)
 
 #define MTK_IOMMU_IOVA_SZ_4G		(SZ_4G - SZ_8M) /* 8M as gap */
+
+/* Immutable LK framebuffer identity on the Daylight DC-1 (Jagar). */
+#define MT6789_JAGAR_FB_BASE		0xfe8c1000ULL
+#define MT6789_JAGAR_VRAM_SIZE		0x01650000
+#define MT6789_JAGAR_FB_SLOT_SIZE	0x0076c000
+#define MT6789_JAGAR_FB_WIDTH		1200
+#define MT6789_JAGAR_FB_HEIGHT		1600
+#define MT6789_JAGAR_FB_PITCH		4864
+
+/* MT6789 OVL0 registers needed before the DRM driver owns the block. */
+#define MT6789_OVL_EN			0x000c
+#define MT6789_OVL_DATAPATH_CON		0x0024
+#define MT6789_OVL_SRC_CON		0x002c
+#define MT6789_OVL_CON(n)		(0x0030 + 0x20 * (n))
+#define MT6789_OVL_SRC_SIZE(n)		(0x0038 + 0x20 * (n))
+#define MT6789_OVL_PITCH_MSB(n)		(0x0040 + 0x20 * (n))
+#define MT6789_OVL_PITCH(n)		(0x0044 + 0x20 * (n))
+#define MT6789_OVL_RDMA_CTRL(n)		(0x00c0 + 0x20 * (n))
+#define MT6789_OVL_FLOW_CTRL_DBG	0x0240
+#define MT6789_OVL_RDMA_DBG(n)		(0x024c + 0x4 * (n))
+#define MT6789_OVL_ADDR(n)		(0x0f40 + 0x20 * (n))
+
+#define MT6789_OVL_FLOW_FSM_MASK	GENMASK(9, 0)
+#define MT6789_OVL_FLOW_H_W_RST		0x100
+#define MT6789_OVL_RDMA_DBG_BAD		(BIT(31) | BIT(30) | BIT(3))
+#define MT6789_OVL_RDMA_DBG_WARM_RST	GENMASK(2, 0)
+#define MT6789_OVL_RDMA_DBG_IDLE	1
+#define MT6789_OVL_PITCH_MSB_2ND_SUBBUF	BIT(16)
+#define MT6789_JAGAR_OVL_CON		0x000021ff
 
 static const struct mtk_iommu_iova_region single_domain[] = {
 	{.iova_base = 0,		.size = MTK_IOMMU_IOVA_SZ_4G},
@@ -526,6 +574,9 @@ static irqreturn_t mtk_iommu_isr(int irq, void *dev_id)
 	u64 fault_iova, fault_pa;
 	bool layer, write;
 
+	if (data->plat_data->m4u_plat == M4U_MT6789)
+		atomic_inc(&data->jagar_handoff_fault_seq);
+
 	/* Read error info from registers */
 	int_state = readl_relaxed(base + REG_MMU_FAULT_ST1);
 	if (int_state & F_REG_MMU0_FAULT_MASK) {
@@ -700,7 +751,8 @@ static int mtk_iommu_config(struct mtk_iommu_data *data, struct device *dev,
 
 static int mtk_iommu_domain_finalise(struct mtk_iommu_domain *dom,
 				     struct mtk_iommu_data *data,
-				     unsigned int region_id)
+				     unsigned int region_id,
+				     bool publish)
 {
 	struct mtk_iommu_domain	*share_dom = data->share_dom;
 	const struct mtk_iommu_iova_region *region;
@@ -736,7 +788,8 @@ static int mtk_iommu_domain_finalise(struct mtk_iommu_domain *dom,
 		return -ENOMEM;
 	}
 
-	data->share_dom = dom;
+	if (publish)
+		data->share_dom = dom;
 
 update_iova_region:
 	/* Update the iova region for this domain */
@@ -749,7 +802,12 @@ update_iova_region:
 
 static struct iommu_domain *mtk_iommu_domain_alloc_paging(struct device *dev)
 {
+	struct mtk_iommu_data *data = dev_iommu_priv_get(dev);
 	struct mtk_iommu_domain *dom;
+	struct mtk_iommu_data *frstdata;
+	unsigned int bankid;
+	int region_id;
+	int ret;
 
 	dom = kzalloc_obj(*dom);
 	if (!dom)
@@ -757,12 +815,224 @@ static struct iommu_domain *mtk_iommu_domain_alloc_paging(struct device *dev)
 	mutex_init(&dom->mutex);
 	dom->domain.pgsize_bitmap = SZ_4K | SZ_64K | SZ_1M | SZ_16M;
 
+	/*
+	 * The IOMMU core installs firmware-preserving direct mappings before it
+	 * attaches a translated domain.  Finalise only Jagar's display-domain
+	 * page table here so those mappings exist before Linux replaces LK's
+	 * live display TTBR.  Every other MT6789 keeps the generic lazy path.
+	 */
+	if (mtk_iommu_is_jagar_handoff(dev)) {
+		region_id = mtk_iommu_get_iova_region_id(dev, data->plat_data);
+		if (region_id < 0) {
+			ret = region_id;
+			goto err_free;
+		}
+		if (region_id) {
+			ret = -EBUSY;
+			goto err_free;
+		}
+
+		bankid = mtk_iommu_get_bank_id(dev, data->plat_data);
+		frstdata = mtk_iommu_get_frst_data(data->hw_list);
+		mutex_lock(&frstdata->mutex);
+		ret = mtk_iommu_domain_finalise(dom, frstdata, region_id, false);
+		mutex_unlock(&frstdata->mutex);
+		if (ret)
+			goto err_free;
+		dom->bank = &data->bank[bankid];
+	}
+
 	return &dom->domain;
+
+err_free:
+	kfree(dom);
+	return ERR_PTR(ret);
 }
 
 static void mtk_iommu_domain_free(struct iommu_domain *domain)
 {
 	kfree(to_mtk_domain(domain));
+}
+
+static void
+mtk_iommu_mt6789_snapshot_regs(struct mtk_iommu_data *data,
+			       struct mtk_iommu_bank_data *bank,
+			       struct mtk_iommu_mt6789_regs *regs)
+{
+	void __iomem *global = data->bank[0].base;
+
+	regs->ttbr = readl(bank->base + REG_MMU_PT_BASE_ADDR);
+	regs->ctrl = readl(global + REG_MMU_CTRL_REG);
+	regs->vld_pa_rng = readl(global + REG_MMU_VLD_PA_RNG);
+	regs->dcm_dis = readl(global + REG_MMU_DCM_DIS);
+	regs->wr_len_ctrl = readl(global + REG_MMU_WR_LEN_CTRL);
+	regs->misc_ctrl = readl(global + REG_MMU_MISC_CTRL);
+	regs->int_control = readl(bank->base + REG_MMU_INT_CONTROL0);
+	regs->int_main_control = readl(bank->base + REG_MMU_INT_MAIN_CONTROL);
+	regs->ivrp = readl(bank->base + REG_MMU_IVRP_PADDR);
+	regs->inv_sel = readl(global + data->plat_data->inv_sel_reg);
+}
+
+static int
+mtk_iommu_mt6789_restore_regs(struct mtk_iommu_data *data,
+			      struct mtk_iommu_bank_data *bank,
+			      const struct mtk_iommu_mt6789_regs *regs)
+{
+	void __iomem *global = data->bank[0].base;
+	bool mismatch;
+
+	/* Quiesce newly enabled fault sources before undoing their setup. */
+	writel(0, bank->base + REG_MMU_INT_CONTROL0);
+	writel(0, bank->base + REG_MMU_INT_MAIN_CONTROL);
+	synchronize_irq(bank->irq);
+	writel(regs->ttbr, bank->base + REG_MMU_PT_BASE_ADDR);
+	writel(regs->ctrl, global + REG_MMU_CTRL_REG);
+	writel(regs->vld_pa_rng, global + REG_MMU_VLD_PA_RNG);
+	writel(regs->dcm_dis, global + REG_MMU_DCM_DIS);
+	writel(regs->wr_len_ctrl, global + REG_MMU_WR_LEN_CTRL);
+	writel(regs->misc_ctrl, global + REG_MMU_MISC_CTRL);
+	writel(regs->ivrp, bank->base + REG_MMU_IVRP_PADDR);
+	mismatch = readl(bank->base + REG_MMU_PT_BASE_ADDR) != regs->ttbr ||
+		readl(global + REG_MMU_CTRL_REG) != regs->ctrl ||
+		readl(global + REG_MMU_VLD_PA_RNG) != regs->vld_pa_rng ||
+		readl(global + REG_MMU_DCM_DIS) != regs->dcm_dis ||
+		readl(global + REG_MMU_WR_LEN_CTRL) != regs->wr_len_ctrl ||
+		readl(global + REG_MMU_MISC_CTRL) != regs->misc_ctrl ||
+		readl(bank->base + REG_MMU_IVRP_PADDR) != regs->ivrp;
+	mtk_iommu_tlb_flush_all(data);
+	writel(regs->inv_sel, global + data->plat_data->inv_sel_reg);
+	mismatch |= readl(global + data->plat_data->inv_sel_reg) !=
+			regs->inv_sel;
+	if (mismatch) {
+		dev_emerg(data->dev,
+			  "failed to restore complete inherited IOMMU state\n");
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int
+mtk_iommu_mt6789_restore_irq_masks(struct mtk_iommu_bank_data *bank,
+				   const struct mtk_iommu_mt6789_regs *regs)
+{
+	writel(regs->int_control, bank->base + REG_MMU_INT_CONTROL0);
+	writel(regs->int_main_control, bank->base + REG_MMU_INT_MAIN_CONTROL);
+	if (readl(bank->base + REG_MMU_INT_CONTROL0) != regs->int_control ||
+	    readl(bank->base + REG_MMU_INT_MAIN_CONTROL) !=
+		regs->int_main_control)
+		return -EIO;
+
+	return 0;
+}
+
+static int
+mtk_iommu_mt6789_handoff_init(struct mtk_iommu_data *data,
+			      struct device *dev,
+			      struct mtk_iommu_domain *dom,
+			      struct mtk_iommu_bank_data *bank)
+{
+	struct device *m4udev = data->dev;
+	struct resource boot_fb, after_fb;
+	struct mtk_iommu_mt6789_regs inherited;
+	resource_size_t iova;
+	phys_addr_t phys;
+	u32 new_ttbr = dom->cfg.arm_v7s_cfg.ttbr;
+	u32 readback;
+	int fault_seq;
+	int restore_ret;
+	int ret;
+
+	ret = mt6789_boot_fb_resource(dev, &boot_fb);
+	if (ret) {
+		dev_err(dev,
+			"refusing IOMMU handoff without valid live LK framebuffer: %d\n",
+			ret);
+		return ret;
+	}
+
+	for (iova = boot_fb.start; iova <= boot_fb.end; iova += SZ_4K) {
+		phys = dom->iop->iova_to_phys(dom->iop, iova);
+		if (phys != iova) {
+			dev_err(dev,
+				"LK framebuffer identity-map mismatch: iova=%pa phys=%pa\n",
+				&iova, &phys);
+			return -ENODEV;
+		}
+	}
+	dev_info(dev, "LK framebuffer identity map verified page-by-page: %pr\n",
+		 &boot_fb);
+
+	ret = pm_runtime_resume_and_get(m4udev);
+	if (ret < 0) {
+		dev_err(m4udev, "pm get fail(%d) in Jagar handoff attach\n", ret);
+		return ret;
+	}
+
+	mtk_iommu_mt6789_snapshot_regs(data, bank, &inherited);
+	fault_seq = atomic_read(&data->jagar_handoff_fault_seq);
+	/* An inherited fault may arrive as soon as the handler is installed. */
+	bank->m4u_dom = dom;
+	ret = devm_request_irq(bank->parent_dev, bank->irq, mtk_iommu_isr, 0,
+			       dev_name(bank->parent_dev), bank);
+	if (ret) {
+		dev_err(bank->parent_dev, "Failed @ IRQ-%d Request\n", bank->irq);
+		bank->m4u_dom = NULL;
+		data->jagar_handoff_pm_held = true;
+		data->jagar_handoff_failed = true;
+		return ret;
+	}
+	mtk_iommu_hw_init(data, bank->id, false);
+
+	writel(new_ttbr, bank->base + REG_MMU_PT_BASE_ADDR);
+	readback = readl(bank->base + REG_MMU_PT_BASE_ADDR);
+	if (readback != new_ttbr) {
+		dev_err(dev, "IOMMU TTBR readback failed: wrote %#x read %#x\n",
+			new_ttbr, readback);
+		ret = -EIO;
+		goto restore_with_irq;
+	}
+	mtk_iommu_tlb_flush_all(data);
+	/* Cover more than one 60 Hz frame before accepting the live snapshot. */
+	msleep(20);
+
+	/* Prove that loading the future translated TTBR did not disturb LK. */
+	ret = mt6789_boot_fb_resource(dev, &after_fb);
+	if (ret || boot_fb.start != after_fb.start ||
+	    boot_fb.end != after_fb.end ||
+	    atomic_read(&data->jagar_handoff_fault_seq) != fault_seq) {
+		dev_err(dev,
+			"live state changed across IOMMU TTBR load: before=%pr after=%pr faults=%d->%d ret=%d\n",
+			&boot_fb, &after_fb, fault_seq,
+			atomic_read(&data->jagar_handoff_fault_seq), ret);
+		if (!ret)
+			ret = -EBUSY;
+		goto restore_with_irq;
+	}
+
+	/*
+	 * LK still owns an active OVL transaction.  Keep bclk on until the DRM
+	 * takeover has replaced that transaction; runtime PM may otherwise gate
+	 * the IOMMU between this attach and the display device-link resume.
+	 */
+	data->jagar_handoff_pm_held = true;
+	data->share_dom = dom;
+	dev_info(dev,
+		 "Jagar IOMMU handoff prepared: TTBR %#x -> %#x, bclk held, OVL live\n",
+		 inherited.ttbr, new_ttbr);
+	return 0;
+
+restore_with_irq:
+	restore_ret = mtk_iommu_mt6789_restore_regs(data, bank, &inherited);
+	devm_free_irq(bank->parent_dev, bank->irq, bank);
+	if (!restore_ret)
+		restore_ret = mtk_iommu_mt6789_restore_irq_masks(bank, &inherited);
+	bank->m4u_dom = NULL;
+	data->jagar_handoff_pm_held = true;
+	data->jagar_handoff_failed = true;
+	if (restore_ret)
+		return restore_ret;
+	return ret;
 }
 
 static int mtk_iommu_attach_device(struct iommu_domain *domain,
@@ -773,12 +1043,18 @@ static int mtk_iommu_attach_device(struct iommu_domain *domain,
 	struct list_head *hw_list = data->hw_list;
 	struct device *m4udev = data->dev;
 	struct mtk_iommu_bank_data *bank;
+	bool jagar_handoff;
 	unsigned int bankid;
 	int ret, region_id;
 
 	region_id = mtk_iommu_get_iova_region_id(dev, data->plat_data);
 	if (region_id < 0)
 		return region_id;
+	jagar_handoff = mtk_iommu_is_jagar_handoff(dev);
+	if (jagar_handoff && region_id) {
+		dev_err(dev, "refusing non-display IOMMU domain during Jagar LK handoff\n");
+		return -EBUSY;
+	}
 
 	bankid = mtk_iommu_get_bank_id(dev, data->plat_data);
 	mutex_lock(&dom->mutex);
@@ -787,7 +1063,7 @@ static int mtk_iommu_attach_device(struct iommu_domain *domain,
 		frstdata = mtk_iommu_get_frst_data(hw_list);
 
 		mutex_lock(&frstdata->mutex);
-		ret = mtk_iommu_domain_finalise(dom, frstdata, region_id);
+		ret = mtk_iommu_domain_finalise(dom, frstdata, region_id, true);
 		mutex_unlock(&frstdata->mutex);
 		if (ret) {
 			mutex_unlock(&dom->mutex);
@@ -799,22 +1075,34 @@ static int mtk_iommu_attach_device(struct iommu_domain *domain,
 
 	mutex_lock(&data->mutex);
 	bank = &data->bank[bankid];
+	if (jagar_handoff && data->jagar_handoff_failed) {
+		dev_err(dev, "refusing retry after failed Jagar IOMMU handoff\n");
+		ret = -EIO;
+		goto err_unlock;
+	}
 	if (!bank->m4u_dom) { /* Initialize the M4U HW for each a BANK */
-		ret = pm_runtime_resume_and_get(m4udev);
-		if (ret < 0) {
-			dev_err(m4udev, "pm get fail(%d) in attach.\n", ret);
-			goto err_unlock;
-		}
+		if (jagar_handoff) {
+			ret = mtk_iommu_mt6789_handoff_init(data, dev, dom, bank);
+			if (ret)
+				goto err_unlock;
+		} else {
+			ret = pm_runtime_resume_and_get(m4udev);
+			if (ret < 0) {
+				dev_err(m4udev, "pm get fail(%d) in attach.\n", ret);
+				goto err_unlock;
+			}
 
-		ret = mtk_iommu_hw_init(data, bankid);
-		if (ret) {
+			ret = mtk_iommu_hw_init(data, bankid, true);
+			if (ret) {
+				pm_runtime_put(m4udev);
+				goto err_unlock;
+			}
+			bank->m4u_dom = dom;
+			writel(dom->cfg.arm_v7s_cfg.ttbr,
+			       bank->base + REG_MMU_PT_BASE_ADDR);
+
 			pm_runtime_put(m4udev);
-			goto err_unlock;
 		}
-		bank->m4u_dom = dom;
-		writel(dom->cfg.arm_v7s_cfg.ttbr, bank->base + REG_MMU_PT_BASE_ADDR);
-
-		pm_runtime_put(m4udev);
 	}
 	mutex_unlock(&data->mutex);
 
@@ -1079,17 +1367,228 @@ static int mtk_iommu_of_xlate(struct device *dev,
 	return iommu_fwspec_add_ids(dev, args->args, 1);
 }
 
+static bool mtk_iommu_is_jagar_handoff(struct device *dev)
+{
+	struct mtk_iommu_data *data = dev_iommu_priv_get(dev);
+	struct device_node *chosen, *root;
+	const char *model;
+	u32 fb_base_h, fb_base_l, vram_size;
+	bool match = false;
+
+	if (data->plat_data->m4u_plat != M4U_MT6789 ||
+	    !of_machine_is_compatible("mediatek,MT6789"))
+		return false;
+
+	root = of_find_node_by_path("/");
+	if (!root)
+		return false;
+	if (of_property_read_string(root, "model", &model) ||
+	    strcmp(model, "MT8781V/NA"))
+		goto out_root;
+
+	chosen = of_find_node_by_path("/chosen");
+	if (!chosen)
+		goto out_root;
+	if (!of_property_read_u32(chosen, "atag,videolfb-fb_base_h",
+				  &fb_base_h) &&
+	    !of_property_read_u32(chosen, "atag,videolfb-fb_base_l",
+				  &fb_base_l) &&
+	    !of_property_read_u32(chosen, "atag,videolfb-vramSize",
+				  &vram_size) &&
+	    !fb_base_h && fb_base_l == MT6789_JAGAR_FB_BASE &&
+	    vram_size == MT6789_JAGAR_VRAM_SIZE)
+		match = true;
+	of_node_put(chosen);
+
+out_root:
+	of_node_put(root);
+	return match;
+}
+
+static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
+{
+	struct mtk_iommu_data *data = dev_iommu_priv_get(dev);
+	struct device_node *node;
+	struct resource reserved;
+	void __iomem *regs;
+	resource_size_t slot_size;
+	u64 fetch_size, end;
+	u32 addr, addr_after, con, con_after, datapath, datapath_after;
+	u32 en, en_after, flow, flow_after, fsm, fsm_after;
+	u32 pitch, pitch_lo, pitch_msb, rdma, rdma_after, rdma_dbg;
+	u32 rdma_dbg_after;
+	u32 size, src, src_after;
+	unsigned int height, layer, width;
+	int ret;
+
+	*res = (struct resource) {};
+	if (!mtk_iommu_is_jagar_handoff(dev))
+		return -ENOENT;
+	if (mtk_iommu_get_iova_region_id(dev, data->plat_data))
+		return -ENOENT;
+
+	node = of_find_compatible_node(NULL, NULL, "mediatek,disp_ovl0");
+	if (!node)
+		return -ENODEV;
+	regs = of_iomap(node, 0);
+	of_node_put(node);
+	if (!regs)
+		return -ENOMEM;
+
+	en = readl(regs + MT6789_OVL_EN);
+	datapath = readl(regs + MT6789_OVL_DATAPATH_CON);
+	src = readl(regs + MT6789_OVL_SRC_CON) & GENMASK(3, 0);
+	flow = readl(regs + MT6789_OVL_FLOW_CTRL_DBG);
+	fsm = flow & MT6789_OVL_FLOW_FSM_MASK;
+	if (!(en & BIT(0)) || hweight32(src) != 1 || !fsm ||
+	    fsm == MT6789_OVL_FLOW_H_W_RST || fsm > BIT(5) ||
+	    (fsm & (fsm - 1))) {
+		ret = -EBUSY;
+		goto out_log_basic;
+	}
+	layer = __ffs(src);
+
+	rdma = readl(regs + MT6789_OVL_RDMA_CTRL(layer));
+	con = readl(regs + MT6789_OVL_CON(layer));
+	addr = readl(regs + MT6789_OVL_ADDR(layer));
+	size = readl(regs + MT6789_OVL_SRC_SIZE(layer));
+	pitch_msb = readl(regs + MT6789_OVL_PITCH_MSB(layer));
+	pitch_lo = readl(regs + MT6789_OVL_PITCH(layer));
+	ret = readl_poll_timeout(regs + MT6789_OVL_RDMA_DBG(layer), rdma_dbg,
+				 !(rdma_dbg & MT6789_OVL_RDMA_DBG_BAD) &&
+				 FIELD_GET(MT6789_OVL_RDMA_DBG_WARM_RST,
+					   rdma_dbg) == MT6789_OVL_RDMA_DBG_IDLE,
+				 10, 2000);
+	if (ret) {
+		ret = -EBUSY;
+		goto out_log;
+	}
+	width = FIELD_GET(GENMASK(15, 0), size);
+	height = FIELD_GET(GENMASK(31, 16), size);
+	pitch = (FIELD_GET(GENMASK(3, 0), pitch_msb) << 16) |
+		FIELD_GET(GENMASK(15, 0), pitch_lo);
+
+	if (!(rdma & BIT(0)) || (datapath & BIT(4 + layer)) ||
+	    (pitch_msb & MT6789_OVL_PITCH_MSB_2ND_SUBBUF) ||
+	    !width || !height || !pitch || width > 8192 || height > 8192 ||
+	    pitch < width || width != MT6789_JAGAR_FB_WIDTH ||
+	    height != MT6789_JAGAR_FB_HEIGHT ||
+	    pitch != MT6789_JAGAR_FB_PITCH || con != MT6789_JAGAR_OVL_CON ||
+	    (addr != MT6789_JAGAR_FB_BASE &&
+	     addr != MT6789_JAGAR_FB_BASE + MT6789_JAGAR_FB_SLOT_SIZE)) {
+		ret = -EBUSY;
+		goto out_log;
+	}
+
+	fetch_size = (u64)pitch * height;
+	slot_size = MT6789_JAGAR_FB_SLOT_SIZE;
+	if (slot_size < fetch_size || slot_size - fetch_size > SZ_1M) {
+		ret = -ERANGE;
+		goto out_log;
+	}
+	end = MT6789_JAGAR_FB_BASE + 2 * (u64)slot_size - 1;
+	if (end >= MTK_IOMMU_IOVA_SZ_4G ||
+	    end > MT6789_JAGAR_FB_BASE + MT6789_JAGAR_VRAM_SIZE - 1) {
+		ret = -ERANGE;
+		goto out_log;
+	}
+
+	/* Reject a latch that changed while this snapshot was being derived. */
+	en_after = readl(regs + MT6789_OVL_EN);
+	datapath_after = readl(regs + MT6789_OVL_DATAPATH_CON);
+	src_after = readl(regs + MT6789_OVL_SRC_CON) & GENMASK(3, 0);
+	rdma_after = readl(regs + MT6789_OVL_RDMA_CTRL(layer));
+	ret = readl_poll_timeout(regs + MT6789_OVL_RDMA_DBG(layer),
+				 rdma_dbg_after,
+				 !(rdma_dbg_after & MT6789_OVL_RDMA_DBG_BAD) &&
+				 FIELD_GET(MT6789_OVL_RDMA_DBG_WARM_RST,
+					   rdma_dbg_after) ==
+					MT6789_OVL_RDMA_DBG_IDLE,
+				 10, 2000);
+	if (ret) {
+		ret = -EBUSY;
+		goto out_log;
+	}
+	flow_after = readl(regs + MT6789_OVL_FLOW_CTRL_DBG);
+	fsm_after = flow_after & MT6789_OVL_FLOW_FSM_MASK;
+	con_after = readl(regs + MT6789_OVL_CON(layer));
+	addr_after = readl(regs + MT6789_OVL_ADDR(layer));
+	if (en_after != en || datapath_after != datapath ||
+	    src_after != src || rdma_after != rdma || con_after != con ||
+	    addr_after != addr ||
+	    readl(regs + MT6789_OVL_SRC_SIZE(layer)) != size ||
+	    readl(regs + MT6789_OVL_PITCH_MSB(layer)) != pitch_msb ||
+	    readl(regs + MT6789_OVL_PITCH(layer)) != pitch_lo ||
+	    !fsm_after || fsm_after == MT6789_OVL_FLOW_H_W_RST ||
+	    fsm_after > BIT(5) || (fsm_after & (fsm_after - 1))) {
+		ret = -EAGAIN;
+		goto out_log;
+	}
+
+	res->start = MT6789_JAGAR_FB_BASE;
+	res->end = end;
+	res->flags = IORESOURCE_MEM;
+	if (!IS_ALIGNED(resource_size(res), SZ_4K)) {
+		ret = -EINVAL;
+		goto out_log;
+	}
+
+	node = of_find_compatible_node(NULL, NULL, "mediatek,framebuffer");
+	if (!node) {
+		ret = -ENODEV;
+		goto out_log;
+	}
+	ret = of_address_to_resource(node, 0, &reserved);
+	of_node_put(node);
+	if (ret)
+		goto out_log;
+	if (reserved.start != MT6789_JAGAR_FB_BASE ||
+	    res->end > reserved.end) {
+		ret = -ERANGE;
+		goto out_log;
+	}
+
+	ret = 0;
+out_log:
+	dev_info(dev,
+		 "LK OVL/IOMMU continuity: en=%#x src=%#x layer=%u flow=%#x rdma=%#x dbg=%#x con=%#x addr=%#x size=%#x pitch=%#x/%#x map=%pr ret=%d\n",
+		 en, src, layer, flow, rdma, rdma_dbg, con, addr, size,
+		 pitch_msb, pitch_lo, res, ret);
+	iounmap(regs);
+	return ret;
+
+out_log_basic:
+	dev_info(dev,
+		 "LK OVL/IOMMU continuity rejected: en=%#x src=%#x flow=%#x ret=%d\n",
+		 en, src, flow, ret);
+	iounmap(regs);
+	return ret;
+}
+
 static void mtk_iommu_get_resv_regions(struct device *dev,
 				       struct list_head *head)
 {
 	struct mtk_iommu_data *data = dev_iommu_priv_get(dev);
 	unsigned int regionid = mtk_iommu_get_iova_region_id(dev, data->plat_data), i;
 	const struct mtk_iommu_iova_region *resv, *curdom;
+	struct resource boot_fb;
 	struct iommu_resv_region *region;
 	int prot = IOMMU_WRITE | IOMMU_READ;
+	int ret;
 
 	if ((int)regionid < 0)
 		return;
+
+	ret = mt6789_boot_fb_resource(dev, &boot_fb);
+	if (!ret) {
+		region = iommu_alloc_resv_region(boot_fb.start,
+						 resource_size(&boot_fb), prot,
+						 IOMMU_RESV_DIRECT, GFP_KERNEL);
+		if (!region)
+			return;
+		list_add_tail(&region->list, head);
+	}
+
 	curdom = data->plat_data->iova_region + regionid;
 	for (i = 0; i < data->plat_data->iova_region_nr; i++) {
 		resv = data->plat_data->iova_region + i;
@@ -1130,7 +1629,8 @@ static const struct iommu_ops mtk_iommu_ops = {
 	}
 };
 
-static int mtk_iommu_hw_init(const struct mtk_iommu_data *data, unsigned int bankid)
+static int mtk_iommu_hw_init(const struct mtk_iommu_data *data,
+			     unsigned int bankid, bool request_irq)
 {
 	const struct mtk_iommu_bank_data *bankx = &data->bank[bankid];
 	const struct mtk_iommu_bank_data *bank0 = &data->bank[0];
@@ -1207,7 +1707,8 @@ static int mtk_iommu_hw_init(const struct mtk_iommu_data *data, unsigned int ban
 			 upper_32_bits(data->protect_base);
 	writel_relaxed(regval, bankx->base + REG_MMU_IVRP_PADDR);
 
-	if (devm_request_irq(bankx->parent_dev, bankx->irq, mtk_iommu_isr, 0,
+	if (request_irq &&
+	    devm_request_irq(bankx->parent_dev, bankx->irq, mtk_iommu_isr, 0,
 			     dev_name(bankx->parent_dev), (void *)bankx)) {
 		writel_relaxed(0, bankx->base + REG_MMU_PT_BASE_ADDR);
 		dev_err(bankx->parent_dev, "Failed @ IRQ-%d Request\n", bankx->irq);
@@ -1378,6 +1879,7 @@ static int mtk_iommu_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	data->dev = dev;
 	data->plat_data = of_device_get_match_data(dev);
+	atomic_set(&data->jagar_handoff_fault_seq, 0);
 
 	/* Protect memory. HW will access here while translation fault.*/
 	protect = devm_kcalloc(dev, 2, MTK_PROTECT_PA_ALIGN, GFP_KERNEL);
@@ -1546,13 +2048,17 @@ static void mtk_iommu_remove(struct platform_device *pdev)
 		for (i = 0; i < MTK_LARB_NR_MAX; i++)
 			put_device(data->larb_imu[i].dev);
 	}
-	pm_runtime_disable(&pdev->dev);
 	for (i = 0; i < data->plat_data->banks_num; i++) {
 		bank = &data->bank[i];
 		if (!bank->m4u_dom)
 			continue;
 		devm_free_irq(&pdev->dev, bank->irq, bank);
 	}
+	if (data->jagar_handoff_pm_held) {
+		pm_runtime_put_sync(&pdev->dev);
+		data->jagar_handoff_pm_held = false;
+	}
+	pm_runtime_disable(&pdev->dev);
 }
 
 static int __maybe_unused mtk_iommu_runtime_suspend(struct device *dev)
