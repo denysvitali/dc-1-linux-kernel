@@ -341,8 +341,6 @@ void mtk_ovl_start(struct device *dev)
 
 static u32 mtk_ovl_handoff_dma_busy(struct mtk_disp_ovl *ovl)
 {
-	u32 active_layers = readl(ovl->regs + DISP_REG_OVL_SRC_CON) &
-			    GENMASK(ovl->data->layer_nr - 1, 0);
 	u32 flow = readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG);
 	u32 busy = 0;
 	unsigned int i;
@@ -351,9 +349,8 @@ static u32 mtk_ovl_handoff_dma_busy(struct mtk_disp_ovl *ovl)
 		busy |= BIT(31);
 	for (i = 0; i < ovl->data->layer_nr; i++) {
 		/* MT6789 reports L0..L3 idle in FLOW bits 19..16. */
-		if ((active_layers & BIT(i)) && !(flow & BIT(19 - i)))
+		if (!(flow & BIT(19 - i)))
 			busy |= BIT(i);
-		/* SRC_CON can change before a previously issued request retires. */
 		if (readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(i)) &
 		    (OVL_RDMA_DBG_SMI_BUSY | OVL_RDMA_DBG_SMI_GREQ))
 			busy |= BIT(i + 4);
