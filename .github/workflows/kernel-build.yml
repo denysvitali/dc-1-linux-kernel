@@ -149,6 +149,11 @@ jobs:
           # losing these symbols silently removes all read-only thermal/RTC data.
           # SHMEM/MEMFD_CREATE: Wayland clients abort when creating their shared
           # pixel buffers; foot reports "Function not implemented".
+          # TMPFS: elogind cannot mount /run/user/<uid>, so no login session is
+          # ever created. GDM autologin then retries forever and fork-bombs
+          # gnome-keyring-daemon, and mutter reports "Failed to find any
+          # matching session". Verified on hardware 2026-08-12.
+          # FHANDLE/SYSVIPC: documented logind and GNOME prerequisites.
           # INPUT_EVDEV/TOUCHSCREEN_ILITEK: libinput otherwise sees no DC-1 touch
           # device even if the controller and IRQ both probe successfully.
           for sym in CONFIG_MULTIUSER CONFIG_DEVTMPFS CONFIG_BLK_DEV_INITRD \
@@ -157,6 +162,7 @@ jobs:
                      CONFIG_EPOLL CONFIG_SIGNALFD CONFIG_TIMERFD CONFIG_EVENTFD \
                      CONFIG_SECCOMP CONFIG_SECCOMP_FILTER \
                      CONFIG_SHMEM CONFIG_MEMFD_CREATE \
+                     CONFIG_TMPFS CONFIG_FHANDLE CONFIG_SYSVIPC \
                      CONFIG_FILE_LOCKING CONFIG_ADVISE_SYSCALLS \
                      CONFIG_THERMAL CONFIG_THERMAL_OF CONFIG_GENERIC_ADC_THERMAL \
                      CONFIG_RTC_CLASS CONFIG_RTC_DRV_S35390A \

@@ -9,7 +9,11 @@ CONFIG_EXPERT=y
 CONFIG_MODULES=y
 CONFIG_KEXEC=y
 CONFIG_OF_OVERLAY=y
-# CONFIG_FHANDLE is not set
+# FHANDLE and SYSVIPC are elogind/GNOME prerequisites. [inferred] -- unlike
+# TMPFS these were not the observed failure, but name_to_handle_at() is a
+# documented logind requirement and GNOME expects SysV IPC to exist.
+CONFIG_FHANDLE=y
+CONFIG_SYSVIPC=y
 CONFIG_POSIX_TIMERS=y
 # CONFIG_BUG is not set
 CONFIG_FUTEX=y
@@ -236,6 +240,16 @@ CONFIG_FILE_LOCKING=y
 CONFIG_INOTIFY_USER=y
 CONFIG_MSDOS_FS=y
 CONFIG_VFAT_FS=y
+# TMPFS is load-bearing for the GNOME/elogind session, not a convenience.
+# [verified 2026-08-12 on hardware] Without it, mount("tmpfs") returns EINVAL,
+# so elogind cannot create the per-user runtime directory and fails with
+# "Failed to mount tmpfs on /run/user/<uid>: Invalid argument". pam_elogind
+# then reports "Failed to create session: Invalid argument", GDM's autologin
+# retries forever and fork-bombs gnome-keyring-daemon, and mutter dies with
+# "Failed to setup: Failed to find any matching session".
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_TMPFS_XATTR=y
 CONFIG_PSTORE=y
 CONFIG_PSTORE_CONSOLE=y
 CONFIG_PSTORE_PMSG=y
