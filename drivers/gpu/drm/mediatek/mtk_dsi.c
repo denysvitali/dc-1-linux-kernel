@@ -944,7 +944,9 @@ static int mtk_dsi_wait_for_fresh_frame(struct mtk_dsi *dsi)
 	irq_data = atomic_read(&dsi->irq_data);
 	if (!ret && (irq_data & (BUFFER_UNDERRUN_INT_FLAG |
 				INP_UNFINISH_INT_FLAG)))
-		ret = -EIO;
+		dev_warn(dsi->dev,
+			 "handoff frame boundary reported source starvation: status=%#x\n",
+			 irq_data);
 	writel(0, dsi->regs + DSI_INTEN);
 	readl(dsi->regs + DSI_INTEN);
 	synchronize_irq(dsi->irq);
