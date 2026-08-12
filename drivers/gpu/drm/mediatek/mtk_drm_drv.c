@@ -151,10 +151,6 @@ static const unsigned int mt6789_mtk_ddp_main[] = {
 	DDP_COMPONENT_DSI0
 };
 
-static const struct mtk_drm_route mt6789_mtk_ddp_main_routes[] = {
-	{0, DDP_COMPONENT_DSI0},
-};
-
 static const unsigned int mt8173_mtk_ddp_main[] = {
 	DDP_COMPONENT_OVL0,
 	DDP_COMPONENT_COLOR0,
@@ -295,8 +291,7 @@ static const struct mtk_mmsys_driver_data mt2712_mmsys_driver_data = {
 static const struct mtk_mmsys_driver_data mt6789_mmsys_driver_data = {
 	.main_path = mt6789_mtk_ddp_main,
 	.main_len = ARRAY_SIZE(mt6789_mtk_ddp_main),
-	.conn_routes = mt6789_mtk_ddp_main_routes,
-	.num_conn_routes = ARRAY_SIZE(mt6789_mtk_ddp_main_routes),
+	/* DSI0 is the fixed path tail; a conn_route would append it twice. */
 	.quiesce_mutex_first = true,
 	.mmsys_dev_num = 1,
 };

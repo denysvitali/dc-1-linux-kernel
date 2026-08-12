@@ -398,13 +398,24 @@ static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
 	int ret;
 	int i;
 
-	if (mtk_crtc->ddp_comp_nr != 5 || ovl->id != DDP_COMPONENT_OVL0 ||
+	if (mtk_crtc->ddp_comp_nr != 5) {
+		drm_err(dev,
+			"invalid MT6789 handoff topology: %u components, expected 5\n",
+			mtk_crtc->ddp_comp_nr);
+		return -EINVAL;
+	}
+	if (ovl->id != DDP_COMPONENT_OVL0 ||
 	    mtk_crtc->ddp_comp[1]->id != DDP_COMPONENT_RDMA0 ||
 	    mtk_crtc->ddp_comp[2]->id != DDP_COMPONENT_COLOR0 ||
 	    mtk_crtc->ddp_comp[3]->id != DDP_COMPONENT_DITHER0 ||
-	    mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1]->id !=
-		    DDP_COMPONENT_DSI0)
+	    mtk_crtc->ddp_comp[4]->id != DDP_COMPONENT_DSI0) {
+		drm_err(dev,
+			"invalid MT6789 handoff path: %u,%u,%u,%u,%u\n",
+			ovl->id, mtk_crtc->ddp_comp[1]->id,
+			mtk_crtc->ddp_comp[2]->id, mtk_crtc->ddp_comp[3]->id,
+			mtk_crtc->ddp_comp[4]->id);
 		return -EINVAL;
+	}
 
 	rdma = mtk_crtc->ddp_comp[1];
 	dsi = mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
@@ -1082,6 +1093,7 @@ static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
 
 	ret = mtk_crtc_ddp_hw_init(mtk_crtc);
 	if (ret) {
+		drm_err(dev, "failed to initialize display pipeline: %d\n", ret);
 		mtk_crtc->handoff_failed = true;
 		crtc->state->no_vblank = true;
 		if (!mtk_crtc->resources_active)
@@ -1397,6 +1409,18 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 		return 0;
 
 	priv = priv->all_drm_private[priv_data_index];
+	if (priv->data->quiesce_mutex_first &&
+	    (path_len != 5 || conn_routes || num_conn_routes ||
+	     path[0] != DDP_COMPONENT_OVL0 ||
+	     path[1] != DDP_COMPONENT_RDMA0 ||
+	     path[2] != DDP_COMPONENT_COLOR0 ||
+	     path[3] != DDP_COMPONENT_DITHER0 ||
+	     path[4] != DDP_COMPONENT_DSI0)) {
+		dev_err(dev,
+			"refusing invalid checked-handoff topology (length=%u, routes=%u)\n",
+			path_len, num_conn_routes);
+		return -EINVAL;
+	}
 
 	drm_for_each_crtc(tmp, drm_dev)
 		crtc_i++;

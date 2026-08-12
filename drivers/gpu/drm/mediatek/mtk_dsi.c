@@ -1093,11 +1093,17 @@ static int __mtk_dsi_poweron(struct mtk_dsi *dsi)
 	u32 bit_per_pixel;
 
 	if (dsi->driver_data->needs_cmd_mode_init &&
-	    dsi->handoff_phase == MTK_DSI_HANDOFF_FAILED)
+	    dsi->handoff_phase == MTK_DSI_HANDOFF_FAILED) {
+		dev_err(dev, "refusing DSI power-on after failed handoff\n");
 		return -EIO;
+	}
 	if (dsi->driver_data->needs_cmd_mode_init && !dsi->refcount &&
-	    dsi->handoff_phase != MTK_DSI_HANDOFF_QUIESCED)
+	    dsi->handoff_phase != MTK_DSI_HANDOFF_QUIESCED) {
+		dev_err(dev,
+			"refusing DSI power-on before handoff quiesce (phase=%u)\n",
+			dsi->handoff_phase);
 		return -EPERM;
+	}
 
 	if (++dsi->refcount != 1)
 		return 0;
@@ -1367,7 +1373,7 @@ static void mtk_dsi_bridge_atomic_pre_enable(struct drm_bridge *bridge,
 
 	ret = mtk_dsi_poweron(dsi);
 	if (ret < 0) {
-		drm_err(drm, "failed to power on dsi\n");
+		drm_err(drm, "failed to power on dsi: %d\n", ret);
 		return;
 	}
 
