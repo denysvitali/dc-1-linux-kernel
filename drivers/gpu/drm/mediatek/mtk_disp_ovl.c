@@ -350,11 +350,10 @@ static u32 mtk_ovl_handoff_dma_busy(struct mtk_disp_ovl *ovl)
 	if (!mtk_ovl_flow_operational(flow))
 		busy |= BIT(31);
 	for (i = 0; i < ovl->data->layer_nr; i++) {
-		if (!(active_layers & BIT(i)))
-			continue;
 		/* MT6789 reports L0..L3 idle in FLOW bits 19..16. */
-		if (!(flow & BIT(19 - i)))
+		if ((active_layers & BIT(i)) && !(flow & BIT(19 - i)))
 			busy |= BIT(i);
+		/* SRC_CON can change before a previously issued request retires. */
 		if (readl(ovl->regs + DISP_REG_OVL_RDMA_DBG(i)) &
 		    (OVL_RDMA_DBG_SMI_BUSY | OVL_RDMA_DBG_SMI_GREQ))
 			busy |= BIT(i + 4);
