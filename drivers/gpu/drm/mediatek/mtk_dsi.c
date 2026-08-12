@@ -1032,6 +1032,8 @@ int mtk_dsi_handoff_arm(struct device *dev)
 {
 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
 	u32 intsta;
+	u32 inten = FRAME_DONE_INT_FLAG | BUFFER_UNDERRUN_INT_FLAG |
+		    INP_UNFINISH_INT_FLAG;
 	int ret = 0;
 
 	if (!dsi->driver_data->needs_cmd_mode_init)
@@ -1047,8 +1049,30 @@ int mtk_dsi_handoff_arm(struct device *dev)
 		mtk_dsi_handoff_dump(dsi, "arm-failed");
 		ret = -EIO;
 	} else {
+		writel(0, dsi->regs + DSI_INTEN);
+		readl(dsi->regs + DSI_INTEN);
+		if (dsi->irq_enabled)
+			synchronize_irq(dsi->irq);
+		atomic_set(&dsi->irq_data, 0);
+		writel(0, dsi->regs + DSI_INTSTA);
+		intsta = readl(dsi->regs + DSI_INTSTA);
+		if (intsta & MT6789_DSI_INT_STATUS_MASK) {
+			dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+			mtk_dsi_handoff_dump(dsi, "arm-clear-failed");
+			ret = -EIO;
+			goto out_unlock;
+		}
+		writel(inten, dsi->regs + DSI_INTEN);
+		if (readl(dsi->regs + DSI_INTEN) != inten) {
+			dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+			mtk_dsi_handoff_dump(dsi, "arm-mask-failed");
+			ret = -EIO;
+			goto out_unlock;
+		}
 		dsi->handoff_phase = MTK_DSI_HANDOFF_ARMED;
 	}
+
+out_unlock:
 	mutex_unlock(&dsi->handoff_lock);
 
 	return ret;
@@ -1093,13 +1117,73 @@ out_unlock:
 	return ret;
 }
 
+int mtk_dsi_handoff_wait_for_frame(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	u32 abnormal = BUFFER_UNDERRUN_INT_FLAG | INP_UNFINISH_INT_FLAG;
+	u32 inten, status;
+	long waited;
+	int ret = 0;
+
+	if (!dsi->driver_data->needs_cmd_mode_init)
+		return 0;
+
+	waited = wait_event_timeout(dsi->irq_wait_queue,
+				    atomic_read(&dsi->irq_data) &
+				    (FRAME_DONE_INT_FLAG | abnormal),
+				    msecs_to_jiffies(100));
+	writel(0, dsi->regs + DSI_INTEN);
+	inten = readl(dsi->regs + DSI_INTEN);
+	if (dsi->irq_enabled)
+		synchronize_irq(dsi->irq);
+	status = atomic_xchg(&dsi->irq_data, 0);
+	status |= readl(dsi->regs + DSI_INTSTA) & abnormal;
+
+	if (inten)
+		ret = -EIO;
+	else if (!waited)
+		ret = -ETIMEDOUT;
+	else if (!(status & FRAME_DONE_INT_FLAG) || (status & abnormal))
+		ret = -EIO;
+
+	if (ret) {
+		mutex_lock(&dsi->handoff_lock);
+		dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+		mtk_dsi_handoff_dump(dsi, "first-frame-failed");
+		mutex_unlock(&dsi->handoff_lock);
+		return ret;
+	}
+
+	/* Restore the command-transfer mask without a per-frame IRQ storm. */
+	writel(LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG,
+	       dsi->regs + DSI_INTEN);
+	if (readl(dsi->regs + DSI_INTEN) !=
+	    (LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG))
+		return -EIO;
+
+	dev_info(dsi->dev, "handoff first DSI frame complete: status=%#x\n",
+		 status);
+	return 0;
+}
+
 void mtk_dsi_handoff_abort(struct device *dev)
 {
 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	u32 inten;
 
 	if (!dsi->driver_data->needs_cmd_mode_init)
 		return;
 
+	writel(0, dsi->regs + DSI_INTEN);
+	inten = readl(dsi->regs + DSI_INTEN);
+	if (dsi->irq_enabled)
+		synchronize_irq(dsi->irq);
+	if (inten && dsi->irq_enabled) {
+		disable_irq(dsi->irq);
+		dsi->irq_enabled = false;
+		dev_err(dev, "DSI IRQ mask failed during abort: inten=%#x\n",
+			inten);
+	}
 	mutex_lock(&dsi->handoff_lock);
 	dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
 	dsi->enabled = false;

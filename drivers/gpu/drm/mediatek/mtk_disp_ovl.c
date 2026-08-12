@@ -621,11 +621,18 @@ int mtk_ovl_handoff_frame_wait(struct device *dev, u32 fme_seq)
 void mtk_ovl_handoff_frame_cancel(struct device *dev)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	u32 inten;
 
 	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
-	readl(ovl->regs + DISP_REG_OVL_INTEN);
+	inten = readl(ovl->regs + DISP_REG_OVL_INTEN);
 	if (ovl->irq_enabled)
 		synchronize_irq(ovl->irq);
+	if (inten && ovl->irq_enabled) {
+		disable_irq(ovl->irq);
+		ovl->irq_enabled = false;
+		dev_err(dev, "OVL IRQ mask failed during cancel: inten=%#x\n",
+			inten);
+	}
 }
 
 int mtk_ovl_handoff_stop(struct device *dev)
@@ -1015,8 +1022,9 @@ int mtk_ovl_handoff_prepare(struct device *dev, unsigned int width,
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
 	u32 en = BIT(0) | OVL_EN_BYPASS_SHADOW;
+	u32 inten = OVL_FME_CPL_INT | OVL_HANDOFF_ABNORMAL_INT;
 	u32 roi = height << 16 | width;
-	u32 src_con;
+	u32 src_con, val;
 
 	if (!ovl->data->bypass_shadow)
 		return -EOPNOTSUPP;
@@ -1038,13 +1046,18 @@ int mtk_ovl_handoff_prepare(struct device *dev, unsigned int width,
 	readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(ovl->data->layer_nr - 1));
 	mb(); /* Complete OVL writes before enabling the display mutex. */
 	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
-	readl(ovl->regs + DISP_REG_OVL_INTEN);
-	writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
-	readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	if (readl(ovl->regs + DISP_REG_OVL_INTEN))
+		return -EIO;
+	mtk_ovl_handoff_irq_enable(ovl);
 	synchronize_irq(ovl->irq);
+	writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
+	val = readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	if (val & OVL_INT_STATUS_MASK)
+		return -EIO;
+	atomic_set(&ovl->handoff_irq_status, 0);
 	*fme_seq = atomic_read(&ovl->fme_seq);
-	writel(OVL_FME_CPL_INT, ovl->regs + DISP_REG_OVL_INTEN);
-	if (readl(ovl->regs + DISP_REG_OVL_INTEN) != OVL_FME_CPL_INT)
+	writel(inten, ovl->regs + DISP_REG_OVL_INTEN);
+	if (readl(ovl->regs + DISP_REG_OVL_INTEN) != inten)
 		return -EIO;
 
 	return 0;
@@ -1053,21 +1066,29 @@ int mtk_ovl_handoff_prepare(struct device *dev, unsigned int width,
 int mtk_ovl_handoff_wait_for_fme(struct device *dev, u32 fme_seq)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
-	u32 flow;
+	u32 flow, inten, irq_status;
 	int flow_ret;
 	long ret;
 
 	ret = wait_event_timeout(ovl->fme_wait_queue,
 				 atomic_read(&ovl->fme_seq) != fme_seq,
 				 msecs_to_jiffies(100));
+	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
+	inten = readl(ovl->regs + DISP_REG_OVL_INTEN);
+	synchronize_irq(ovl->irq);
+	irq_status = atomic_xchg(&ovl->handoff_irq_status, 0);
 	flow_ret = readl_poll_timeout(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG,
 				      flow,
 				      mtk_ovl_flow_operational(flow),
 				      10, 20000);
-	if (!ret || flow_ret) {
+	irq_status |= readl(ovl->regs + DISP_REG_OVL_INTSTA) &
+		      OVL_HANDOFF_ABNORMAL_INT;
+	if (inten || !ret || flow_ret ||
+	    (irq_status & OVL_HANDOFF_ABNORMAL_INT)) {
 		dev_err(dev,
-			"OVL first-frame failure: seq=%u now=%u flow=%#x en=%#x rst=%#x inten=%#x intsta=%#x src=%#x roi=%#x bg=%#x l0con=%#x l0addr=%#x l0pitch=%#x l0size=%#x l0offset=%#x l0rdma=%#x\n",
-			fme_seq, atomic_read(&ovl->fme_seq), flow,
+			"OVL first-frame failure: seq=%u now=%u status=%#x flow=%#x en=%#x rst=%#x inten=%#x intsta=%#x src=%#x roi=%#x bg=%#x l0con=%#x l0addr=%#x l0pitch=%#x l0size=%#x l0offset=%#x l0rdma=%#x\n",
+			fme_seq, atomic_read(&ovl->fme_seq), irq_status,
+			flow,
 			readl(ovl->regs + DISP_REG_OVL_EN),
 			readl(ovl->regs + DISP_REG_OVL_RST),
 			readl(ovl->regs + DISP_REG_OVL_INTEN),
@@ -1081,11 +1102,19 @@ int mtk_ovl_handoff_wait_for_fme(struct device *dev, u32 fme_seq)
 			readl(ovl->regs + DISP_REG_OVL_SRC_SIZE(0)),
 			readl(ovl->regs + DISP_REG_OVL_OFFSET(0)),
 			readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(0)));
-		return !ret ? -ETIMEDOUT : flow_ret;
+		if (inten)
+			return -EIO;
+		if (!ret)
+			return -ETIMEDOUT;
+		return flow_ret ?: -EIO;
 	}
 
-	dev_info(dev, "OVL first frame complete: seq=%u flow=%#x\n",
-		 atomic_read(&ovl->fme_seq), flow);
+	writel(OVL_FME_CPL_INT, ovl->regs + DISP_REG_OVL_INTEN);
+	if (readl(ovl->regs + DISP_REG_OVL_INTEN) != OVL_FME_CPL_INT)
+		return -EIO;
+
+	dev_info(dev, "OVL first frame complete: seq=%u status=%#x flow=%#x\n",
+		 atomic_read(&ovl->fme_seq), irq_status, flow);
 	return 0;
 }
 

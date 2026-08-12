@@ -54,6 +54,7 @@ int mtk_dsi_ddp_power_off(struct device *dev);
 int mtk_dsi_handoff_quiesce(struct device *dev);
 int mtk_dsi_handoff_arm(struct device *dev);
 int mtk_dsi_handoff_start(struct device *dev);
+int mtk_dsi_handoff_wait_for_frame(struct device *dev);
 void mtk_dsi_handoff_abort(struct device *dev);
 unsigned int mtk_dsi_encoder_index(struct device *dev);
 
@@ -161,6 +162,8 @@ void mtk_rdma_clk_disable(struct device *dev);
 void mtk_rdma_config(struct device *dev, unsigned int width,
 		     unsigned int height, unsigned int vrefresh,
 		     unsigned int bpc, struct cmdq_pkt *cmdq_pkt);
+int mtk_rdma_handoff_validate_config(struct device *dev, unsigned int width,
+				     unsigned int height);
 unsigned int mtk_rdma_layer_nr(struct device *dev);
 void mtk_rdma_layer_config(struct device *dev, unsigned int idx,
 			   struct mtk_plane_state *state,

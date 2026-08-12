@@ -141,13 +141,9 @@ static unsigned int mt8167_mtk_ddp_main[] = {
  * the path -- so it is deliberately omitted here.
  */
 static const unsigned int mt6789_mtk_ddp_main[] = {
+	/* Match the vendor DRM_BYPASS_PQ path for deterministic bring-up. */
 	DDP_COMPONENT_OVL0,
 	DDP_COMPONENT_RDMA0,
-	DDP_COMPONENT_COLOR0,
-	DDP_COMPONENT_DITHER0,
-	/* DSC deliberately omitted: we drive the panel's 60Hz non-DSC mode, and
-	 * pulling DSC in would mean borrowing mt8195's disp-dsc binding for
-	 * hardware we are not exercising. */
 	DDP_COMPONENT_DSI0
 };
 

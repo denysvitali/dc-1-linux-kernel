@@ -457,22 +457,19 @@ static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
 	int ret;
 	int i;
 
-	if (mtk_crtc->ddp_comp_nr != 5) {
+	if (mtk_crtc->ddp_comp_nr != 3) {
 		drm_err(dev,
-			"invalid MT6789 handoff topology: %u components, expected 5\n",
+			"invalid MT6789 handoff topology: %u components, expected 3\n",
 			mtk_crtc->ddp_comp_nr);
 		return -EINVAL;
 	}
 	if (ovl->id != DDP_COMPONENT_OVL0 ||
 	    mtk_crtc->ddp_comp[1]->id != DDP_COMPONENT_RDMA0 ||
-	    mtk_crtc->ddp_comp[2]->id != DDP_COMPONENT_COLOR0 ||
-	    mtk_crtc->ddp_comp[3]->id != DDP_COMPONENT_DITHER0 ||
-	    mtk_crtc->ddp_comp[4]->id != DDP_COMPONENT_DSI0) {
+	    mtk_crtc->ddp_comp[2]->id != DDP_COMPONENT_DSI0) {
 		drm_err(dev,
-			"invalid MT6789 handoff path: %u,%u,%u,%u,%u\n",
+			"invalid MT6789 handoff path: %u,%u,%u\n",
 			ovl->id, mtk_crtc->ddp_comp[1]->id,
-			mtk_crtc->ddp_comp[2]->id, mtk_crtc->ddp_comp[3]->id,
-			mtk_crtc->ddp_comp[4]->id);
+			mtk_crtc->ddp_comp[2]->id);
 		return -EINVAL;
 	}
 
@@ -510,6 +507,11 @@ static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
 		if (i == 1)
 			mtk_ddp_comp_bgclr_in_on(comp);
 		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
+		if (comp == rdma) {
+			ret = mtk_rdma_handoff_validate_config(comp->dev, width, height);
+			if (ret)
+				goto quarantine;
+		}
 		if (comp == dsi)
 			ret = mtk_dsi_ddp_power_on(comp->dev);
 		else
@@ -1259,6 +1261,9 @@ static void mtk_crtc_atomic_flush(struct drm_crtc *crtc,
 	struct mtk_ddp_comp *ovl = mtk_crtc->ddp_comp[0];
 	struct mtk_ddp_comp *dsi =
 		mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
+	u32 rdma_frame_seq = 0;
+	bool ovl_armed = false;
+	bool rdma_armed = false;
 	int ret;
 	int i;
 
@@ -1270,8 +1275,14 @@ static void mtk_crtc_atomic_flush(struct drm_crtc *crtc,
 		unsigned int width = crtc->state->adjusted_mode.hdisplay;
 		unsigned int height = crtc->state->adjusted_mode.vdisplay;
 
+		ovl_armed = true;
 		ret = mtk_ovl_handoff_prepare(ovl->dev, width, height,
 					      &mtk_crtc->handoff_fme_seq);
+		if (ret)
+			goto handoff_failed;
+		rdma_armed = true;
+		ret = mtk_rdma_handoff_frame_arm(mtk_crtc->ddp_comp[1]->dev,
+						 &rdma_frame_seq);
 		if (ret)
 			goto handoff_failed;
 		ret = mtk_dsi_handoff_arm(dsi->dev);
@@ -1290,9 +1301,18 @@ static void mtk_crtc_atomic_flush(struct drm_crtc *crtc,
 		mtk_crtc->handoff_wait_pending = false;
 		if (ret)
 			goto handoff_failed;
+		ret = mtk_rdma_handoff_frame_wait(mtk_crtc->ddp_comp[1]->dev,
+						  rdma_frame_seq);
+		if (ret)
+			goto handoff_failed;
+		mtk_rdma_handoff_frame_cancel(mtk_crtc->ddp_comp[1]->dev);
+		rdma_armed = false;
+		ret = mtk_dsi_handoff_wait_for_frame(dsi->dev);
+		if (ret)
+			goto handoff_failed;
 		drm_info(crtc->dev,
-			 "MT6789 handoff complete: exact mutex state and fme_seq=%u\n",
-			 mtk_crtc->handoff_fme_seq);
+			 "MT6789 handoff complete: exact mutex state, fme_seq=%u rdma_seq=%u\n",
+			 mtk_crtc->handoff_fme_seq, rdma_frame_seq);
 	}
 
 	if (crtc->state->color_mgmt_changed)
@@ -1304,6 +1324,10 @@ static void mtk_crtc_atomic_flush(struct drm_crtc *crtc,
 	return;
 
 handoff_failed:
+	if (rdma_armed)
+		mtk_rdma_handoff_frame_cancel(mtk_crtc->ddp_comp[1]->dev);
+	if (ovl_armed)
+		mtk_ovl_handoff_frame_cancel(ovl->dev);
 	mtk_crtc->handoff_wait_pending = false;
 	mtk_crtc_handoff_dump(mtk_crtc, "first-frame-failed");
 	mtk_crtc_handoff_quarantine(mtk_crtc);
@@ -1454,12 +1478,10 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 
 	priv = priv->all_drm_private[priv_data_index];
 	if (priv->data->quiesce_mutex_first &&
-	    (path_len != 5 || conn_routes || num_conn_routes ||
+	    (path_len != 3 || conn_routes || num_conn_routes ||
 	     path[0] != DDP_COMPONENT_OVL0 ||
 	     path[1] != DDP_COMPONENT_RDMA0 ||
-	     path[2] != DDP_COMPONENT_COLOR0 ||
-	     path[3] != DDP_COMPONENT_DITHER0 ||
-	     path[4] != DDP_COMPONENT_DSI0)) {
+	     path[2] != DDP_COMPONENT_DSI0)) {
 		dev_err(dev,
 			"refusing invalid checked-handoff topology (length=%u, routes=%u)\n",
 			path_len, num_conn_routes);

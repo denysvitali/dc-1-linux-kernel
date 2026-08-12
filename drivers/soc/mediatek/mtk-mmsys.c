@@ -233,7 +233,7 @@ void mtk_mmsys_ddp_handoff_dump(struct device *dev, const char *stage)
 		return;
 
 	dev_err(dev,
-		"handoff %s: valid=%#x/%#x ready=%#x/%#x greq=%#x/%#x route=%#x/%#x/%#x/%#x/%#x/%#x\n",
+		"handoff %s: valid=%#x/%#x ready=%#x/%#x greq=%#x/%#x route=%#x/%#x/%#x/%#x/%#x/%#x/%#x\n",
 		stage,
 		readl(mmsys->regs + MT6789_MMSYS_DL_VALID0),
 		readl(mmsys->regs + MT6789_MMSYS_DL_VALID1),
@@ -246,6 +246,7 @@ void mtk_mmsys_ddp_handoff_dump(struct device *dev, const char *stage)
 		readl(mmsys->regs + MT6789_DISP_RDMA0_SEL_IN),
 		readl(mmsys->regs + MT6789_DISP_RDMA0_RSZ0_SOUT),
 		readl(mmsys->regs + MT6789_DISP_DITHER0_MOUT),
+		readl(mmsys->regs + MT6789_DISP_DSC0_MOUT),
 		readl(mmsys->regs + MT6789_DISP_DSI0_SEL_IN));
 }
 EXPORT_SYMBOL_GPL(mtk_mmsys_ddp_handoff_dump);
@@ -253,7 +254,8 @@ EXPORT_SYMBOL_GPL(mtk_mmsys_ddp_handoff_dump);
 int mtk_mmsys_ddp_handoff_validate(struct device *dev)
 {
 	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
-	u32 ovl_con, ovl_mout, rdma_in, rdma_out, dither_mout, dsi_in;
+	u32 ovl_con, ovl_mout, rdma_in, rdma_out;
+	u32 dither_mout, dsc_mout, dsi_in;
 
 	if (mmsys->data != &mt6789_mmsys_driver_data)
 		return -EOPNOTSUPP;
@@ -263,6 +265,7 @@ int mtk_mmsys_ddp_handoff_validate(struct device *dev)
 	rdma_in = readl(mmsys->regs + MT6789_DISP_RDMA0_SEL_IN);
 	rdma_out = readl(mmsys->regs + MT6789_DISP_RDMA0_RSZ0_SOUT);
 	dither_mout = readl(mmsys->regs + MT6789_DISP_DITHER0_MOUT);
+	dsc_mout = readl(mmsys->regs + MT6789_DISP_DSC0_MOUT);
 	dsi_in = readl(mmsys->regs + MT6789_DISP_DSI0_SEL_IN);
 
 	if ((ovl_con & MT6789_MMSYS_OVL_CON_MASK) ==
@@ -272,11 +275,11 @@ int mtk_mmsys_ddp_handoff_validate(struct device *dev)
 	    (rdma_in & MT6789_DISP_RDMA0_FROM_MASK) ==
 		    MT6789_DISP_RDMA0_FROM_OVL0 &&
 	    (rdma_out & MT6789_DISP_RDMA0_RSZ0_MASK) ==
-		    MT6789_DISP_RDMA0_RSZ0_SOUT_TO_COLOR0 &&
-	    (dither_mout & MT6789_DISP_DITHER0_MOUT_MASK) ==
-		    MT6789_DISP_DITHER0_MOUT_TO_DSI0 &&
+		    MT6789_DISP_RDMA0_RSZ0_SOUT_TO_DSI0 &&
+	    !(dither_mout & MT6789_DISP_DITHER0_MOUT_MASK) &&
+	    !(dsc_mout & MT6789_DISP_DSC0_MOUT_MASK) &&
 	    (dsi_in & MT6789_DISP_DSI0_FROM_MASK) ==
-		    MT6789_DISP_DSI0_FROM_DITHER0)
+		    MT6789_DISP_DSI0_FROM_RDMA_RSZ0)
 		return 0;
 
 	mtk_mmsys_ddp_handoff_dump(dev, "route-readback-failed");

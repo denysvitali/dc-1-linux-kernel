@@ -87,6 +87,7 @@ struct mtk_disp_rdma_data {
 	const u32 *formats;
 	size_t num_formats;
 	bool checked_handoff;
+	bool zero_output_valid_threshold;
 };
 
 /*
@@ -292,6 +293,7 @@ fail:
 int mtk_rdma_handoff_frame_arm(struct device *dev, u32 *frame_end_seq)
 {
 	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+	u32 val;
 
 	if (!rdma->data->checked_handoff || !frame_end_seq)
 		return -EINVAL;
@@ -302,7 +304,9 @@ int mtk_rdma_handoff_frame_arm(struct device *dev, u32 *frame_end_seq)
 	if (rdma->irq_enabled)
 		synchronize_irq(rdma->irq);
 	writel(0, rdma->regs + DISP_REG_RDMA_INT_STATUS);
-	readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+	val = readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+	if (val & RDMA_INT_STATUS_MASK)
+		return -EIO;
 	atomic_set(&rdma->handoff_irq_status, 0);
 
 	*frame_end_seq = atomic_read(&rdma->frame_end_seq);
@@ -310,8 +314,12 @@ int mtk_rdma_handoff_frame_arm(struct device *dev, u32 *frame_end_seq)
 		enable_irq(rdma->irq);
 		rdma->irq_enabled = true;
 	}
-	writel(RDMA_FRAME_END_INT, rdma->regs + DISP_REG_RDMA_INT_ENABLE);
-	if (readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE) != RDMA_FRAME_END_INT)
+	writel(RDMA_FRAME_END_INT | RDMA_FIFO_UNDERFLOW_INT |
+	       RDMA_EOF_ABNORMAL_INT,
+	       rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	if (readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE) !=
+	    (RDMA_FRAME_END_INT | RDMA_FIFO_UNDERFLOW_INT |
+	     RDMA_EOF_ABNORMAL_INT))
 		return -EIO;
 
 	return 0;
@@ -320,24 +328,34 @@ int mtk_rdma_handoff_frame_arm(struct device *dev, u32 *frame_end_seq)
 int mtk_rdma_handoff_frame_wait(struct device *dev, u32 frame_end_seq)
 {
 	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
-	u32 irq_status, val;
+	u32 inten, irq_status, val;
 	int idle_ret;
 	long ret;
 
 	ret = wait_event_timeout(rdma->frame_end_wait_queue,
 				 atomic_read(&rdma->frame_end_seq) != frame_end_seq,
 				 msecs_to_jiffies(100));
+	writel(0, rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	inten = readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	if (rdma->irq_enabled)
+		synchronize_irq(rdma->irq);
+	irq_status = atomic_xchg(&rdma->handoff_irq_status, 0);
+	if (inten) {
+		dev_err(dev, "RDMA frame mask failed: inten=%#x status=%#x\n",
+			inten, irq_status);
+		return -EIO;
+	}
 	if (!ret) {
 		dev_err(dev,
-			"RDMA inherited frame timeout: seq=%u now=%u global=%#x intsta=%#x\n",
+			"RDMA frame timeout: seq=%u now=%u status=%#x global=%#x intsta=%#x\n",
 			frame_end_seq, atomic_read(&rdma->frame_end_seq),
+			irq_status,
 			readl(rdma->regs + DISP_REG_RDMA_GLOBAL_CON),
 			readl(rdma->regs + DISP_REG_RDMA_INT_STATUS));
 		return -ETIMEDOUT;
 	}
-	irq_status = atomic_xchg(&rdma->handoff_irq_status, 0);
 	if (irq_status & (RDMA_FIFO_UNDERFLOW_INT | RDMA_EOF_ABNORMAL_INT)) {
-		dev_err(dev, "RDMA inherited frame abnormal: status=%#x\n",
+		dev_err(dev, "RDMA frame abnormal: status=%#x\n",
 			irq_status);
 		return -EIO;
 	}
@@ -353,6 +371,11 @@ int mtk_rdma_handoff_frame_wait(struct device *dev, u32 frame_end_seq)
 			val);
 		return idle_ret;
 	}
+	val = readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+	if (val & (RDMA_FIFO_UNDERFLOW_INT | RDMA_EOF_ABNORMAL_INT)) {
+		dev_err(dev, "RDMA post-frame abnormal: intsta=%#x\n", val);
+		return -EIO;
+	}
 
 	return 0;
 }
@@ -360,11 +383,18 @@ int mtk_rdma_handoff_frame_wait(struct device *dev, u32 frame_end_seq)
 void mtk_rdma_handoff_frame_cancel(struct device *dev)
 {
 	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+	u32 inten;
 
 	writel(0, rdma->regs + DISP_REG_RDMA_INT_ENABLE);
-	readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	inten = readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE);
 	if (rdma->irq_enabled)
 		synchronize_irq(rdma->irq);
+	if (inten && rdma->irq_enabled) {
+		disable_irq(rdma->irq);
+		rdma->irq_enabled = false;
+		dev_err(dev, "RDMA IRQ mask failed during cancel: inten=%#x\n",
+			inten);
+	}
 }
 
 void mtk_rdma_handoff_dump(struct device *dev, const char *stage)
@@ -413,15 +443,41 @@ void mtk_rdma_config(struct device *dev, unsigned int width,
 
 	/*
 	 * Enable FIFO underflow since DSI and DPI can't be blocked.
-	 * Keep the FIFO pseudo size reset default of 8 KiB. Set the
-	 * output threshold to 70% of max fifo size to make sure the
-	 * threhold will not overflow
+	 * Keep the configured FIFO pseudo size. Most generations use a 70%
+	 * output threshold, while MT6789 video mode follows the vendor setting
+	 * of zero so an empty FIFO can feed the first active line.
 	 */
-	threshold = rdma_fifo_size * 7 / 10;
+	threshold = rdma->data->zero_output_valid_threshold ? 0 :
+		    rdma_fifo_size * 7 / 10;
 	reg = RDMA_FIFO_UNDERFLOW_EN |
 	      RDMA_FIFO_PSEUDO_SIZE(rdma_fifo_size) |
 	      RDMA_OUTPUT_VALID_FIFO_THRESHOLD(threshold);
 	mtk_ddp_write(cmdq_pkt, reg, &rdma->cmdq_reg, rdma->regs, DISP_REG_RDMA_FIFO_CON);
+}
+
+int mtk_rdma_handoff_validate_config(struct device *dev, unsigned int width,
+				     unsigned int height)
+{
+	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+	u32 fifo_size, expected_fifo, fifo, size0, size1;
+
+	if (!rdma->data->checked_handoff)
+		return -EOPNOTSUPP;
+
+	fifo_size = rdma->fifo_size ?: RDMA_FIFO_SIZE(rdma);
+	expected_fifo = RDMA_FIFO_UNDERFLOW_EN |
+			RDMA_FIFO_PSEUDO_SIZE(fifo_size);
+	size0 = readl(rdma->regs + DISP_REG_RDMA_SIZE_CON_0);
+	size1 = readl(rdma->regs + DISP_REG_RDMA_SIZE_CON_1);
+	fifo = readl(rdma->regs + DISP_REG_RDMA_FIFO_CON);
+	if ((size0 & 0xfff) == width && (size1 & 0xfffff) == height &&
+	    fifo == expected_fifo)
+		return 0;
+
+	dev_err(dev,
+		"RDMA handoff config mismatch: size=%#x/%#x fifo=%#x expected=%#x\n",
+		size0, size1, fifo, expected_fifo);
+	return -EIO;
 }
 
 static unsigned int rdma_fmt_convert(struct mtk_disp_rdma *rdma,
@@ -610,6 +666,7 @@ static const struct mtk_disp_rdma_data mt6789_rdma_driver_data = {
 	.formats = mt8173_formats,
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 	.checked_handoff = true,
+	.zero_output_valid_threshold = true,
 };
 
 static const struct mtk_disp_rdma_data mt8173_rdma_driver_data = {
