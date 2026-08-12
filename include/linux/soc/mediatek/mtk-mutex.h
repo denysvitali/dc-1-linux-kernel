@@ -77,6 +77,7 @@ int mtk_mutex_enable_by_cmdq(struct mtk_mutex *mutex,
 			     void *pkt);
 void mtk_mutex_disable(struct mtk_mutex *mutex);
 int mtk_mutex_disable_sync(struct mtk_mutex *mutex);
+int mtk_mutex_validate_disabled(struct mtk_mutex *mutex);
 int mtk_mutex_configure(struct mtk_mutex *mutex,
 			const enum mtk_ddp_comp_id *components,
 			unsigned int component_count);

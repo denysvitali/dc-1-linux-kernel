@@ -105,6 +105,8 @@ struct mtk_disp_rdma {
 	atomic_t			frame_end_seq;
 	atomic_t			handoff_irq_status;
 	wait_queue_head_t		frame_end_wait_queue;
+	u32				handoff_idle_counters[4];
+	bool				handoff_idle_proven;
 	void				(*vblank_cb)(void *data);
 	void				*vblank_cb_data;
 	u32				fifo_size;
@@ -288,6 +290,110 @@ fail:
 		readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE),
 		readl(rdma->regs + DISP_REG_RDMA_INT_STATUS));
 	return ret;
+}
+
+int mtk_rdma_handoff_wait_idle(struct device *dev)
+{
+	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+	u64 deadline = ktime_get_ns() + 100 * NSEC_PER_MSEC;
+	u64 stable_since = 0;
+	u32 counters[4] = { 0 };
+	u32 global, inten, intsta, irq_status;
+	bool have_counters = false;
+
+	rdma->handoff_idle_proven = false;
+	writel(0, rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	inten = readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	if (rdma->irq_enabled)
+		synchronize_irq(rdma->irq);
+	irq_status = atomic_xchg(&rdma->handoff_irq_status, 0);
+	intsta = readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+	if (inten || ((irq_status | intsta) &
+		      (RDMA_FIFO_UNDERFLOW_INT | RDMA_EOF_ABNORMAL_INT)))
+		goto fail;
+
+	for (;;) {
+		u32 sample[4];
+		u64 now = ktime_get_ns();
+		bool idle;
+
+		global = readl(rdma->regs + DISP_REG_RDMA_GLOBAL_CON);
+		intsta = readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+		if (intsta & (RDMA_FIFO_UNDERFLOW_INT |
+			      RDMA_EOF_ABNORMAL_INT))
+			goto fail;
+		sample[0] = readl(rdma->regs + DISP_REG_RDMA_IN_P_CNT);
+		sample[1] = readl(rdma->regs + DISP_REG_RDMA_IN_LINE_CNT);
+		sample[2] = readl(rdma->regs + DISP_REG_RDMA_OUT_P_CNT);
+		sample[3] = readl(rdma->regs + DISP_REG_RDMA_OUT_LINE_CNT);
+		idle = (global & (RDMA_ENGINE_EN | RDMA_SOFT_RESET |
+				  RDMA_SMI_BUSY | RDMA_RESET_STATE_MASK)) ==
+		       (RDMA_ENGINE_EN | RDMA_RESET_STATE_IDLE);
+		if (!idle ||
+		    (have_counters && memcmp(counters, sample,
+					     sizeof(counters)))) {
+			stable_since = 0;
+			have_counters = false;
+		} else if (!stable_since) {
+			memcpy(counters, sample, sizeof(counters));
+			have_counters = true;
+			stable_since = now;
+			dev_info(dev,
+				 "RDMA idle proof start: t=%llu global=%#x count=%#x/%#x/%#x/%#x\n",
+				 (unsigned long long)now, global, sample[0],
+				 sample[1], sample[2], sample[3]);
+		} else if (now - stable_since >= 20 * NSEC_PER_MSEC) {
+			dev_info(dev,
+				 "RDMA idle proof complete: t=%llu global=%#x count=%#x/%#x/%#x/%#x\n",
+				 (unsigned long long)now, global, sample[0],
+				 sample[1], sample[2], sample[3]);
+			memcpy(rdma->handoff_idle_counters, sample,
+			       sizeof(rdma->handoff_idle_counters));
+			rdma->handoff_idle_proven = true;
+			return 0;
+		}
+		if (now >= deadline)
+			break;
+		usleep_range(100, 200);
+	}
+
+fail:
+	dev_err(dev,
+		"RDMA idle proof failed: global=%#x inten=%#x intsta=%#x status=%#x count=%#x/%#x/%#x/%#x\n",
+		readl(rdma->regs + DISP_REG_RDMA_GLOBAL_CON), inten, intsta,
+		irq_status, readl(rdma->regs + DISP_REG_RDMA_IN_P_CNT),
+		readl(rdma->regs + DISP_REG_RDMA_IN_LINE_CNT),
+		readl(rdma->regs + DISP_REG_RDMA_OUT_P_CNT),
+		readl(rdma->regs + DISP_REG_RDMA_OUT_LINE_CNT));
+	return -EBUSY;
+}
+
+int mtk_rdma_handoff_validate_idle(struct device *dev)
+{
+	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+	u32 sample[4];
+	u32 global = readl(rdma->regs + DISP_REG_RDMA_GLOBAL_CON);
+	u32 intsta = readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+	bool idle;
+
+	sample[0] = readl(rdma->regs + DISP_REG_RDMA_IN_P_CNT);
+	sample[1] = readl(rdma->regs + DISP_REG_RDMA_IN_LINE_CNT);
+	sample[2] = readl(rdma->regs + DISP_REG_RDMA_OUT_P_CNT);
+	sample[3] = readl(rdma->regs + DISP_REG_RDMA_OUT_LINE_CNT);
+	idle = (global & (RDMA_ENGINE_EN | RDMA_SOFT_RESET | RDMA_SMI_BUSY |
+			  RDMA_RESET_STATE_MASK)) ==
+	       (RDMA_ENGINE_EN | RDMA_RESET_STATE_IDLE);
+	if (!rdma->handoff_idle_proven || !idle ||
+	    memcmp(rdma->handoff_idle_counters, sample, sizeof(sample)) ||
+	    (intsta & (RDMA_FIFO_UNDERFLOW_INT | RDMA_EOF_ABNORMAL_INT))) {
+		dev_err(dev,
+			"RDMA idle revalidation failed: proven=%u global=%#x intsta=%#x count=%#x/%#x/%#x/%#x\n",
+			rdma->handoff_idle_proven, global, intsta, sample[0],
+			sample[1], sample[2], sample[3]);
+		return -EBUSY;
+	}
+
+	return 0;
 }
 
 int mtk_rdma_handoff_frame_arm(struct device *dev, u32 *frame_end_seq)

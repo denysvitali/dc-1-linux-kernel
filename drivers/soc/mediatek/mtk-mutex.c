@@ -349,6 +349,11 @@
 struct mtk_mutex {
 	u8 id;
 	bool claimed;
+	bool handoff_disabled;
+	u32 handoff_mod0;
+	u32 handoff_mod1;
+	u32 handoff_sof;
+	u32 handoff_cfg;
 };
 
 enum mtk_mutex_sof_id {
@@ -1083,15 +1088,69 @@ int mtk_mutex_disable_sync(struct mtk_mutex *mutex)
 {
 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
 						 mutex[mutex->id]);
-	u32 val;
+	u32 cfg, mod0, mod1 = 0, sof, val;
 
 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
 
+	mutex->handoff_disabled = false;
+	cfg = readl(mtx->regs + DISP_REG_MUTEX_CFG);
+	mod0 = readl(mtx->regs + DISP_REG_MUTEX_MOD(mtx, 0, mutex->id));
+	if (mtx->data->mutex_mod1_reg)
+		mod1 = readl(mtx->regs +
+			     DISP_REG_MUTEX_MOD(mtx, 32, mutex->id));
+	sof = readl(mtx->regs +
+		    DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, mutex->id));
 	writel(0, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
-	return readl_poll_timeout(mtx->regs + DISP_REG_MUTEX_EN(mutex->id),
-				  val, !(val & 1), 1, 1000);
+	if (readl_poll_timeout(mtx->regs + DISP_REG_MUTEX_EN(mutex->id),
+			       val, !(val & 1), 1, 1000))
+		return -ETIMEDOUT;
+	usleep_range(1000, 2000);
+	if (readl(mtx->regs + DISP_REG_MUTEX_EN(mutex->id)) ||
+	    readl(mtx->regs + DISP_REG_MUTEX_RST(mutex->id)) ||
+	    readl(mtx->regs + DISP_REG_MUTEX_CFG) != cfg ||
+	    readl(mtx->regs + DISP_REG_MUTEX_MOD(mtx, 0, mutex->id)) != mod0 ||
+	    (mtx->data->mutex_mod1_reg &&
+	     readl(mtx->regs + DISP_REG_MUTEX_MOD(mtx, 32, mutex->id)) != mod1) ||
+	    readl(mtx->regs +
+		  DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, mutex->id)) != sof)
+		return -EIO;
+	dev_info(mtx->dev,
+		 "mutex%u disabled stable: t=%llu cfg=%#x mod=%#x/%#x sof=%#x\n",
+		 mutex->id, (unsigned long long)ktime_get_ns(), cfg, mod0, mod1,
+		 sof);
+	mutex->handoff_cfg = cfg;
+	mutex->handoff_mod0 = mod0;
+	mutex->handoff_mod1 = mod1;
+	mutex->handoff_sof = sof;
+	mutex->handoff_disabled = true;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_disable_sync);
+
+int mtk_mutex_validate_disabled(struct mtk_mutex *mutex)
+{
+	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+						 mutex[mutex->id]);
+	u32 mod1 = 0;
+
+	if (mtx->data->mutex_mod1_reg)
+		mod1 = readl(mtx->regs +
+			     DISP_REG_MUTEX_MOD(mtx, 32, mutex->id));
+	if (!mutex->handoff_disabled ||
+	    readl(mtx->regs + DISP_REG_MUTEX_EN(mutex->id)) ||
+	    readl(mtx->regs + DISP_REG_MUTEX_RST(mutex->id)) ||
+	    readl(mtx->regs + DISP_REG_MUTEX_CFG) != mutex->handoff_cfg ||
+	    readl(mtx->regs + DISP_REG_MUTEX_MOD(mtx, 0, mutex->id)) !=
+		    mutex->handoff_mod0 ||
+	    mod1 != mutex->handoff_mod1 ||
+	    readl(mtx->regs +
+		  DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, mutex->id)) !=
+		    mutex->handoff_sof)
+		return -EIO;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mtk_mutex_validate_disabled);
 
 int mtk_mutex_configure(struct mtk_mutex *mutex,
 			const enum mtk_ddp_comp_id *components,

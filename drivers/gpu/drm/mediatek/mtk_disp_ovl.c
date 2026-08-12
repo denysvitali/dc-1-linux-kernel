@@ -63,6 +63,10 @@
 #define OVL_FLOW_FSM_MASK			GENMASK(9, 0)
 #define OVL_FLOW_OUT_IDLE			BIT(15)
 #define OVL_FLOW_H_W_RST			0x100
+#define OVL_FLOW_TERMINAL_REQUIRED		(BIT(10) | BIT(11) | BIT(15) | \
+						 GENMASK(19, 16))
+#define OVL_FLOW_TERMINAL_FORBIDDEN		(BIT(12) | BIT(20) | BIT(21) | \
+						 GENMASK(31, 27))
 #define OVL_RDMA_DBG_SMI_BUSY			BIT(30)
 #define OVL_RDMA_DBG_SMI_GREQ			BIT(31)
 #define OVL_RDMA_DBG_LAYER_GREQ			BIT(3)
@@ -201,7 +205,11 @@ struct mtk_disp_ovl {
 	atomic_t			handoff_irq_status;
 	wait_queue_head_t		fme_wait_queue;
 	bool				irq_enabled;
+	bool				handoff_terminal_proven;
 };
+
+static void mtk_ovl_handoff_log_state(struct mtk_disp_ovl *ovl,
+				      const char *stage);
 
 static bool mtk_ovl_flow_operational(u32 flow)
 {
@@ -430,6 +438,93 @@ static u32 mtk_ovl_handoff_stopped_busy(struct mtk_disp_ovl *ovl)
 		busy |= BIT(31);
 
 	return busy;
+}
+
+static u32 mtk_ovl_handoff_terminal_busy(struct mtk_disp_ovl *ovl)
+{
+	u32 flow = readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG);
+	u32 fsm = flow & OVL_FLOW_FSM_MASK;
+	u32 busy = mtk_ovl_handoff_layer_busy(ovl);
+
+	if (fsm != 0x1 && fsm != 0x2)
+		busy |= BIT(31);
+	if ((flow & OVL_FLOW_TERMINAL_REQUIRED) !=
+	    OVL_FLOW_TERMINAL_REQUIRED)
+		busy |= BIT(30);
+	if (flow & OVL_FLOW_TERMINAL_FORBIDDEN)
+		busy |= BIT(29);
+	if (readl(ovl->regs + DISP_REG_OVL_RST) & 1)
+		busy |= BIT(28);
+
+	return busy;
+}
+
+int mtk_ovl_handoff_wait_terminal(struct device *dev)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	u64 deadline = ktime_get_ns() + 100 * NSEC_PER_MSEC;
+	u64 stable_since = 0;
+	u32 busy, inten, intsta, irq_status;
+
+	ovl->handoff_terminal_proven = false;
+	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
+	inten = readl(ovl->regs + DISP_REG_OVL_INTEN);
+	if (ovl->irq_enabled)
+		synchronize_irq(ovl->irq);
+	irq_status = atomic_xchg(&ovl->handoff_irq_status, 0);
+	intsta = readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	if (inten || ((irq_status | intsta) & OVL_HANDOFF_ABNORMAL_INT))
+		goto fail;
+
+	for (;;) {
+		u64 now = ktime_get_ns();
+
+		busy = mtk_ovl_handoff_terminal_busy(ovl);
+		intsta = readl(ovl->regs + DISP_REG_OVL_INTSTA);
+		if (intsta & OVL_HANDOFF_ABNORMAL_INT)
+			goto fail;
+		if (busy) {
+			stable_since = 0;
+		} else if (!stable_since) {
+			stable_since = now;
+			mtk_ovl_handoff_log_state(ovl,
+						  "terminal-proof-start");
+		} else if (now - stable_since >= 20 * NSEC_PER_MSEC) {
+			mtk_ovl_handoff_log_state(ovl,
+						  "terminal-proof-complete");
+			ovl->handoff_terminal_proven = true;
+			return 0;
+		}
+		if (now >= deadline)
+			break;
+		usleep_range(100, 200);
+	}
+
+fail:
+	dev_err(dev,
+		"OVL terminal proof failed: inten=%#x intsta=%#x status=%#x busy=%#x flow=%#x rst=%#x\n",
+		inten, intsta, irq_status, mtk_ovl_handoff_terminal_busy(ovl),
+		readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG),
+		readl(ovl->regs + DISP_REG_OVL_RST));
+	return -EBUSY;
+}
+
+int mtk_ovl_handoff_validate_terminal(struct device *dev)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	u32 intsta = readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	u32 busy = mtk_ovl_handoff_terminal_busy(ovl);
+
+	if (!ovl->handoff_terminal_proven || busy ||
+	    (intsta & OVL_HANDOFF_ABNORMAL_INT)) {
+		dev_err(dev,
+			"OVL terminal revalidation failed: proven=%u busy=%#x intsta=%#x flow=%#x\n",
+			ovl->handoff_terminal_proven, busy, intsta,
+			readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG));
+		return -EBUSY;
+	}
+
+	return 0;
 }
 
 static int mtk_ovl_handoff_wait_stopped_stable(struct mtk_disp_ovl *ovl)

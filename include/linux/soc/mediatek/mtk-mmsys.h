@@ -93,6 +93,8 @@ void mtk_mmsys_ddp_disconnect(struct device *dev,
 			      enum mtk_ddp_comp_id next);
 
 void mtk_mmsys_ddp_handoff_dump(struct device *dev, const char *stage);
+int mtk_mmsys_ddp_handoff_wait_idle(struct device *dev);
+int mtk_mmsys_ddp_handoff_validate_idle(struct device *dev);
 int mtk_mmsys_ddp_handoff_validate(struct device *dev);
 
 void mtk_mmsys_ddp_dpi_fmt_config(struct device *dev, u32 val);

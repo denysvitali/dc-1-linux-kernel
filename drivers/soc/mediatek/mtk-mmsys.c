@@ -168,6 +168,8 @@ struct mtk_mmsys {
 	spinlock_t lock; /* protects mmsys_sw_rst_b reg */
 	struct reset_controller_dev rcdev;
 	struct cmdq_client_reg cmdq_base;
+	u32 handoff_idle_route[7];
+	bool handoff_idle_proven;
 };
 
 static void mtk_mmsys_update_bits(struct mtk_mmsys *mmsys, u32 offset, u32 mask, u32 val,
@@ -250,6 +252,92 @@ void mtk_mmsys_ddp_handoff_dump(struct device *dev, const char *stage)
 		readl(mmsys->regs + MT6789_DISP_DSI0_SEL_IN));
 }
 EXPORT_SYMBOL_GPL(mtk_mmsys_ddp_handoff_dump);
+
+int mtk_mmsys_ddp_handoff_wait_idle(struct device *dev)
+{
+	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
+	u64 deadline = ktime_get_ns() + 100 * NSEC_PER_MSEC;
+	u64 stable_since = 0;
+	u32 route[7];
+	u32 valid0, valid1, greq0, greq1;
+
+	if (mmsys->data != &mt6789_mmsys_driver_data)
+		return -EOPNOTSUPP;
+	mmsys->handoff_idle_proven = false;
+	route[0] = readl(mmsys->regs + MT6789_MMSYS_OVL_CON);
+	route[1] = readl(mmsys->regs + MT6789_DISP_OVL0_MOUT);
+	route[2] = readl(mmsys->regs + MT6789_DISP_RDMA0_SEL_IN);
+	route[3] = readl(mmsys->regs + MT6789_DISP_RDMA0_RSZ0_SOUT);
+	route[4] = readl(mmsys->regs + MT6789_DISP_DITHER0_MOUT);
+	route[5] = readl(mmsys->regs + MT6789_DISP_DSC0_MOUT);
+	route[6] = readl(mmsys->regs + MT6789_DISP_DSI0_SEL_IN);
+
+	for (;;) {
+		u64 now = ktime_get_ns();
+
+		valid0 = readl(mmsys->regs + MT6789_MMSYS_DL_VALID0);
+		valid1 = readl(mmsys->regs + MT6789_MMSYS_DL_VALID1);
+		greq0 = readl(mmsys->regs + MT6789_MMSYS_SMI_LARB0_GREQ);
+		greq1 = readl(mmsys->regs + MT6789_MMSYS_SMI_LARB1_GREQ);
+		if (valid0 || valid1 || greq0 || greq1 ||
+		    readl(mmsys->regs + MT6789_MMSYS_OVL_CON) != route[0] ||
+		    readl(mmsys->regs + MT6789_DISP_OVL0_MOUT) != route[1] ||
+		    readl(mmsys->regs + MT6789_DISP_RDMA0_SEL_IN) != route[2] ||
+		    readl(mmsys->regs + MT6789_DISP_RDMA0_RSZ0_SOUT) != route[3] ||
+		    readl(mmsys->regs + MT6789_DISP_DITHER0_MOUT) != route[4] ||
+		    readl(mmsys->regs + MT6789_DISP_DSC0_MOUT) != route[5] ||
+		    readl(mmsys->regs + MT6789_DISP_DSI0_SEL_IN) != route[6]) {
+			stable_since = 0;
+		} else if (!stable_since) {
+			stable_since = now;
+			dev_info(dev, "MMSYS idle proof start: t=%llu\n",
+				 (unsigned long long)now);
+		} else if (now - stable_since >= 20 * NSEC_PER_MSEC) {
+			dev_info(dev, "MMSYS idle proof complete: t=%llu\n",
+				 (unsigned long long)now);
+			memcpy(mmsys->handoff_idle_route, route,
+			       sizeof(mmsys->handoff_idle_route));
+			mmsys->handoff_idle_proven = true;
+			return 0;
+		}
+		if (now >= deadline)
+			break;
+		usleep_range(100, 200);
+	}
+
+	mtk_mmsys_ddp_handoff_dump(dev, "idle-proof-failed");
+	return -EBUSY;
+}
+EXPORT_SYMBOL_GPL(mtk_mmsys_ddp_handoff_wait_idle);
+
+int mtk_mmsys_ddp_handoff_validate_idle(struct device *dev)
+{
+	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
+	u32 route[7];
+	u32 valid0, valid1, greq0, greq1;
+
+	if (mmsys->data != &mt6789_mmsys_driver_data)
+		return -EOPNOTSUPP;
+	valid0 = readl(mmsys->regs + MT6789_MMSYS_DL_VALID0);
+	valid1 = readl(mmsys->regs + MT6789_MMSYS_DL_VALID1);
+	greq0 = readl(mmsys->regs + MT6789_MMSYS_SMI_LARB0_GREQ);
+	greq1 = readl(mmsys->regs + MT6789_MMSYS_SMI_LARB1_GREQ);
+	route[0] = readl(mmsys->regs + MT6789_MMSYS_OVL_CON);
+	route[1] = readl(mmsys->regs + MT6789_DISP_OVL0_MOUT);
+	route[2] = readl(mmsys->regs + MT6789_DISP_RDMA0_SEL_IN);
+	route[3] = readl(mmsys->regs + MT6789_DISP_RDMA0_RSZ0_SOUT);
+	route[4] = readl(mmsys->regs + MT6789_DISP_DITHER0_MOUT);
+	route[5] = readl(mmsys->regs + MT6789_DISP_DSC0_MOUT);
+	route[6] = readl(mmsys->regs + MT6789_DISP_DSI0_SEL_IN);
+	if (!mmsys->handoff_idle_proven || valid0 || valid1 || greq0 || greq1 ||
+	    memcmp(mmsys->handoff_idle_route, route, sizeof(route))) {
+		mtk_mmsys_ddp_handoff_dump(dev, "idle-revalidation-failed");
+		return -EBUSY;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mtk_mmsys_ddp_handoff_validate_idle);
 
 int mtk_mmsys_ddp_handoff_validate(struct device *dev)
 {

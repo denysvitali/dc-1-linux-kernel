@@ -411,16 +411,51 @@ static int mtk_crtc_handoff_stop_pipeline(struct mtk_crtc *mtk_crtc,
 	ret = mtk_dsi_handoff_quiesce(dsi->dev);
 	if (ret)
 		goto cancel_irqs;
-	/* The clean sink EOF is now latched; block any later configuration SOF. */
+	/* The sink EOF is now latched; block any later configuration SOF. */
 	ret = mtk_mutex_disable_sync(mtk_crtc->mutex);
 	if (ret)
 		goto cancel_irqs;
-	ret = mtk_ovl_handoff_frame_wait(ovl->dev, fme_seq);
-	if (ret)
-		goto cancel_irqs;
-	ret = mtk_rdma_handoff_frame_wait(rdma->dev, rdma_frame_seq);
-	if (ret)
-		goto cancel_irqs;
+	if (mtk_dsi_handoff_source_starved(dsi->dev)) {
+		mtk_ovl_handoff_frame_cancel(ovl->dev);
+		mtk_rdma_handoff_frame_cancel(rdma->dev);
+		ovl_touched = false;
+		rdma_touched = false;
+		ret = mtk_ovl_handoff_wait_terminal(ovl->dev);
+		if (ret)
+			goto cancel_irqs;
+		ret = mtk_rdma_handoff_wait_idle(rdma->dev);
+		if (ret)
+			goto cancel_irqs;
+		ret = mtk_mmsys_ddp_handoff_wait_idle(mtk_crtc->mmsys_dev);
+		if (ret)
+			goto cancel_irqs;
+		ret = mtk_ovl_handoff_validate_terminal(ovl->dev);
+		if (ret)
+			goto cancel_irqs;
+		ret = mtk_rdma_handoff_validate_idle(rdma->dev);
+		if (ret)
+			goto cancel_irqs;
+		ret = mtk_mmsys_ddp_handoff_validate_idle(mtk_crtc->mmsys_dev);
+		if (ret)
+			goto cancel_irqs;
+		ret = mtk_mutex_validate_disabled(mtk_crtc->mutex);
+		if (ret)
+			goto cancel_irqs;
+		ret = mtk_dsi_handoff_validate_quiesced(dsi->dev);
+		if (ret)
+			goto cancel_irqs;
+		drm_info(drm,
+			 "MT6789 reset authorized by source-starved terminal-idle proof\n");
+	} else {
+		ret = mtk_ovl_handoff_frame_wait(ovl->dev, fme_seq);
+		if (ret)
+			goto cancel_irqs;
+		ret = mtk_rdma_handoff_frame_wait(rdma->dev, rdma_frame_seq);
+		if (ret)
+			goto cancel_irqs;
+		ovl_touched = false;
+		rdma_touched = false;
+	}
 	ret = mtk_ovl_handoff_stop(ovl->dev);
 	if (ret)
 		goto cancel_irqs;
@@ -429,8 +464,9 @@ static int mtk_crtc_handoff_stop_pipeline(struct mtk_crtc *mtk_crtc,
 		goto cancel_irqs;
 
 	drm_info(drm,
-		 "MT6789 pipeline stopped at clean frame: ovl_seq=%u rdma_seq=%u\n",
-		 fme_seq, rdma_frame_seq);
+		 "MT6789 pipeline stopped at proven boundary: ovl_seq=%u rdma_seq=%u starved=%u\n",
+		 fme_seq, rdma_frame_seq,
+		 mtk_dsi_handoff_source_starved(dsi->dev));
 	return 0;
 
 cancel_irqs:

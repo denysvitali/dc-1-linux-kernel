@@ -267,6 +267,7 @@ struct mtk_dsi {
 	struct mutex handoff_lock;
 	bool stop_on_frame;
 	bool irq_enabled;
+	bool handoff_source_starved;
 	u32 handoff_stop_irq_status;
 	u64 handoff_stop_irq_time_ns;
 	enum mtk_dsi_handoff_phase handoff_phase;
@@ -941,6 +942,7 @@ static int mtk_dsi_wait_for_fresh_frame(struct mtk_dsi *dsi)
 		      ~(FRAME_DONE_INT_FLAG | HANDOFF_SOURCE_STARVATION)))
 		return -EIO;
 
+	WRITE_ONCE(dsi->handoff_source_starved, false);
 	WRITE_ONCE(dsi->handoff_stop_irq_status, 0);
 	WRITE_ONCE(dsi->handoff_stop_irq_time_ns, 0);
 	WRITE_ONCE(dsi->stop_on_frame, true);
@@ -989,14 +991,45 @@ static int mtk_dsi_wait_for_fresh_frame(struct mtk_dsi *dsi)
 			readl(dsi->regs + DSI_MODE_CTRL),
 			(unsigned long long)clear_time,
 			(unsigned long long)stop_irq_time, ret);
-	} else if ((pre_clear | intsta | irq_data) &
+	} else if ((intsta | irq_data | stop_irq_status) &
 		   HANDOFF_SOURCE_STARVATION) {
+		WRITE_ONCE(dsi->handoff_source_starved, true);
 		dev_warn(dsi->dev,
 			 "handoff source starvation during inherited frame boundary: pre=%#x post-clear=%#x status=%#x irq-raw=%#x clear-t=%llu irq-t=%llu\n",
 			 pre_clear, intsta, irq_data, stop_irq_status,
 			 (unsigned long long)clear_time,
 			 (unsigned long long)stop_irq_time);
 	}
+
+	return ret;
+}
+
+bool mtk_dsi_handoff_source_starved(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	return READ_ONCE(dsi->handoff_source_starved);
+}
+
+int mtk_dsi_handoff_validate_quiesced(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	u32 inten, intsta, mode, start;
+	int ret = 0;
+
+	mutex_lock(&dsi->handoff_lock);
+	inten = readl(dsi->regs + DSI_INTEN);
+	intsta = readl(dsi->regs + DSI_INTSTA);
+	mode = readl(dsi->regs + DSI_MODE_CTRL);
+	start = readl(dsi->regs + DSI_START);
+	if (dsi->handoff_phase != MTK_DSI_HANDOFF_QUIESCED || inten || start ||
+	    (mode & MODE) || (intsta & DSI_BUSY)) {
+		dev_err(dev,
+			"DSI quiesced revalidation failed: phase=%u inten=%#x intsta=%#x start=%#x mode=%#x\n",
+			dsi->handoff_phase, inten, intsta, start, mode);
+		ret = -EBUSY;
+	}
+	mutex_unlock(&dsi->handoff_lock);
 
 	return ret;
 }
