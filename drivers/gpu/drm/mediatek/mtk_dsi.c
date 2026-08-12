@@ -49,6 +49,8 @@
 #define SKEWCAL_DONE_INT_FLAG		BIT(11)
 #define BUFFER_UNDERRUN_INT_FLAG	BIT(12)
 #define INP_UNFINISH_INT_FLAG		BIT(14)
+#define HANDOFF_SOURCE_STARVATION	(BUFFER_UNDERRUN_INT_FLAG | \
+					 INP_UNFINISH_INT_FLAG)
 #define SLEEPIN_ULPS_DONE_INT_FLAG	BIT(15)
 #define MT6789_DSI_INT_STATUS_MASK	(LPRX_RD_RDY_INT_FLAG | \
 					 CMD_DONE_INT_FLAG | TE_RDY_INT_FLAG | \
@@ -265,6 +267,8 @@ struct mtk_dsi {
 	struct mutex handoff_lock;
 	bool stop_on_frame;
 	bool irq_enabled;
+	u32 handoff_stop_irq_status;
+	u64 handoff_stop_irq_time_ns;
 	enum mtk_dsi_handoff_phase handoff_phase;
 	const struct mtk_dsi_driver_data *driver_data;
 };
@@ -830,14 +834,15 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 	if (pending) {
 		/* Stop in hard IRQ context so CPU scheduling cannot miss the EOF gap. */
 		if ((pending & FRAME_DONE_INT_FLAG) &&
-		    !(pending & (BUFFER_UNDERRUN_INT_FLAG |
-				  INP_UNFINISH_INT_FLAG)) &&
 		    READ_ONCE(dsi->stop_on_frame)) {
+			WRITE_ONCE(dsi->handoff_stop_irq_status, status);
 			writel(0, dsi->regs + DSI_INTEN);
 			readl(dsi->regs + DSI_INTEN);
 			writel(CMD_MODE, dsi->regs + DSI_MODE_CTRL);
 			writel(0, dsi->regs + DSI_START);
 			readl(dsi->regs + DSI_START);
+			WRITE_ONCE(dsi->handoff_stop_irq_time_ns,
+				   ktime_get_ns());
 			WRITE_ONCE(dsi->stop_on_frame, false);
 		}
 
@@ -913,8 +918,9 @@ static void mtk_dsi_handoff_dump(struct mtk_dsi *dsi, const char *stage)
 
 static int mtk_dsi_wait_for_fresh_frame(struct mtk_dsi *dsi)
 {
-	u32 intsta;
-	u32 irq_data;
+	u64 clear_time, stop_irq_time;
+	u32 inten, intsta, pre_clear;
+	u32 irq_data, stop_irq_status;
 	long waited;
 	int ret;
 
@@ -926,12 +932,17 @@ static int mtk_dsi_wait_for_fresh_frame(struct mtk_dsi *dsi)
 	if (dsi->irq_enabled)
 		synchronize_irq(dsi->irq);
 	atomic_set(&dsi->irq_data, 0);
+	pre_clear = readl(dsi->regs + DSI_INTSTA);
 	/* DSI_INTSTA is write-zero-to-clear. */
 	writel(0, dsi->regs + DSI_INTSTA);
 	intsta = readl(dsi->regs + DSI_INTSTA);
-	if (intsta & (MT6789_DSI_INT_STATUS_MASK & ~FRAME_DONE_INT_FLAG))
+	clear_time = ktime_get_ns();
+	if (intsta & (MT6789_DSI_INT_STATUS_MASK &
+		      ~(FRAME_DONE_INT_FLAG | HANDOFF_SOURCE_STARVATION)))
 		return -EIO;
 
+	WRITE_ONCE(dsi->handoff_stop_irq_status, 0);
+	WRITE_ONCE(dsi->handoff_stop_irq_time_ns, 0);
 	WRITE_ONCE(dsi->stop_on_frame, true);
 	writel(FRAME_DONE_INT_FLAG, dsi->regs + DSI_INTEN);
 	if (readl(dsi->regs + DSI_INTEN) != FRAME_DONE_INT_FLAG) {
@@ -946,20 +957,46 @@ static int mtk_dsi_wait_for_fresh_frame(struct mtk_dsi *dsi)
 	waited = wait_event_timeout(dsi->irq_wait_queue,
 				    !READ_ONCE(dsi->stop_on_frame),
 				    msecs_to_jiffies(100));
-	irq_data = atomic_read(&dsi->irq_data);
 	ret = waited ? 0 : -ETIMEDOUT;
 	writel(0, dsi->regs + DSI_INTEN);
-	readl(dsi->regs + DSI_INTEN);
-	synchronize_irq(dsi->irq);
+	inten = readl(dsi->regs + DSI_INTEN);
+	if (inten && dsi->irq_enabled) {
+		disable_irq(dsi->irq);
+		dsi->irq_enabled = false;
+	} else if (dsi->irq_enabled) {
+		synchronize_irq(dsi->irq);
+	}
+	irq_data = atomic_xchg(&dsi->irq_data, 0);
+	stop_irq_status = READ_ONCE(dsi->handoff_stop_irq_status);
+	stop_irq_time = READ_ONCE(dsi->handoff_stop_irq_time_ns);
 	WRITE_ONCE(dsi->stop_on_frame, false);
+	if (!ret && inten)
+		ret = -EIO;
+	if (!ret && !(irq_data & FRAME_DONE_INT_FLAG))
+		ret = -EIO;
+	if (!ret && (readl(dsi->regs + DSI_START) ||
+		     (readl(dsi->regs + DSI_MODE_CTRL) & MODE)))
+		ret = -EIO;
 	if (ret && dsi->driver_data->defer_irq_enable && dsi->irq_enabled) {
 		disable_irq(dsi->irq);
 		dsi->irq_enabled = false;
 	}
-	if (ret)
+	if (ret) {
 		dev_err(dsi->dev,
-			"handoff clean frame boundary timeout: status=%#x\n",
-			irq_data);
+			"handoff frame boundary failed: pre=%#x post-clear=%#x status=%#x irq-raw=%#x inten=%#x start=%#x mode=%#x clear-t=%llu irq-t=%llu ret=%d\n",
+			pre_clear, intsta, irq_data, stop_irq_status, inten,
+			readl(dsi->regs + DSI_START),
+			readl(dsi->regs + DSI_MODE_CTRL),
+			(unsigned long long)clear_time,
+			(unsigned long long)stop_irq_time, ret);
+	} else if ((pre_clear | intsta | irq_data) &
+		   HANDOFF_SOURCE_STARVATION) {
+		dev_warn(dsi->dev,
+			 "handoff source starvation during inherited frame boundary: pre=%#x post-clear=%#x status=%#x irq-raw=%#x clear-t=%llu irq-t=%llu\n",
+			 pre_clear, intsta, irq_data, stop_irq_status,
+			 (unsigned long long)clear_time,
+			 (unsigned long long)stop_irq_time);
+	}
 
 	return ret;
 }
