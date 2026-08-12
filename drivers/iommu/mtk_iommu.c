@@ -391,7 +391,6 @@ static LIST_HEAD(m4ulist);	/* List all the M4U HWs */
 
 #define MT6789_OVL_FLOW_FSM_MASK	GENMASK(9, 0)
 #define MT6789_OVL_FLOW_H_W_RST		0x100
-#define MT6789_OVL_RDMA_DBG_BAD		(BIT(31) | BIT(30) | BIT(3))
 #define MT6789_OVL_RDMA_DBG_WARM_RST	GENMASK(2, 0)
 #define MT6789_OVL_RDMA_DBG_IDLE	1
 #define MT6789_OVL_PITCH_MSB_2ND_SUBBUF	BIT(16)
@@ -1419,6 +1418,7 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	u32 rdma_dbg_after;
 	u32 size, src, src_after;
 	unsigned int height, layer, width;
+	const char *reason = "ok";
 	int ret;
 
 	*res = (struct resource) {};
@@ -1443,6 +1443,7 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	if (!(en & BIT(0)) || hweight32(src) != 1 || !fsm ||
 	    fsm == MT6789_OVL_FLOW_H_W_RST || fsm > BIT(5) ||
 	    (fsm & (fsm - 1))) {
+		reason = "engine-flow";
 		ret = -EBUSY;
 		goto out_log_basic;
 	}
@@ -1454,12 +1455,10 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	size = readl(regs + MT6789_OVL_SRC_SIZE(layer));
 	pitch_msb = readl(regs + MT6789_OVL_PITCH_MSB(layer));
 	pitch_lo = readl(regs + MT6789_OVL_PITCH(layer));
-	ret = readl_poll_timeout(regs + MT6789_OVL_RDMA_DBG(layer), rdma_dbg,
-				 !(rdma_dbg & MT6789_OVL_RDMA_DBG_BAD) &&
-				 FIELD_GET(MT6789_OVL_RDMA_DBG_WARM_RST,
-					   rdma_dbg) == MT6789_OVL_RDMA_DBG_IDLE,
-				 10, 2000);
-	if (ret) {
+	rdma_dbg = readl(regs + MT6789_OVL_RDMA_DBG(layer));
+	if (FIELD_GET(MT6789_OVL_RDMA_DBG_WARM_RST, rdma_dbg) !=
+	    MT6789_OVL_RDMA_DBG_IDLE) {
+		reason = "rdma-warm-reset";
 		ret = -EBUSY;
 		goto out_log;
 	}
@@ -1476,6 +1475,7 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	    pitch != MT6789_JAGAR_FB_PITCH || con != MT6789_JAGAR_OVL_CON ||
 	    (addr != MT6789_JAGAR_FB_BASE &&
 	     addr != MT6789_JAGAR_FB_BASE + MT6789_JAGAR_FB_SLOT_SIZE)) {
+		reason = "layer-geometry";
 		ret = -EBUSY;
 		goto out_log;
 	}
@@ -1483,12 +1483,14 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	fetch_size = (u64)pitch * height;
 	slot_size = MT6789_JAGAR_FB_SLOT_SIZE;
 	if (slot_size < fetch_size || slot_size - fetch_size > SZ_1M) {
+		reason = "slot-footprint";
 		ret = -ERANGE;
 		goto out_log;
 	}
 	end = MT6789_JAGAR_FB_BASE + 2 * (u64)slot_size - 1;
 	if (end >= MTK_IOMMU_IOVA_SZ_4G ||
 	    end > MT6789_JAGAR_FB_BASE + MT6789_JAGAR_VRAM_SIZE - 1) {
+		reason = "aperture";
 		ret = -ERANGE;
 		goto out_log;
 	}
@@ -1498,14 +1500,10 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	datapath_after = readl(regs + MT6789_OVL_DATAPATH_CON);
 	src_after = readl(regs + MT6789_OVL_SRC_CON) & GENMASK(3, 0);
 	rdma_after = readl(regs + MT6789_OVL_RDMA_CTRL(layer));
-	ret = readl_poll_timeout(regs + MT6789_OVL_RDMA_DBG(layer),
-				 rdma_dbg_after,
-				 !(rdma_dbg_after & MT6789_OVL_RDMA_DBG_BAD) &&
-				 FIELD_GET(MT6789_OVL_RDMA_DBG_WARM_RST,
-					   rdma_dbg_after) ==
-					MT6789_OVL_RDMA_DBG_IDLE,
-				 10, 2000);
-	if (ret) {
+	rdma_dbg_after = readl(regs + MT6789_OVL_RDMA_DBG(layer));
+	if (FIELD_GET(MT6789_OVL_RDMA_DBG_WARM_RST, rdma_dbg_after) !=
+	    MT6789_OVL_RDMA_DBG_IDLE) {
+		reason = "rdma-warm-reset-after";
 		ret = -EBUSY;
 		goto out_log;
 	}
@@ -1521,6 +1519,7 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	    readl(regs + MT6789_OVL_PITCH(layer)) != pitch_lo ||
 	    !fsm_after || fsm_after == MT6789_OVL_FLOW_H_W_RST ||
 	    fsm_after > BIT(5) || (fsm_after & (fsm_after - 1))) {
+		reason = "unstable-snapshot";
 		ret = -EAGAIN;
 		goto out_log;
 	}
@@ -1529,21 +1528,26 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	res->end = end;
 	res->flags = IORESOURCE_MEM;
 	if (!IS_ALIGNED(resource_size(res), SZ_4K)) {
+		reason = "range-alignment";
 		ret = -EINVAL;
 		goto out_log;
 	}
 
 	node = of_find_compatible_node(NULL, NULL, "mediatek,framebuffer");
 	if (!node) {
+		reason = "reserved-node";
 		ret = -ENODEV;
 		goto out_log;
 	}
 	ret = of_address_to_resource(node, 0, &reserved);
 	of_node_put(node);
-	if (ret)
+	if (ret) {
+		reason = "reserved-reg";
 		goto out_log;
+	}
 	if (reserved.start != MT6789_JAGAR_FB_BASE ||
 	    res->end > reserved.end) {
+		reason = "reserved-containment";
 		ret = -ERANGE;
 		goto out_log;
 	}
@@ -1551,16 +1555,16 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	ret = 0;
 out_log:
 	dev_info(dev,
-		 "LK OVL/IOMMU continuity: en=%#x src=%#x layer=%u flow=%#x rdma=%#x dbg=%#x con=%#x addr=%#x size=%#x pitch=%#x/%#x map=%pr ret=%d\n",
+		 "LK OVL/IOMMU continuity: en=%#x src=%#x layer=%u flow=%#x rdma=%#x dbg=%#x con=%#x addr=%#x size=%#x pitch=%#x/%#x map=%pr reason=%s ret=%d\n",
 		 en, src, layer, flow, rdma, rdma_dbg, con, addr, size,
-		 pitch_msb, pitch_lo, res, ret);
+		 pitch_msb, pitch_lo, res, reason, ret);
 	iounmap(regs);
 	return ret;
 
 out_log_basic:
 	dev_info(dev,
-		 "LK OVL/IOMMU continuity rejected: en=%#x src=%#x flow=%#x ret=%d\n",
-		 en, src, flow, ret);
+		 "LK OVL/IOMMU continuity rejected: en=%#x src=%#x flow=%#x reason=%s ret=%d\n",
+		 en, src, flow, reason, ret);
 	iounmap(regs);
 	return ret;
 }
