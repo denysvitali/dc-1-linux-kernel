@@ -28,6 +28,7 @@
 #define RDMA_FRAME_END_INT				BIT(2)
 #define RDMA_FRAME_START_INT				BIT(1)
 #define RDMA_REG_UPDATE_INT				BIT(0)
+#define RDMA_INT_STATUS_MASK				GENMASK(5, 0)
 #define DISP_REG_RDMA_GLOBAL_CON		0x0010
 #define RDMA_ENGINE_EN					BIT(0)
 #define RDMA_MODE_MEMORY				BIT(1)
@@ -93,10 +94,13 @@ struct mtk_disp_rdma_data {
  * @data: local driver data
  */
 struct mtk_disp_rdma {
+	struct device			*dev;
 	struct clk			*clk;
 	void __iomem			*regs;
 	struct cmdq_client_reg		cmdq_reg;
 	const struct mtk_disp_rdma_data	*data;
+	int				irq;
+	bool				irq_enabled;
 	void				(*vblank_cb)(void *data);
 	void				*vblank_cb_data;
 	u32				fifo_size;
@@ -105,14 +109,23 @@ struct mtk_disp_rdma {
 static irqreturn_t mtk_disp_rdma_irq_handler(int irq, void *dev_id)
 {
 	struct mtk_disp_rdma *priv = dev_id;
+	u32 pending;
 
-	/* Clear frame completion interrupt */
-	writel(0x0, priv->regs + DISP_REG_RDMA_INT_STATUS);
-
-	if (!priv->vblank_cb)
+	pending = readl(priv->regs + DISP_REG_RDMA_INT_STATUS) &
+		  RDMA_INT_STATUS_MASK;
+	if (!pending)
 		return IRQ_NONE;
 
-	priv->vblank_cb(priv->vblank_cb_data);
+	/* RDMA_INT_STATUS is write-zero-to-clear. Preserve unrelated bits. */
+	writel(~pending, priv->regs + DISP_REG_RDMA_INT_STATUS);
+
+	if (pending & (RDMA_FIFO_UNDERFLOW_INT | RDMA_EOF_ABNORMAL_INT))
+		dev_err_ratelimited(priv->dev,
+				    "RDMA abnormal interrupt: status=%#x\n",
+				    pending);
+
+	if ((pending & RDMA_FRAME_END_INT) && priv->vblank_cb)
+		priv->vblank_cb(priv->vblank_cb_data);
 
 	return IRQ_HANDLED;
 }
@@ -181,6 +194,14 @@ void mtk_rdma_clk_disable(struct device *dev)
 {
 	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
 
+	if (rdma->data->checked_handoff && rdma->irq_enabled) {
+		writel(0, rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+		readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+		disable_irq(rdma->irq);
+		rdma->irq_enabled = false;
+		writel(0, rdma->regs + DISP_REG_RDMA_INT_STATUS);
+		readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+	}
 	clk_disable_unprepare(rdma->clk);
 }
 
@@ -205,6 +226,13 @@ int mtk_rdma_handoff_stop(struct device *dev)
 		return -EOPNOTSUPP;
 
 	writel(0, rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	val = readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	if (val) {
+		ret = -EIO;
+		goto fail;
+	}
+	if (rdma->irq_enabled)
+		synchronize_irq(rdma->irq);
 	rdma_update_bits(dev, DISP_REG_RDMA_GLOBAL_CON, RDMA_ENGINE_EN, 0);
 	ret = readl_poll_timeout(rdma->regs + DISP_REG_RDMA_GLOBAL_CON, val,
 				 !(val & (RDMA_ENGINE_EN | RDMA_SMI_BUSY)),
@@ -225,11 +253,24 @@ int mtk_rdma_handoff_stop(struct device *dev)
 				 RDMA_RESET_STATE_IDLE, 1, 1000);
 	if (!ret) {
 		writel(0, rdma->regs + DISP_REG_RDMA_INT_STATUS);
-		readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+		val = readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+		if (val & RDMA_INT_STATUS_MASK) {
+			ret = -EIO;
+			goto fail;
+		}
+		if (!rdma->irq_enabled) {
+			enable_irq(rdma->irq);
+			rdma->irq_enabled = true;
+		}
 		return 0;
 	}
 
 fail:
+	/* Never quarantine with a level IRQ whose hardware mask is unproven. */
+	if (rdma->irq_enabled) {
+		disable_irq(rdma->irq);
+		rdma->irq_enabled = false;
+	}
 	dev_err(dev,
 		"RDMA checked stop failed: %d global=%#x inten=%#x intsta=%#x\n",
 		ret, readl(rdma->regs + DISP_REG_RDMA_GLOBAL_CON),
@@ -395,16 +436,19 @@ static int mtk_disp_rdma_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct mtk_disp_rdma *priv;
+	unsigned long irq_flags = IRQF_TRIGGER_NONE;
 	int irq;
 	int ret;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
+	priv->dev = dev;
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
+	priv->irq = irq;
 
 	priv->clk = devm_clk_get(dev, NULL);
 	if (IS_ERR(priv->clk))
@@ -427,18 +471,23 @@ static int mtk_disp_rdma_probe(struct platform_device *pdev)
 	if (ret && (ret != -EINVAL))
 		return dev_err_probe(dev, ret, "Failed to get rdma fifo size\n");
 
-	/* Disable and clear pending interrupts */
-	writel(0x0, priv->regs + DISP_REG_RDMA_INT_ENABLE);
-	writel(0x0, priv->regs + DISP_REG_RDMA_INT_STATUS);
+	priv->data = of_device_get_match_data(dev);
+	platform_set_drvdata(pdev, priv);
+
+	if (priv->data->checked_handoff) {
+		/* The inherited block is not clock-owned until component enable. */
+		irq_flags |= IRQF_NO_AUTOEN;
+	} else {
+		/* Disable and clear pending interrupts on cold-start platforms. */
+		writel(0, priv->regs + DISP_REG_RDMA_INT_ENABLE);
+		writel(0, priv->regs + DISP_REG_RDMA_INT_STATUS);
+	}
 
 	ret = devm_request_irq(dev, irq, mtk_disp_rdma_irq_handler,
-			       IRQF_TRIGGER_NONE, dev_name(dev), priv);
+			       irq_flags, dev_name(dev), priv);
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "Failed to request irq %d\n", irq);
-
-	priv->data = of_device_get_match_data(dev);
-
-	platform_set_drvdata(pdev, priv);
+	priv->irq_enabled = !priv->data->checked_handoff;
 
 	pm_runtime_enable(dev);
 
