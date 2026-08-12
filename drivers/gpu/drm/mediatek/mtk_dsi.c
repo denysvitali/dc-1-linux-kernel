@@ -8,6 +8,7 @@
 #include <linux/component.h>
 #include <linux/iopoll.h>
 #include <linux/irq.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/phy/phy.h>
@@ -41,8 +42,14 @@
 #define CMD_DONE_INT_FLAG		BIT(1)
 #define TE_RDY_INT_FLAG			BIT(2)
 #define VM_DONE_INT_FLAG		BIT(3)
-#define EXT_TE_RDY_INT_FLAG		BIT(4)
+/* MT6789 native DSI names bit 4 FRAME_DONE (not donor EXT_TE). */
+#define FRAME_DONE_INT_FLAG		BIT(4)
 #define DSI_BUSY			BIT(31)
+
+#define DSI_STATE_DBG6		0x160
+#define DSI_STATE_DBG7		0x164
+#define DSI_STATE_DBG8		0x168
+#define DSI_STATE_DBG9		0x16c
 
 #define DSI_CON_CTRL		0x10
 #define DSI_RESET			BIT(0)
@@ -184,6 +191,16 @@ struct mtk_phy_timing {
 	u32 clk_hs_exit;
 };
 
+enum mtk_dsi_handoff_phase {
+	MTK_DSI_HANDOFF_NONE,
+	MTK_DSI_HANDOFF_INHERITED,
+	MTK_DSI_HANDOFF_QUIESCED,
+	MTK_DSI_HANDOFF_ARMED,
+	MTK_DSI_HANDOFF_RUNNING,
+	MTK_DSI_HANDOFF_OFF,
+	MTK_DSI_HANDOFF_FAILED,
+};
+
 struct phy;
 
 struct mtk_dsi_driver_data {
@@ -212,6 +229,7 @@ struct mtk_dsi {
 	struct clk *engine_clk;
 	struct clk *digital_clk;
 	struct clk *hs_clk;
+	int irq;
 
 	u32 data_rate;
 	u32 hs_rate;
@@ -222,10 +240,15 @@ struct mtk_dsi {
 	struct videomode vm;
 	struct mtk_phy_timing phy_timing;
 	int refcount;
+	bool bridge_ref;
 	bool enabled;
 	bool lanes_ready;
-	u32 irq_data;
+	atomic_t irq_data;
 	wait_queue_head_t irq_wait_queue;
+	/* Serializes handoff state transitions and host transfers. */
+	struct mutex handoff_lock;
+	bool stop_on_frame;
+	enum mtk_dsi_handoff_phase handoff_phase;
 	const struct mtk_dsi_driver_data *driver_data;
 };
 
@@ -720,68 +743,96 @@ static void mtk_dsi_set_interrupt_enable(struct mtk_dsi *dsi)
 
 static void mtk_dsi_irq_data_set(struct mtk_dsi *dsi, u32 irq_bit)
 {
-	dsi->irq_data |= irq_bit;
+	atomic_or(irq_bit, &dsi->irq_data);
 }
 
 static void mtk_dsi_irq_data_clear(struct mtk_dsi *dsi, u32 irq_bit)
 {
-	dsi->irq_data &= ~irq_bit;
+	atomic_andnot(irq_bit, &dsi->irq_data);
 }
 
-static s32 mtk_dsi_wait_for_irq_done(struct mtk_dsi *dsi, u32 irq_flag,
+static int mtk_dsi_wait_for_irq_done(struct mtk_dsi *dsi, u32 irq_flag,
 				     unsigned int timeout)
 {
-	s32 ret = 0;
+	long ret;
 	unsigned long jiffies = msecs_to_jiffies(timeout);
 	struct drm_device *drm = dsi->bridge.dev;
 
-	ret = wait_event_interruptible_timeout(dsi->irq_wait_queue,
-					       dsi->irq_data & irq_flag,
-					       jiffies);
-	if (ret == 0) {
-		drm_warn(drm, "Wait DSI IRQ(0x%08x) Timeout\n", irq_flag);
-
-		mtk_dsi_enable(dsi);
-		mtk_dsi_reset_engine(dsi);
+	ret = wait_event_timeout(dsi->irq_wait_queue,
+				 atomic_read(&dsi->irq_data) & irq_flag,
+				 jiffies);
+	if (!ret) {
+		if (drm)
+			drm_warn(drm, "Wait DSI IRQ(0x%08x) timeout\n",
+				 irq_flag);
+		else
+			dev_warn(dsi->dev, "Wait DSI IRQ(0x%08x) timeout\n",
+				 irq_flag);
+		return -ETIMEDOUT;
 	}
 
-	return ret;
+	return 0;
 }
 
 static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 {
 	struct mtk_dsi *dsi = dev_id;
 	u32 status, tmp;
-	u32 flag = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG;
+	u32 flag = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG |
+		   VM_DONE_INT_FLAG;
+	int ret;
 
+	if (dsi->driver_data->needs_cmd_mode_init)
+		flag |= FRAME_DONE_INT_FLAG;
 	status = readl(dsi->regs + DSI_INTSTA) & flag;
 
 	if (status) {
-		do {
-			mtk_dsi_mask(dsi, DSI_RACK, RACK, RACK);
-			tmp = readl(dsi->regs + DSI_INTSTA);
-		} while (tmp & DSI_BUSY);
+		/* Stop in hard IRQ context so CPU scheduling cannot miss the EOF gap. */
+		if ((status & FRAME_DONE_INT_FLAG) &&
+		    READ_ONCE(dsi->stop_on_frame)) {
+			writel(CMD_MODE, dsi->regs + DSI_MODE_CTRL);
+			writel(0, dsi->regs + DSI_START);
+			readl(dsi->regs + DSI_START);
+			WRITE_ONCE(dsi->stop_on_frame, false);
+		}
 
-		mtk_dsi_mask(dsi, DSI_INTSTA, status, 0);
+		if (status & (LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG |
+			      VM_DONE_INT_FLAG)) {
+			mtk_dsi_mask(dsi, DSI_RACK, RACK, RACK);
+			ret = readl_poll_timeout_atomic(dsi->regs + DSI_INTSTA,
+							tmp, !(tmp & DSI_BUSY),
+							1, 1000);
+			if (ret)
+				dev_err_ratelimited(dsi->dev,
+						    "DSI IRQ busy timeout: status=%#x intsta=%#x\n",
+						    status, tmp);
+			if (ret) {
+				writel(~status, dsi->regs + DSI_INTSTA);
+				return IRQ_HANDLED;
+			}
+		}
+
+		/* DSI_INTSTA is write-zero-to-clear. Preserve unrelated bits. */
+		writel(~status, dsi->regs + DSI_INTSTA);
 		mtk_dsi_irq_data_set(dsi, status);
-		wake_up_interruptible(&dsi->irq_wait_queue);
+		wake_up(&dsi->irq_wait_queue);
 	}
 
 	return IRQ_HANDLED;
 }
 
-static s32 mtk_dsi_switch_to_cmd_mode(struct mtk_dsi *dsi, u8 irq_flag, u32 t)
+static int mtk_dsi_switch_to_cmd_mode(struct mtk_dsi *dsi, u8 irq_flag, u32 t)
 {
+	struct drm_device *drm = dsi->bridge.dev;
+	int ret;
+
 	mtk_dsi_irq_data_clear(dsi, irq_flag);
 	mtk_dsi_set_cmd_mode(dsi);
-	struct drm_device *drm = dsi->bridge.dev;
+	ret = mtk_dsi_wait_for_irq_done(dsi, irq_flag, t);
+	if (ret && drm)
+		drm_err(drm, "failed to switch cmd mode: %d\n", ret);
 
-	if (!mtk_dsi_wait_for_irq_done(dsi, irq_flag, t)) {
-		drm_err(drm, "failed to switch cmd mode\n");
-		return -ETIME;
-	} else {
-		return 0;
-	}
+	return ret;
 }
 
 static void mtk_dsi_lane_ready(struct mtk_dsi *dsi)
@@ -799,11 +850,192 @@ static void mtk_dsi_lane_ready(struct mtk_dsi *dsi)
 	}
 }
 
-static int mtk_dsi_poweron(struct mtk_dsi *dsi)
+static void mtk_dsi_handoff_dump(struct mtk_dsi *dsi, const char *stage)
+{
+	dev_err(dsi->dev,
+		"handoff %s: t=%llu start=%#x mode=%#x inten=%#x intsta=%#x vmcmd=%#x dbg6=%#x dbg7=%#x dbg8=%#x dbg9=%#x phase=%u\n",
+		stage, (unsigned long long)ktime_get_ns(),
+		readl(dsi->regs + DSI_START),
+		readl(dsi->regs + DSI_MODE_CTRL),
+		readl(dsi->regs + DSI_INTEN),
+		readl(dsi->regs + DSI_INTSTA),
+		readl(dsi->regs + dsi->driver_data->reg_vm_cmd_off),
+		readl(dsi->regs + DSI_STATE_DBG6),
+		readl(dsi->regs + DSI_STATE_DBG7),
+		readl(dsi->regs + DSI_STATE_DBG8),
+		readl(dsi->regs + DSI_STATE_DBG9), dsi->handoff_phase);
+}
+
+static int mtk_dsi_wait_for_fresh_frame(struct mtk_dsi *dsi)
+{
+	u32 inten = readl(dsi->regs + DSI_INTEN);
+	int ret;
+
+	writel(inten & ~FRAME_DONE_INT_FLAG, dsi->regs + DSI_INTEN);
+	readl(dsi->regs + DSI_INTEN);
+	/* Retire a handler which may already have sampled the old frame flag. */
+	synchronize_irq(dsi->irq);
+	mtk_dsi_irq_data_clear(dsi, FRAME_DONE_INT_FLAG);
+	/* DSI_INTSTA is write-zero-to-clear. */
+	writel(~(u32)FRAME_DONE_INT_FLAG, dsi->regs + DSI_INTSTA);
+	readl(dsi->regs + DSI_INTSTA);
+	WRITE_ONCE(dsi->stop_on_frame, true);
+	writel(inten | FRAME_DONE_INT_FLAG, dsi->regs + DSI_INTEN);
+	readl(dsi->regs + DSI_INTEN);
+
+	ret = mtk_dsi_wait_for_irq_done(dsi, FRAME_DONE_INT_FLAG, 100);
+	WRITE_ONCE(dsi->stop_on_frame, false);
+	writel(inten, dsi->regs + DSI_INTEN);
+	readl(dsi->regs + DSI_INTEN);
+
+	return ret;
+}
+
+int mtk_dsi_handoff_quiesce(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	enum mtk_dsi_handoff_phase old_phase;
+	u32 mode, val;
+	bool frame_seen = false;
+	int frame_ret = 0;
+	int idle_ret;
+	int ret = 0;
+
+	if (!dsi->driver_data->needs_cmd_mode_init)
+		return 0;
+
+	mutex_lock(&dsi->handoff_lock);
+	old_phase = dsi->handoff_phase;
+	if (old_phase == MTK_DSI_HANDOFF_FAILED) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+	if (old_phase == MTK_DSI_HANDOFF_QUIESCED)
+		goto out_unlock;
+	if (old_phase == MTK_DSI_HANDOFF_OFF) {
+		dsi->handoff_phase = MTK_DSI_HANDOFF_QUIESCED;
+		goto out_unlock;
+	}
+
+	mode = readl(dsi->regs + DSI_MODE_CTRL);
+	if (mode & MODE) {
+		frame_ret = mtk_dsi_wait_for_fresh_frame(dsi);
+		frame_seen = !frame_ret;
+	}
+
+	/* Vendor order after a fresh video frame boundary. */
+	writel(CMD_MODE, dsi->regs + DSI_MODE_CTRL);
+	writel(0, dsi->regs + DSI_START);
+	readl(dsi->regs + DSI_START);
+	idle_ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val,
+				      !(val & DSI_BUSY), 10, 100000);
+
+	if (frame_ret || idle_ret || readl(dsi->regs + DSI_START) ||
+	    (readl(dsi->regs + DSI_MODE_CTRL) & MODE)) {
+		dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+		mtk_dsi_handoff_dump(dsi, "quiesce-failed");
+		ret = frame_ret ?: idle_ret ?: -EIO;
+		goto out_unlock;
+	}
+
+	dsi->handoff_phase = MTK_DSI_HANDOFF_QUIESCED;
+	dev_info(dsi->dev,
+		 "handoff quiesced: t=%llu frame=%u start=0 mode=cmd intsta=%#x\n",
+		 (unsigned long long)ktime_get_ns(), frame_seen,
+		 readl(dsi->regs + DSI_INTSTA));
+
+out_unlock:
+	mutex_unlock(&dsi->handoff_lock);
+	return ret;
+}
+
+int mtk_dsi_handoff_arm(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	u32 intsta;
+	int ret = 0;
+
+	if (!dsi->driver_data->needs_cmd_mode_init)
+		return 0;
+
+	mutex_lock(&dsi->handoff_lock);
+	intsta = readl(dsi->regs + DSI_INTSTA);
+	if (dsi->handoff_phase != MTK_DSI_HANDOFF_QUIESCED ||
+	    !dsi->refcount || readl(dsi->regs + DSI_START) ||
+	    (readl(dsi->regs + DSI_MODE_CTRL) & MODE) ||
+	    (intsta & DSI_BUSY)) {
+		dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+		mtk_dsi_handoff_dump(dsi, "arm-failed");
+		ret = -EIO;
+	} else {
+		dsi->handoff_phase = MTK_DSI_HANDOFF_ARMED;
+	}
+	mutex_unlock(&dsi->handoff_lock);
+
+	return ret;
+}
+
+int mtk_dsi_handoff_start(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	int ret = 0;
+
+	if (!dsi->driver_data->needs_cmd_mode_init)
+		return 0;
+
+	mutex_lock(&dsi->handoff_lock);
+	if (dsi->handoff_phase != MTK_DSI_HANDOFF_ARMED || !dsi->enabled ||
+	    !dsi->refcount) {
+		dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+		mtk_dsi_handoff_dump(dsi, "start-failed");
+		ret = -EIO;
+		goto out_unlock;
+	}
+
+	mtk_dsi_set_mode(dsi);
+	mtk_dsi_start(dsi);
+	dsi->handoff_phase = MTK_DSI_HANDOFF_RUNNING;
+
+out_unlock:
+	mutex_unlock(&dsi->handoff_lock);
+	return ret;
+}
+
+void mtk_dsi_handoff_abort(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	enum mtk_dsi_handoff_phase old_phase;
+
+	if (!dsi->driver_data->needs_cmd_mode_init)
+		return;
+
+	mutex_lock(&dsi->handoff_lock);
+	old_phase = dsi->handoff_phase;
+	dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+	dsi->enabled = false;
+	if (dsi->refcount || old_phase == MTK_DSI_HANDOFF_INHERITED ||
+	    old_phase == MTK_DSI_HANDOFF_RUNNING ||
+	    old_phase == MTK_DSI_HANDOFF_ARMED) {
+		writel(CMD_MODE, dsi->regs + DSI_MODE_CTRL);
+		writel(0, dsi->regs + DSI_START);
+		readl(dsi->regs + DSI_START);
+		mtk_dsi_handoff_dump(dsi, "aborted");
+	}
+	mutex_unlock(&dsi->handoff_lock);
+}
+
+static int __mtk_dsi_poweron(struct mtk_dsi *dsi)
 {
 	struct device *dev = dsi->host.dev;
 	int ret;
 	u32 bit_per_pixel;
+
+	if (dsi->driver_data->needs_cmd_mode_init &&
+	    dsi->handoff_phase == MTK_DSI_HANDOFF_FAILED)
+		return -EIO;
+	if (dsi->driver_data->needs_cmd_mode_init && !dsi->refcount &&
+	    dsi->handoff_phase != MTK_DSI_HANDOFF_QUIESCED)
+		return -EPERM;
 
 	if (++dsi->refcount != 1)
 		return 0;
@@ -811,7 +1043,7 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	ret = mipi_dsi_pixel_format_to_bpp(dsi->format);
 	if (ret < 0) {
 		dev_err(dev, "Unknown MIPI DSI format %d\n", dsi->format);
-		return ret;
+		goto err_refcount;
 	}
 	bit_per_pixel = ret;
 
@@ -830,7 +1062,11 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		goto err_refcount;
 	}
 
-	phy_power_on(dsi->phy);
+	ret = phy_power_on(dsi->phy);
+	if (ret < 0) {
+		dev_err(dev, "Failed to power on DSI PHY: %d\n", ret);
+		goto err_refcount;
+	}
 
 	ret = clk_prepare_enable(dsi->engine_clk);
 	if (ret < 0) {
@@ -852,18 +1088,6 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 
 	mtk_dsi_reset_engine(dsi);
 
-	/*
-	 * LK leaves MT6789 DSI running in video mode.  An engine reset does not
-	 * reset DSI_MODE_CTRL on this SoC, so the first panel command otherwise
-	 * tries to wait for a VM_DONE transition from bootloader-owned state and
-	 * times out.  Stop that inherited transfer and establish command mode;
-	 * atomic_enable() selects and starts the requested video mode later.
-	 */
-	if (dsi->driver_data->needs_cmd_mode_init) {
-		mtk_dsi_stop(dsi);
-		mtk_dsi_set_cmd_mode(dsi);
-	}
-
 	mtk_dsi_phy_timconfig(dsi);
 
 	mtk_dsi_ps_control(dsi, true);
@@ -880,16 +1104,32 @@ err_phy_power_off:
 	phy_power_off(dsi->phy);
 err_refcount:
 	dsi->refcount--;
+	if (dsi->driver_data->needs_cmd_mode_init)
+		dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
 	return ret;
 }
 
-static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
+static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 {
+	int ret;
+
+	mutex_lock(&dsi->handoff_lock);
+	ret = __mtk_dsi_poweron(dsi);
+	mutex_unlock(&dsi->handoff_lock);
+
+	return ret;
+}
+
+static int __mtk_dsi_poweroff(struct mtk_dsi *dsi)
+{
+	u32 val;
+	int ret;
+
 	if (WARN_ON(dsi->refcount == 0))
-		return;
+		return 0;
 
 	if (--dsi->refcount != 0)
-		return;
+		return 0;
 
 	/*
 	 * mtk_dsi_stop() and mtk_dsi_start() is asymmetric, since
@@ -898,9 +1138,32 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	 * mtk_dsi_start() needs to be called in mtk_output_dsi_enable(),
 	 * after dsi is fully set.
 	 */
-	mtk_dsi_stop(dsi);
+	if (dsi->driver_data->needs_cmd_mode_init) {
+		if (dsi->handoff_phase != MTK_DSI_HANDOFF_QUIESCED &&
+		    dsi->handoff_phase != MTK_DSI_HANDOFF_FAILED) {
+			dev_err(dsi->dev,
+				"refusing unquiesced DSI poweroff in phase %u\n",
+				dsi->handoff_phase);
+			dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+			writel(CMD_MODE, dsi->regs + DSI_MODE_CTRL);
+			writel(0, dsi->regs + DSI_START);
+		}
+		ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val,
+					 !(val & DSI_BUSY), 10, 100000);
+		if (ret) {
+			/* Keep the clock/PHY references while hardware may be active. */
+			dsi->refcount++;
+			dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+			mtk_dsi_handoff_dump(dsi, "poweroff-quarantined");
+			return ret;
+		}
+		writel(0, dsi->regs + DSI_INTEN);
+		writel(0, dsi->regs + DSI_INTSTA);
+	} else {
+		mtk_dsi_stop(dsi);
+		mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
+	}
 
-	mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_lane0_ulp_mode_enter(dsi);
 	mtk_dsi_clk_ulp_mode_enter(dsi);
@@ -915,25 +1178,67 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	phy_power_off(dsi->phy);
 
 	dsi->lanes_ready = false;
+	if (dsi->driver_data->needs_cmd_mode_init &&
+	    dsi->handoff_phase != MTK_DSI_HANDOFF_FAILED)
+		dsi->handoff_phase = MTK_DSI_HANDOFF_OFF;
+
+	return 0;
+}
+
+static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
+{
+	int ret = 0;
+
+	mutex_lock(&dsi->handoff_lock);
+	if (dsi->refcount)
+		ret = __mtk_dsi_poweroff(dsi);
+	mutex_unlock(&dsi->handoff_lock);
+	if (ret)
+		dev_err(dsi->dev, "failed to power off DSI safely: %d\n", ret);
 }
 
 static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
 {
+	mutex_lock(&dsi->handoff_lock);
 	if (dsi->enabled)
-		return;
+		goto out_unlock;
+
+	if (dsi->driver_data->needs_cmd_mode_init) {
+		if (dsi->handoff_phase == MTK_DSI_HANDOFF_QUIESCED) {
+			/* CRTC atomic_flush starts video after panel DCS traffic. */
+			dsi->enabled = true;
+			goto out_unlock;
+		}
+		if (dsi->handoff_phase != MTK_DSI_HANDOFF_ARMED) {
+			dev_err(dsi->dev,
+				"refusing DSI start in handoff phase %u\n",
+				dsi->handoff_phase);
+			dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+			goto out_unlock;
+		}
+	}
 
 	mtk_dsi_set_mode(dsi);
 	mtk_dsi_start(dsi);
 
 	dsi->enabled = true;
+	if (dsi->driver_data->needs_cmd_mode_init)
+		dsi->handoff_phase = MTK_DSI_HANDOFF_RUNNING;
+
+out_unlock:
+	mutex_unlock(&dsi->handoff_lock);
 }
 
 static void mtk_output_dsi_disable(struct mtk_dsi *dsi)
 {
+	mutex_lock(&dsi->handoff_lock);
 	if (!dsi->enabled)
-		return;
+		goto out_unlock;
 
 	dsi->enabled = false;
+
+out_unlock:
+	mutex_unlock(&dsi->handoff_lock);
 }
 
 static int mtk_dsi_bridge_attach(struct drm_bridge *bridge,
@@ -983,8 +1288,14 @@ static void mtk_dsi_bridge_atomic_pre_enable(struct drm_bridge *bridge,
 	int ret;
 
 	ret = mtk_dsi_poweron(dsi);
-	if (ret < 0)
+	if (ret < 0) {
 		drm_err(drm, "failed to power on dsi\n");
+		return;
+	}
+
+	mutex_lock(&dsi->handoff_lock);
+	dsi->bridge_ref = true;
+	mutex_unlock(&dsi->handoff_lock);
 }
 
 static void mtk_dsi_bridge_atomic_post_disable(struct drm_bridge *bridge,
@@ -992,7 +1303,18 @@ static void mtk_dsi_bridge_atomic_post_disable(struct drm_bridge *bridge,
 {
 	struct mtk_dsi *dsi = bridge_to_dsi(bridge);
 
-	mtk_dsi_poweroff(dsi);
+	mutex_lock(&dsi->handoff_lock);
+	if (dsi->bridge_ref) {
+		int ret;
+
+		dsi->bridge_ref = false;
+		ret = __mtk_dsi_poweroff(dsi);
+		if (ret) {
+			dsi->bridge_ref = true;
+			dev_err(dsi->dev, "failed to release DSI bridge ref\n");
+		}
+	}
+	mutex_unlock(&dsi->handoff_lock);
 }
 
 static enum drm_mode_status
@@ -1029,8 +1351,31 @@ static const struct drm_bridge_funcs mtk_dsi_bridge_funcs = {
 void mtk_dsi_ddp_start(struct device *dev)
 {
 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	int ret;
 
-	mtk_dsi_poweron(dsi);
+	ret = mtk_dsi_poweron(dsi);
+	if (ret)
+		dev_err(dev, "failed to power on DSI component: %d\n", ret);
+}
+
+int mtk_dsi_ddp_power_on(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+
+	return mtk_dsi_poweron(dsi);
+}
+
+int mtk_dsi_ddp_power_off(struct device *dev)
+{
+	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+	int ret = 0;
+
+	mutex_lock(&dsi->handoff_lock);
+	if (dsi->refcount)
+		ret = __mtk_dsi_poweroff(dsi);
+	mutex_unlock(&dsi->handoff_lock);
+
+	return ret;
 }
 
 void mtk_dsi_ddp_stop(struct device *dev)
@@ -1158,7 +1503,7 @@ static int mtk_dsi_host_detach(struct mipi_dsi_host *host,
 	return 0;
 }
 
-static void mtk_dsi_wait_for_idle(struct mtk_dsi *dsi)
+static int mtk_dsi_wait_for_idle(struct mtk_dsi *dsi)
 {
 	int ret;
 	u32 val;
@@ -1167,11 +1512,13 @@ static void mtk_dsi_wait_for_idle(struct mtk_dsi *dsi)
 	ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val, !(val & DSI_BUSY),
 				 4, 2000000);
 	if (ret) {
-		drm_warn(drm, "polling dsi wait not busy timeout!\n");
-
-		mtk_dsi_enable(dsi);
-		mtk_dsi_reset_engine(dsi);
+		if (drm)
+			drm_warn(drm, "polling DSI idle timed out\n");
+		else
+			dev_warn(dsi->dev, "polling DSI idle timed out\n");
 	}
+
+	return ret;
 }
 
 static u32 mtk_dsi_recv_cnt(u8 type, u8 *read_data)
@@ -1240,15 +1587,16 @@ static void mtk_dsi_cmdq(struct mtk_dsi *dsi, const struct mipi_dsi_msg *msg)
 static ssize_t mtk_dsi_host_send_cmd(struct mtk_dsi *dsi,
 				     const struct mipi_dsi_msg *msg, u8 flag)
 {
-	mtk_dsi_wait_for_idle(dsi);
+	int ret;
+
+	ret = mtk_dsi_wait_for_idle(dsi);
+	if (ret)
+		return ret;
 	mtk_dsi_irq_data_clear(dsi, flag);
 	mtk_dsi_cmdq(dsi, msg);
 	mtk_dsi_start(dsi);
 
-	if (!mtk_dsi_wait_for_irq_done(dsi, flag, 2000))
-		return -ETIME;
-	else
-		return 0;
+	return mtk_dsi_wait_for_irq_done(dsi, flag, 2000);
 }
 
 static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
@@ -1256,19 +1604,29 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 {
 	struct mtk_dsi *dsi = host_to_dsi(host);
 	struct drm_device *drm = dsi->bridge.dev;
-	ssize_t recv_cnt;
+	ssize_t recv_cnt = 0;
 	u8 read_data[16];
 	void *src_addr;
 	u8 irq_flag = CMD_DONE_INT_FLAG;
 	u32 dsi_mode;
-	int ret, i;
+	int ret = 0, i;
+
+	mutex_lock(&dsi->handoff_lock);
+	if (dsi->driver_data->needs_cmd_mode_init &&
+	    (!dsi->refcount ||
+	     (dsi->handoff_phase != MTK_DSI_HANDOFF_QUIESCED &&
+	      dsi->handoff_phase != MTK_DSI_HANDOFF_ARMED &&
+	      dsi->handoff_phase != MTK_DSI_HANDOFF_RUNNING))) {
+		ret = -EIO;
+		goto out_unlock;
+	}
 
 	dsi_mode = readl(dsi->regs + DSI_MODE_CTRL);
 	if (dsi_mode & MODE) {
 		mtk_dsi_stop(dsi);
 		ret = mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
 		if (ret)
-			goto restore_dsi_mode;
+			goto transfer_failed;
 	}
 
 	if (MTK_DSI_HOST_IS_READ(msg->type))
@@ -1278,7 +1636,7 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 
 	ret = mtk_dsi_host_send_cmd(dsi, msg, irq_flag);
 	if (ret)
-		goto restore_dsi_mode;
+		goto transfer_failed;
 
 	if (!MTK_DSI_HOST_IS_READ(msg->type)) {
 		recv_cnt = 0;
@@ -1288,7 +1646,7 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 	if (!msg->rx_buf) {
 		drm_err(drm, "dsi receive buffer size may be NULL\n");
 		ret = -EINVAL;
-		goto restore_dsi_mode;
+		goto transfer_failed;
 	}
 
 	for (i = 0; i < 16; i++)
@@ -1319,7 +1677,20 @@ restore_dsi_mode:
 		mtk_dsi_start(dsi);
 	}
 
+out_unlock:
+	mutex_unlock(&dsi->handoff_lock);
 	return ret < 0 ? ret : recv_cnt;
+
+transfer_failed:
+	if (dsi->driver_data->needs_cmd_mode_init) {
+		dsi->handoff_phase = MTK_DSI_HANDOFF_FAILED;
+		dsi->enabled = false;
+		writel(CMD_MODE, dsi->regs + DSI_MODE_CTRL);
+		writel(0, dsi->regs + DSI_START);
+		mtk_dsi_handoff_dump(dsi, "host-transfer-failed");
+		goto out_unlock;
+	}
+	goto restore_dsi_mode;
 }
 
 static const struct mipi_dsi_host_ops mtk_dsi_ops = {
@@ -1340,7 +1711,12 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 	if (IS_ERR(dsi))
 		return PTR_ERR(dsi);
 
+	dsi->dev = dev;
 	dsi->driver_data = of_device_get_match_data(dev);
+	mutex_init(&dsi->handoff_lock);
+	atomic_set(&dsi->irq_data, 0);
+	if (dsi->driver_data->needs_cmd_mode_init)
+		dsi->handoff_phase = MTK_DSI_HANDOFF_INHERITED;
 
 	dsi->engine_clk = devm_clk_get(dev, "engine");
 	if (IS_ERR(dsi->engine_clk))
@@ -1368,6 +1744,7 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 	irq_num = platform_get_irq(pdev, 0);
 	if (irq_num < 0)
 		return irq_num;
+	dsi->irq = irq_num;
 
 	dsi->host.ops = &mtk_dsi_ops;
 	dsi->host.dev = dev;

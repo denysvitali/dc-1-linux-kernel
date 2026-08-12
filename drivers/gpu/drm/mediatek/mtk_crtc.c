@@ -22,6 +22,7 @@
 
 #include "mtk_crtc.h"
 #include "mtk_ddp_comp.h"
+#include "mtk_disp_drv.h"
 #include "mtk_drm_drv.h"
 #include "mtk_plane.h"
 
@@ -41,6 +42,11 @@
 struct mtk_crtc {
 	struct drm_crtc			base;
 	bool				enabled;
+	bool				resources_active;
+	bool				handoff_failed;
+	bool				handoff_quarantined;
+	bool				handoff_wait_pending;
+	u32				handoff_fme_seq;
 
 	bool				pending_needs_vblank;
 	struct drm_pending_vblank_event	*event;
@@ -93,6 +99,34 @@ static inline struct mtk_crtc_state *to_mtk_crtc_state(struct drm_crtc_state *s)
 	return container_of(s, struct mtk_crtc_state, base);
 }
 
+static void mtk_crtc_handoff_inhibit(struct mtk_crtc *mtk_crtc)
+{
+	struct mtk_ddp_comp *ovl = mtk_crtc->ddp_comp[0];
+	struct mtk_ddp_comp *dsi =
+		mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
+	int ret;
+
+	/* Gate IRQ-driven register updates before removing all display triggers. */
+	WRITE_ONCE(mtk_crtc->handoff_failed, true);
+	WRITE_ONCE(mtk_crtc->handoff_quarantined, true);
+	if (!mtk_crtc->resources_active)
+		return;
+
+	ret = mtk_mutex_disable_sync(mtk_crtc->mutex);
+	mtk_dsi_handoff_abort(dsi->dev);
+	mtk_ovl_handoff_abort(ovl->dev);
+	if (ret)
+		drm_err(mtk_crtc->base.dev,
+			"failed to read back mutex inhibition: %d\n", ret);
+}
+
+static void mtk_crtc_handoff_dump(struct mtk_crtc *mtk_crtc,
+				  const char *stage)
+{
+	mtk_mmsys_ddp_handoff_dump(mtk_crtc->mmsys_dev, stage);
+	mtk_rdma_handoff_dump(mtk_crtc->ddp_comp[1]->dev, stage);
+}
+
 static void mtk_crtc_finish_page_flip(struct mtk_crtc *mtk_crtc)
 {
 	struct drm_crtc *crtc = &mtk_crtc->base;
@@ -105,6 +139,19 @@ static void mtk_crtc_finish_page_flip(struct mtk_crtc *mtk_crtc)
 		mtk_crtc->event = NULL;
 		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
 	}
+}
+
+static void mtk_crtc_send_state_event(struct drm_crtc *crtc)
+{
+	unsigned long flags;
+
+	if (!crtc->state->event)
+		return;
+
+	spin_lock_irqsave(&crtc->dev->event_lock, flags);
+	drm_crtc_send_vblank_event(crtc, crtc->state->event);
+	crtc->state->event = NULL;
+	spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
 }
 
 static void mtk_drm_finish_page_flip(struct mtk_crtc *mtk_crtc)
@@ -289,12 +336,12 @@ static void ddp_cmdq_cb(struct mbox_client *cl, void *mssg)
 	pm_runtime_mark_last_busy(cmdq_cl->chan->mbox->dev);
 	pm_runtime_put_autosuspend(cmdq_cl->chan->mbox->dev);
 
-	if (data->sta < 0)
-		return;
-
 	state = to_mtk_crtc_state(mtk_crtc->base.state);
 
 	spin_lock_irqsave(&mtk_crtc->config_lock, flags);
+	mtk_crtc->cmdq_vblank_cnt = 0;
+	if (data->sta < 0)
+		goto ddp_cmdq_cb_out;
 	if (mtk_crtc->config_updating)
 		goto ddp_cmdq_cb_out;
 
@@ -332,11 +379,145 @@ ddp_cmdq_cb_out:
 	}
 
 	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
+	if (data->sta < 0)
+		drm_dbg_driver(mtk_crtc->base.dev,
+			       "CMDQ completion stopped: %d\n", data->sta);
 
-	mtk_crtc->cmdq_vblank_cnt = 0;
 	wake_up(&mtk_crtc->cb_blocking_queue);
 }
 #endif
+
+static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
+					unsigned int width,
+					unsigned int height,
+					unsigned int vrefresh,
+					unsigned int bpc)
+{
+	struct drm_crtc *crtc = &mtk_crtc->base;
+	struct drm_device *dev = crtc->dev;
+	struct mtk_ddp_comp *ovl = mtk_crtc->ddp_comp[0];
+	struct mtk_ddp_comp *rdma;
+	struct mtk_ddp_comp *dsi;
+	enum mtk_ddp_comp_id components[DDP_COMPONENT_ID_MAX];
+	bool primary_seeded = false;
+	bool ovl_touched = false;
+	int ret;
+	int i;
+
+	if (mtk_crtc->ddp_comp_nr != 5 || ovl->id != DDP_COMPONENT_OVL0 ||
+	    mtk_crtc->ddp_comp[1]->id != DDP_COMPONENT_RDMA0 ||
+	    mtk_crtc->ddp_comp[2]->id != DDP_COMPONENT_COLOR0 ||
+	    mtk_crtc->ddp_comp[3]->id != DDP_COMPONENT_DITHER0 ||
+	    mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1]->id !=
+		    DDP_COMPONENT_DSI0)
+		return -EINVAL;
+
+	rdma = mtk_crtc->ddp_comp[1];
+	dsi = mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
+	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
+		components[i] = mtk_crtc->ddp_comp[i]->id;
+
+	/*
+	 * MUTEX_EN is not an idle indication.  It only prevents another
+	 * configuration trigger.  The fresh DSI frame and BUSY-clear below are
+	 * the proof that the inherited transaction has drained.
+	 */
+	ret = mtk_mutex_disable_sync(mtk_crtc->mutex);
+	if (ret)
+		goto quarantine;
+	ret = mtk_dsi_handoff_quiesce(dsi->dev);
+	if (ret)
+		goto quarantine;
+	ovl_touched = true;
+	ret = mtk_ovl_handoff_stop(ovl->dev);
+	if (ret)
+		goto quarantine;
+	ret = mtk_rdma_handoff_stop(rdma->dev);
+	if (ret)
+		goto quarantine;
+
+	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
+		if (!mtk_ddp_comp_connect(mtk_crtc->ddp_comp[i],
+					  mtk_crtc->mmsys_dev,
+					  mtk_crtc->ddp_comp[i + 1]->id))
+			mtk_mmsys_ddp_connect(mtk_crtc->mmsys_dev,
+					      mtk_crtc->ddp_comp[i]->id,
+					      mtk_crtc->ddp_comp[i + 1]->id);
+	}
+	ret = mtk_mmsys_ddp_handoff_validate(mtk_crtc->mmsys_dev);
+	if (ret)
+		goto quarantine;
+	ret = mtk_mutex_configure(mtk_crtc->mutex, components,
+				  mtk_crtc->ddp_comp_nr);
+	if (ret)
+		goto quarantine;
+
+	for (i = 1; i < mtk_crtc->ddp_comp_nr; i++) {
+		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
+
+		if (i == 1)
+			mtk_ddp_comp_bgclr_in_on(comp);
+		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
+		if (comp == dsi)
+			ret = mtk_dsi_ddp_power_on(comp->dev);
+		else
+			mtk_ddp_comp_start(comp);
+		if (ret)
+			goto quarantine;
+	}
+
+	mtk_ddp_comp_bgclr_in_off(ovl);
+	mtk_ddp_comp_config(ovl, width, height, vrefresh, bpc, NULL);
+	mtk_ddp_comp_start(ovl);
+
+	for (i = 0; i < mtk_crtc->layer_nr; i++) {
+		struct drm_plane *plane = &mtk_crtc->planes[i];
+		struct mtk_plane_state *plane_state;
+		struct mtk_ddp_comp *comp;
+		unsigned int local_layer;
+
+		plane_state = to_mtk_plane_state(plane->state);
+		if (plane_state->base.crtc == crtc && plane_state->base.fb &&
+		    plane_state->base.visible) {
+			mtk_plane_update_new_state(&plane_state->base, plane_state);
+		} else {
+			plane_state->pending.enable = false;
+		}
+
+		comp = mtk_ddp_comp_for_plane(crtc, plane, &local_layer);
+		if (!comp)
+			continue;
+		mtk_ddp_comp_layer_config(comp, local_layer, plane_state, NULL);
+		if (comp == ovl) {
+			ret = mtk_ovl_handoff_layer_validate(comp->dev, local_layer,
+							     plane_state);
+			if (ret)
+				goto quarantine;
+			if (plane->type == DRM_PLANE_TYPE_PRIMARY &&
+			    local_layer == 0 && plane_state->pending.enable)
+				primary_seeded = true;
+		}
+	}
+	if (!primary_seeded) {
+		ret = -EINVAL;
+		goto quarantine;
+	}
+
+	mtk_crtc->handoff_wait_pending = true;
+	drm_info(dev,
+		 "MT6789 handoff prepared: source seeded with mutex and DSI stopped\n");
+	return 0;
+
+quarantine:
+	mtk_crtc_handoff_dump(mtk_crtc, "init-failed");
+	mtk_crtc_handoff_inhibit(mtk_crtc);
+	if (ovl_touched)
+		mtk_ovl_handoff_abort(ovl->dev);
+	drm_err(dev,
+		"MT6789 handoff quarantined: %d; clocks remain held and triggers are inhibited\n",
+		ret);
+	return ret;
+}
 
 static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 {
@@ -389,15 +570,17 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		drm_err(dev, "Failed to enable component clocks: %d\n", ret);
 		goto err_mutex_unprepare;
 	}
+	mtk_crtc->resources_active = true;
 
-	/*
-	 * LK leaves the MT6789 display path running.  Do not reconfigure or
-	 * restart OVL while the inherited DSI SOF source can still trigger the
-	 * mutex: that can strand OVL in its hardware-reset state.  Quiesce the
-	 * inherited trigger first and create a real OVL enable edge.
-	 */
 	if (priv->data->quiesce_mutex_first) {
-		mtk_mutex_disable(mtk_crtc->mutex);
+		ret = mtk_crtc_ddp_hw_init_handoff(mtk_crtc, width, height,
+						   vrefresh, bpc);
+		if (ret) {
+			if (mtk_crtc->handoff_quarantined)
+				return ret;
+			goto err_ddp_clk_disable;
+		}
+		return 0;
 	}
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
@@ -412,19 +595,10 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 	}
 	if (!mtk_ddp_comp_add(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
 		mtk_mutex_add_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
-	if (!priv->data->quiesce_mutex_first)
-		mtk_mutex_enable(mtk_crtc->mutex);
+	mtk_mutex_enable(mtk_crtc->mutex);
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
-
-		/*
-		 * MT6789's DSI start hook stops the inherited LK video stream.
-		 * Defer the first OVL stop/reset until that hook has run, while
-		 * DISP_MUTEX remains disabled, so no live DSI SOF can race it.
-		 */
-		if (priv->data->quiesce_mutex_first && i == 0)
-			continue;
 
 		/*
 		 * The first OVL has no upstream compositor and must use its local
@@ -439,14 +613,6 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
 		mtk_ddp_comp_start(comp);
 	}
-	if (priv->data->quiesce_mutex_first) {
-		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
-
-		mtk_ddp_comp_bgclr_in_off(comp);
-		mtk_ddp_comp_stop(comp);
-		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
-		mtk_ddp_comp_start(comp);
-	}
 
 	/* Initially configure all planes */
 	for (i = 0; i < mtk_crtc->layer_nr; i++) {
@@ -457,32 +623,19 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 
 		plane_state = to_mtk_plane_state(plane->state);
 
-		if (priv->data->quiesce_mutex_first &&
-		    plane_state->base.crtc == crtc &&
-		    plane_state->base.fb && plane_state->base.visible) {
-			/*
-			 * commit_tail_rpm enables the CRTC before its plane commit.
-			 * MT6789 must not see its first DSI SOF with every OVL layer
-			 * disabled, so program the already-validated atomic plane
-			 * state synchronously while the mutex remains quiesced.  The
-			 * later plane commit may safely repeat this configuration.
-			 */
-			mtk_plane_update_new_state(&plane_state->base, plane_state);
-		} else {
-			/* should not enable layer before crtc enabled */
-			plane_state->pending.enable = false;
-		}
+		/* should not enable layer before crtc enabled */
+		plane_state->pending.enable = false;
 		comp = mtk_ddp_comp_for_plane(crtc, plane, &local_layer);
 		if (comp)
 			mtk_ddp_comp_layer_config(comp, local_layer,
 						  plane_state, NULL);
 	}
 
-	if (priv->data->quiesce_mutex_first)
-		mtk_mutex_enable(mtk_crtc->mutex);
-
 	return 0;
 
+err_ddp_clk_disable:
+	mtk_crtc_ddp_clk_disable(mtk_crtc);
+	mtk_crtc->resources_active = false;
 err_mutex_unprepare:
 	mtk_mutex_unprepare(mtk_crtc->mutex);
 err_pm_runtime_put:
@@ -490,17 +643,67 @@ err_pm_runtime_put:
 	return ret;
 }
 
-static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
+static int mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 {
 	struct drm_device *drm = mtk_crtc->base.dev;
 	struct mtk_drm_private *priv = drm->dev_private;
 	struct drm_crtc *crtc = &mtk_crtc->base;
-	unsigned long flags;
+	int ret;
 	int i;
 
-	/* Stop new MT6789 SOF triggers before stopping the OVL pipeline. */
-	if (priv->data->quiesce_mutex_first)
-		mtk_mutex_disable(mtk_crtc->mutex);
+	if (priv->data->quiesce_mutex_first) {
+		struct mtk_ddp_comp *ovl = mtk_crtc->ddp_comp[0];
+		struct mtk_ddp_comp *rdma = mtk_crtc->ddp_comp[1];
+		struct mtk_ddp_comp *dsi =
+			mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
+
+		if (mtk_crtc->handoff_quarantined)
+			return -EIO;
+
+#if IS_REACHABLE(CONFIG_MTK_CMDQ)
+		if (mtk_crtc->cmdq_client.chan) {
+			ret = mbox_flush(mtk_crtc->cmdq_client.chan, 2000);
+			if (ret)
+				goto quarantine;
+		}
+#endif
+
+		ret = mtk_mutex_disable_sync(mtk_crtc->mutex);
+		if (ret)
+			goto quarantine;
+		ret = mtk_dsi_handoff_quiesce(dsi->dev);
+		if (ret)
+			goto quarantine;
+		ret = mtk_ovl_handoff_stop(ovl->dev);
+		if (ret)
+			goto quarantine;
+		ret = mtk_rdma_handoff_stop(rdma->dev);
+		if (ret)
+			goto quarantine;
+
+		for (i = 2; i < mtk_crtc->ddp_comp_nr; i++) {
+			if (mtk_crtc->ddp_comp[i] == dsi)
+				ret = mtk_dsi_ddp_power_off(dsi->dev);
+			else
+				mtk_ddp_comp_stop(mtk_crtc->ddp_comp[i]);
+			if (ret)
+				goto quarantine;
+		}
+		mtk_ddp_comp_bgclr_in_off(rdma);
+
+		ret = mtk_mutex_configure(mtk_crtc->mutex, NULL, 0);
+		if (ret)
+			goto quarantine;
+		goto disconnect;
+
+quarantine:
+		mtk_crtc_handoff_dump(mtk_crtc, "teardown-failed");
+		mtk_crtc_handoff_inhibit(mtk_crtc);
+		drm_err(drm,
+			"MT6789 teardown quarantined: %d; refusing unsafe OVL reset or clock gating\n",
+			ret);
+		return ret;
+	}
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		mtk_ddp_comp_stop(mtk_crtc->ddp_comp[i]);
@@ -508,35 +711,32 @@ static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 			mtk_ddp_comp_bgclr_in_off(mtk_crtc->ddp_comp[i]);
 	}
 
+	mtk_mutex_disable(mtk_crtc->mutex);
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
 		if (!mtk_ddp_comp_remove(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
 			mtk_mutex_remove_comp(mtk_crtc->mutex,
 					      mtk_crtc->ddp_comp[i]->id);
-	if (!priv->data->quiesce_mutex_first)
-		mtk_mutex_disable(mtk_crtc->mutex);
+
+disconnect:
 	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
 		if (!mtk_ddp_comp_disconnect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
 					     mtk_crtc->ddp_comp[i + 1]->id))
 			mtk_mmsys_ddp_disconnect(mtk_crtc->mmsys_dev,
 						 mtk_crtc->ddp_comp[i]->id,
 						 mtk_crtc->ddp_comp[i + 1]->id);
-		if (!mtk_ddp_comp_remove(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
-			mtk_mutex_remove_comp(mtk_crtc->mutex,
-					      mtk_crtc->ddp_comp[i]->id);
 	}
-	if (!mtk_ddp_comp_remove(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
-		mtk_mutex_remove_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
 	mtk_crtc_ddp_clk_disable(mtk_crtc);
 	mtk_mutex_unprepare(mtk_crtc->mutex);
 
 	pm_runtime_put(drm->dev);
+	mtk_crtc->resources_active = false;
+	mtk_crtc->handoff_wait_pending = false;
 
 	if (crtc->state->event && !crtc->state->active) {
-		spin_lock_irqsave(&crtc->dev->event_lock, flags);
-		drm_crtc_send_vblank_event(crtc, crtc->state->event);
-		crtc->state->event = NULL;
-		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
+		mtk_crtc_send_state_event(crtc);
 	}
+
+	return 0;
 }
 
 static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
@@ -616,6 +816,7 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 {
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	struct cmdq_pkt *cmdq_handle = &mtk_crtc->cmdq_handle;
+	int send_ret;
 #endif
 	struct drm_crtc *crtc = &mtk_crtc->base;
 	struct mtk_drm_private *priv = crtc->dev->dev_private;
@@ -659,7 +860,25 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 	}
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	if (mtk_crtc->cmdq_client.chan) {
-		mbox_flush(mtk_crtc->cmdq_client.chan, 2000);
+		struct device *cmdq_dev =
+			mtk_crtc->cmdq_client.chan->mbox->dev;
+
+		send_ret = mbox_flush(mtk_crtc->cmdq_client.chan, 2000);
+		if (send_ret) {
+			spin_lock_irqsave(&mtk_crtc->config_lock, flags);
+			mtk_crtc->config_updating = false;
+			spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
+			if (priv->data->quiesce_mutex_first)
+				mtk_crtc_handoff_dump(mtk_crtc,
+						      "cmdq-reuse-failed");
+			if (priv->data->quiesce_mutex_first)
+				mtk_crtc_handoff_inhibit(mtk_crtc);
+			wake_up(&mtk_crtc->cb_blocking_queue);
+			drm_err(crtc->dev,
+				"CMDQ flush failed before packet reuse: %d\n",
+				send_ret);
+			goto update_config_out;
+		}
 		cmdq_handle->cmd_buf_size = 0;
 		cmdq_pkt_clear_event(cmdq_handle, mtk_crtc->cmdq_event);
 		cmdq_pkt_wfe(cmdq_handle, mtk_crtc->cmdq_event, false);
@@ -682,10 +901,21 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 		mtk_crtc->config_updating = false;
 		spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
 
-		if (pm_runtime_resume_and_get(mtk_crtc->cmdq_client.chan->mbox->dev) < 0)
+		send_ret = pm_runtime_resume_and_get(cmdq_dev);
+		if (send_ret < 0) {
+			drm_err(crtc->dev, "failed to power CMDQ: %d\n",
+				send_ret);
 			goto update_config_out;
+		}
 
-		mbox_send_message(mtk_crtc->cmdq_client.chan, cmdq_handle);
+		send_ret = mbox_send_message(mtk_crtc->cmdq_client.chan,
+					     cmdq_handle);
+		if (send_ret < 0) {
+			pm_runtime_put_autosuspend(cmdq_dev);
+			drm_err(crtc->dev, "failed to submit CMDQ: %d\n",
+				send_ret);
+			goto update_config_out;
+		}
 		mbox_client_txdone(mtk_crtc->cmdq_client.chan, 0);
 		goto update_config_out;
 	}
@@ -705,6 +935,9 @@ static void mtk_crtc_ddp_irq(void *data)
 	struct drm_crtc *crtc = data;
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_drm_private *priv = crtc->dev->dev_private;
+
+	if (READ_ONCE(mtk_crtc->handoff_failed))
+		return;
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	struct drm_device *dev = mtk_crtc->base.dev;
@@ -798,7 +1031,7 @@ void mtk_crtc_plane_disable(struct drm_crtc *crtc, struct drm_plane *plane)
 	if (!mtk_crtc->cmdq_client.chan)
 		return;
 
-	if (!mtk_crtc->enabled)
+	if (!mtk_crtc->enabled || mtk_crtc->handoff_failed)
 		return;
 
 	/* set pending plane state to disabled */
@@ -825,7 +1058,7 @@ void mtk_crtc_async_update(struct drm_crtc *crtc, struct drm_plane *plane,
 {
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 
-	if (!mtk_crtc->enabled)
+	if (!mtk_crtc->enabled || mtk_crtc->handoff_failed)
 		return;
 
 	mtk_crtc_update_config(mtk_crtc, false);
@@ -840,6 +1073,13 @@ static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
 	int ret;
 
 	drm_dbg_driver(dev, "%s %d\n", __func__, crtc->base.id);
+	if (mtk_crtc->handoff_quarantined) {
+		crtc->state->no_vblank = true;
+		drm_err(dev, "refusing enable of quarantined display pipeline\n");
+		return;
+	}
+	if (!mtk_crtc->handoff_quarantined)
+		mtk_crtc->handoff_failed = false;
 
 	ret = mtk_ddp_comp_power_on(comp);
 	if (ret < 0) {
@@ -851,7 +1091,10 @@ static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
 
 	ret = mtk_crtc_ddp_hw_init(mtk_crtc);
 	if (ret) {
-		mtk_ddp_comp_power_off(comp);
+		mtk_crtc->handoff_failed = true;
+		crtc->state->no_vblank = true;
+		if (!mtk_crtc->resources_active)
+			mtk_ddp_comp_power_off(comp);
 		return;
 	}
 
@@ -865,36 +1108,69 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
 	struct drm_device *dev = mtk_crtc->base.dev;
+#if IS_REACHABLE(CONFIG_MTK_CMDQ)
+	struct mtk_drm_private *priv = dev->dev_private;
+#endif
+	int ret;
 	int i;
 
 	drm_dbg_driver(dev, "%s %d\n", __func__, crtc->base.id);
-	if (!mtk_crtc->enabled)
+	if (!mtk_crtc->resources_active)
 		return;
 
-	/* Set all pending plane state to disabled */
-	for (i = 0; i < mtk_crtc->layer_nr; i++) {
-		struct drm_plane *plane = &mtk_crtc->planes[i];
-		struct mtk_plane_state *plane_state;
+	if (!mtk_crtc->handoff_failed) {
+		/* Set all pending plane state to disabled */
+		for (i = 0; i < mtk_crtc->layer_nr; i++) {
+			struct drm_plane *plane = &mtk_crtc->planes[i];
+			struct mtk_plane_state *plane_state;
 
-		plane_state = to_mtk_plane_state(plane->state);
-		plane_state->pending.enable = false;
-		plane_state->pending.config = true;
-	}
-	mtk_crtc->pending_planes = true;
+			plane_state = to_mtk_plane_state(plane->state);
+			plane_state->pending.enable = false;
+			plane_state->pending.config = true;
+		}
+		mtk_crtc->pending_planes = true;
 
-	mtk_crtc_update_config(mtk_crtc, false);
+		mtk_crtc_update_config(mtk_crtc, false);
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
-	/* Wait for planes to be disabled by cmdq */
-	if (mtk_crtc->cmdq_client.chan)
-		wait_event_timeout(mtk_crtc->cb_blocking_queue,
-				   mtk_crtc->cmdq_vblank_cnt == 0,
-				   msecs_to_jiffies(500));
+		/* Wait for planes to be disabled by cmdq */
+		if (mtk_crtc->cmdq_client.chan) {
+			if (priv->data->quiesce_mutex_first) {
+				ret = mbox_flush(mtk_crtc->cmdq_client.chan,
+						 2000);
+				if (ret) {
+					mtk_crtc_handoff_dump(mtk_crtc,
+							      "cmdq-disable-failed");
+					mtk_crtc_handoff_inhibit(mtk_crtc);
+					crtc->state->no_vblank = true;
+					mtk_crtc_send_state_event(crtc);
+					if (mtk_crtc->enabled)
+						drm_crtc_vblank_off(crtc);
+					mtk_crtc->enabled = false;
+					drm_err(dev,
+						"CMDQ flush failed during disable: %d; triggers inhibited\n",
+						ret);
+					return;
+				}
+			} else {
+				wait_event_timeout(mtk_crtc->cb_blocking_queue,
+						   mtk_crtc->cmdq_vblank_cnt == 0,
+						   msecs_to_jiffies(500));
+			}
+		}
 #endif
-	/* Wait for planes to be disabled */
-	drm_crtc_wait_one_vblank(crtc);
+		/* Wait for planes to be disabled */
+		drm_crtc_wait_one_vblank(crtc);
+	}
 
-	drm_crtc_vblank_off(crtc);
-	mtk_crtc_ddp_hw_fini(mtk_crtc);
+	if (mtk_crtc->enabled)
+		drm_crtc_vblank_off(crtc);
+	ret = mtk_crtc_ddp_hw_fini(mtk_crtc);
+	if (ret) {
+		crtc->state->no_vblank = true;
+		mtk_crtc_send_state_event(crtc);
+		mtk_crtc->enabled = false;
+		return;
+	}
 	mtk_ddp_comp_power_off(comp);
 
 	mtk_crtc->enabled = false;
@@ -909,6 +1185,11 @@ static void mtk_crtc_atomic_begin(struct drm_crtc *crtc,
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct drm_device *dev = mtk_crtc->base.dev;
 	unsigned long flags;
+
+	if (!mtk_crtc->enabled || mtk_crtc->handoff_failed) {
+		mtk_crtc_state->base.no_vblank = true;
+		return;
+	}
 
 	if (mtk_crtc->event && mtk_crtc_state->base.event)
 		drm_err(dev, "new event while there is still a pending event\n");
@@ -929,7 +1210,43 @@ static void mtk_crtc_atomic_flush(struct drm_crtc *crtc,
 				  struct drm_atomic_commit *state)
 {
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
+	struct mtk_drm_private *priv = crtc->dev->dev_private;
+	struct mtk_ddp_comp *ovl = mtk_crtc->ddp_comp[0];
+	struct mtk_ddp_comp *dsi =
+		mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1];
+	int ret;
 	int i;
+
+	if (!mtk_crtc->enabled || mtk_crtc->handoff_failed)
+		return;
+
+	if (priv->data->quiesce_mutex_first &&
+	    mtk_crtc->handoff_wait_pending) {
+		unsigned int width = crtc->state->adjusted_mode.hdisplay;
+		unsigned int height = crtc->state->adjusted_mode.vdisplay;
+
+		ret = mtk_ovl_handoff_prepare(ovl->dev, width, height,
+					      &mtk_crtc->handoff_fme_seq);
+		if (ret)
+			goto handoff_failed;
+		ret = mtk_mutex_enable_sync(mtk_crtc->mutex);
+		if (ret)
+			goto handoff_failed;
+		ret = mtk_dsi_handoff_arm(dsi->dev);
+		if (ret)
+			goto handoff_failed;
+		ret = mtk_dsi_handoff_start(dsi->dev);
+		if (ret)
+			goto handoff_failed;
+		ret = mtk_ovl_handoff_wait_for_fme(ovl->dev,
+						   mtk_crtc->handoff_fme_seq);
+		mtk_crtc->handoff_wait_pending = false;
+		if (ret)
+			goto handoff_failed;
+		drm_info(crtc->dev,
+			 "MT6789 handoff complete: exact mutex state and fme_seq=%u\n",
+			 mtk_crtc->handoff_fme_seq);
+	}
 
 	if (crtc->state->color_mgmt_changed)
 		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
@@ -937,6 +1254,17 @@ static void mtk_crtc_atomic_flush(struct drm_crtc *crtc,
 			mtk_ddp_ctm_set(mtk_crtc->ddp_comp[i], crtc->state);
 		}
 	mtk_crtc_update_config(mtk_crtc, !!mtk_crtc->event);
+	return;
+
+handoff_failed:
+	mtk_crtc->handoff_wait_pending = false;
+	mtk_crtc_handoff_dump(mtk_crtc, "first-frame-failed");
+	mtk_crtc_handoff_inhibit(mtk_crtc);
+	crtc->state->no_vblank = true;
+	mtk_crtc_finish_page_flip(mtk_crtc);
+	drm_err(crtc->dev,
+		"MT6789 first-frame start failed: %d; pipeline quarantined\n",
+		ret);
 }
 
 static const struct drm_crtc_funcs mtk_crtc_funcs = {

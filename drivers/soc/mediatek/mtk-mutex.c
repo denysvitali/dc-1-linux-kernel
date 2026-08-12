@@ -26,6 +26,7 @@
 #define DISP_REG_MUTEX_EN(n)			(0x20 + 0x20 * (n))
 #define DISP_REG_MUTEX(n)			(0x24 + 0x20 * (n))
 #define DISP_REG_MUTEX_RST(n)			(0x28 + 0x20 * (n))
+#define DISP_REG_MUTEX_CFG			0x08
 /*
  * Some SoCs may have multiple MUTEX_MOD registers as more than 32 mods
  * are present, hence requiring multiple 32-bits registers.
@@ -371,6 +372,7 @@ struct mtk_mutex_data {
 	const u16 mutex_mod1_reg;
 	const u16 mutex_sof_reg;
 	const bool no_clk;
+	const bool output_in_mod;
 };
 
 struct mtk_mutex_ctx {
@@ -795,6 +797,7 @@ static const struct mtk_mutex_data mt6789_mutex_driver_data = {
 	.mutex_sof = mt6789_mutex_sof,
 	.mutex_mod_reg = MT8183_MUTEX0_MOD0,
 	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
+	.output_in_mod = true,
 };
 
 static const struct mtk_mutex_data mt8167_mutex_driver_data = {
@@ -1031,6 +1034,20 @@ void mtk_mutex_enable(struct mtk_mutex *mutex)
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_enable);
 
+int mtk_mutex_enable_sync(struct mtk_mutex *mutex)
+{
+	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+						 mutex[mutex->id]);
+	u32 val;
+
+	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+
+	writel(1, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
+	return readl_poll_timeout(mtx->regs + DISP_REG_MUTEX_EN(mutex->id),
+				  val, val & 1, 1, 1000);
+}
+EXPORT_SYMBOL_GPL(mtk_mutex_enable_sync);
+
 int mtk_mutex_enable_by_cmdq(struct mtk_mutex *mutex, void *pkt)
 {
 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
@@ -1061,6 +1078,128 @@ void mtk_mutex_disable(struct mtk_mutex *mutex)
 	writel(0, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_disable);
+
+int mtk_mutex_disable_sync(struct mtk_mutex *mutex)
+{
+	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+						 mutex[mutex->id]);
+	u32 val;
+
+	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+
+	writel(0, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
+	return readl_poll_timeout(mtx->regs + DISP_REG_MUTEX_EN(mutex->id),
+				  val, !(val & 1), 1, 1000);
+}
+EXPORT_SYMBOL_GPL(mtk_mutex_disable_sync);
+
+int mtk_mutex_configure(struct mtk_mutex *mutex,
+			const enum mtk_ddp_comp_id *components,
+			unsigned int component_count)
+{
+	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+						 mutex[mutex->id]);
+	u32 mod[2] = { 0, 0 };
+	u32 sof = mtx->data->mutex_sof[MUTEX_SOF_SINGLE_MODE];
+	unsigned int i;
+	u32 val;
+
+	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+
+	if ((component_count && !components) ||
+	    component_count > DDP_COMPONENT_ID_MAX)
+		return -EINVAL;
+	if (readl(mtx->regs + DISP_REG_MUTEX_EN(mutex->id)) & 1)
+		return -EBUSY;
+	if (mtx->data->output_in_mod) {
+		writel(0, mtx->regs + DISP_REG_MUTEX_CFG);
+		if (readl(mtx->regs + DISP_REG_MUTEX_CFG))
+			return -EIO;
+	}
+
+	for (i = 0; i < component_count; i++) {
+		enum mtk_ddp_comp_id id = components[i];
+		unsigned int mod_id;
+		unsigned int sof_id = MUTEX_SOF_SINGLE_MODE;
+		bool output = true;
+
+		switch (id) {
+		case DDP_COMPONENT_DSI0:
+		case DDP_COMPONENT_DSI1:
+			sof_id = MUTEX_SOF_DSI0;
+			break;
+		case DDP_COMPONENT_DSI2:
+			sof_id = MUTEX_SOF_DSI2;
+			break;
+		case DDP_COMPONENT_DSI3:
+			sof_id = MUTEX_SOF_DSI3;
+			break;
+		case DDP_COMPONENT_DPI0:
+			sof_id = MUTEX_SOF_DPI0;
+			break;
+		case DDP_COMPONENT_DPI1:
+			sof_id = MUTEX_SOF_DPI1;
+			break;
+		case DDP_COMPONENT_DP_INTF0:
+			sof_id = MUTEX_SOF_DP_INTF0;
+			break;
+		case DDP_COMPONENT_DP_INTF1:
+			sof_id = MUTEX_SOF_DP_INTF1;
+			break;
+		default:
+			output = false;
+			break;
+		}
+
+		if (output) {
+			sof = mtx->data->mutex_sof[sof_id];
+			if (!mtx->data->output_in_mod)
+				continue;
+		}
+
+		if (id >= DDP_COMPONENT_ID_MAX)
+			return -EINVAL;
+		mod_id = mtx->data->mutex_mod[id];
+		if (mod_id >= 32 && !mtx->data->mutex_mod1_reg)
+			return -EINVAL;
+		mod[mod_id / 32] |= BIT(mod_id % 32);
+	}
+
+	writel(mod[0], mtx->regs +
+	       DISP_REG_MUTEX_MOD(mtx, 0, mutex->id));
+	if (mtx->data->mutex_mod1_reg)
+		writel(mod[1], mtx->regs +
+		       DISP_REG_MUTEX_MOD(mtx, 32, mutex->id));
+	writel(sof, mtx->regs +
+	       DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, mutex->id));
+
+	val = readl(mtx->regs + DISP_REG_MUTEX_MOD(mtx, 0, mutex->id));
+	if (val != mod[0])
+		goto mismatch;
+	if (mtx->data->mutex_mod1_reg) {
+		val = readl(mtx->regs + DISP_REG_MUTEX_MOD(mtx, 32, mutex->id));
+		if (val != mod[1])
+			goto mismatch;
+	}
+	val = readl(mtx->regs +
+		    DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, mutex->id));
+	if (val != sof)
+		goto mismatch;
+
+	return 0;
+
+mismatch:
+	dev_err(mtx->dev,
+		"mutex%u configuration readback mismatch: mod0=%#x expected=%#x sof=%#x expected=%#x\n",
+		mutex->id,
+		readl(mtx->regs + DISP_REG_MUTEX_MOD(mtx, 0, mutex->id)),
+		mod[0],
+		readl(mtx->regs +
+		      DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, mutex->id)),
+		sof);
+	return -EIO;
+}
+EXPORT_SYMBOL_GPL(mtk_mutex_configure);
 
 void mtk_mutex_acquire(struct mtk_mutex *mutex)
 {

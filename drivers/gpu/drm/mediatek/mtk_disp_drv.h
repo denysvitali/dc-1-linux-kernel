@@ -49,6 +49,12 @@ unsigned int mtk_dpi_encoder_index(struct device *dev);
 
 void mtk_dsi_ddp_start(struct device *dev);
 void mtk_dsi_ddp_stop(struct device *dev);
+int mtk_dsi_ddp_power_on(struct device *dev);
+int mtk_dsi_ddp_power_off(struct device *dev);
+int mtk_dsi_handoff_quiesce(struct device *dev);
+int mtk_dsi_handoff_arm(struct device *dev);
+int mtk_dsi_handoff_start(struct device *dev);
+void mtk_dsi_handoff_abort(struct device *dev);
 unsigned int mtk_dsi_encoder_index(struct device *dev);
 
 int mtk_gamma_clk_enable(struct device *dev);
@@ -86,9 +92,16 @@ void mtk_ovl_config(struct device *dev, unsigned int w,
 		    unsigned int bpc, struct cmdq_pkt *cmdq_pkt);
 int mtk_ovl_layer_check(struct device *dev, unsigned int idx,
 			struct mtk_plane_state *mtk_state);
+int mtk_ovl_handoff_layer_validate(struct device *dev, unsigned int idx,
+				   struct mtk_plane_state *state);
 void mtk_ovl_layer_config(struct device *dev, unsigned int idx,
 			  struct mtk_plane_state *state,
 			  struct cmdq_pkt *cmdq_pkt);
+int mtk_ovl_handoff_stop(struct device *dev);
+int mtk_ovl_handoff_prepare(struct device *dev, unsigned int width,
+			    unsigned int height, u32 *fme_seq);
+int mtk_ovl_handoff_wait_for_fme(struct device *dev, u32 fme_seq);
+void mtk_ovl_handoff_abort(struct device *dev);
 unsigned int mtk_ovl_layer_nr(struct device *dev);
 void mtk_ovl_layer_on(struct device *dev, unsigned int idx,
 		      struct cmdq_pkt *cmdq_pkt);
@@ -152,6 +165,8 @@ void mtk_rdma_layer_config(struct device *dev, unsigned int idx,
 			   struct cmdq_pkt *cmdq_pkt);
 void mtk_rdma_start(struct device *dev);
 void mtk_rdma_stop(struct device *dev);
+int mtk_rdma_handoff_stop(struct device *dev);
+void mtk_rdma_handoff_dump(struct device *dev, const char *stage);
 void mtk_rdma_register_vblank_cb(struct device *dev,
 				 void (*vblank_cb)(void *),
 				 void *vblank_cb_data);

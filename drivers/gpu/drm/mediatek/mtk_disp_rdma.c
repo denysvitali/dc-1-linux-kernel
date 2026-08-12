@@ -7,6 +7,8 @@
 
 #include <linux/clk.h>
 #include <linux/component.h>
+#include <linux/delay.h>
+#include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -29,6 +31,10 @@
 #define DISP_REG_RDMA_GLOBAL_CON		0x0010
 #define RDMA_ENGINE_EN					BIT(0)
 #define RDMA_MODE_MEMORY				BIT(1)
+#define RDMA_SOFT_RESET					BIT(4)
+#define RDMA_SMI_BUSY					BIT(12)
+#define RDMA_RESET_STATE_MASK				GENMASK(10, 8)
+#define RDMA_RESET_STATE_IDLE				0x100
 #define DISP_REG_RDMA_SIZE_CON_0		0x0014
 #define RDMA_MATRIX_ENABLE				BIT(17)
 #define RDMA_MATRIX_INT_MTX_SEL				GENMASK(23, 20)
@@ -51,6 +57,13 @@
 #define RDMA_OUTPUT_VALID_FIFO_THRESHOLD(bytes)		((bytes) / 16)
 #define RDMA_FIFO_SIZE(rdma)			((rdma)->data->fifo_size)
 #define DISP_RDMA_MEM_START_ADDR		0x0f00
+#define DISP_REG_RDMA_DBG_OUT			0x0100
+#define DISP_REG_RDMA_DBG_OUT1			0x010c
+#define DISP_REG_RDMA_DBG_OUT2			0x0110
+#define DISP_REG_RDMA_IN_P_CNT			0x0120
+#define DISP_REG_RDMA_IN_LINE_CNT		0x0124
+#define DISP_REG_RDMA_OUT_P_CNT			0x0128
+#define DISP_REG_RDMA_OUT_LINE_CNT		0x012c
 
 #define RDMA_MEM_GMC				0x40402020
 
@@ -72,6 +85,7 @@ struct mtk_disp_rdma_data {
 	unsigned int fifo_size;
 	const u32 *formats;
 	size_t num_formats;
+	bool checked_handoff;
 };
 
 /*
@@ -179,6 +193,74 @@ void mtk_rdma_start(struct device *dev)
 void mtk_rdma_stop(struct device *dev)
 {
 	rdma_update_bits(dev, DISP_REG_RDMA_GLOBAL_CON, RDMA_ENGINE_EN, 0);
+}
+
+int mtk_rdma_handoff_stop(struct device *dev)
+{
+	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+	u32 val;
+	int ret;
+
+	if (!rdma->data->checked_handoff)
+		return -EOPNOTSUPP;
+
+	writel(0, rdma->regs + DISP_REG_RDMA_INT_ENABLE);
+	rdma_update_bits(dev, DISP_REG_RDMA_GLOBAL_CON, RDMA_ENGINE_EN, 0);
+	ret = readl_poll_timeout(rdma->regs + DISP_REG_RDMA_GLOBAL_CON, val,
+				 !(val & (RDMA_ENGINE_EN | RDMA_SMI_BUSY)),
+				 10, 100000);
+	if (ret)
+		goto fail;
+
+	writel(RDMA_SOFT_RESET, rdma->regs + DISP_REG_RDMA_GLOBAL_CON);
+	ret = readl_poll_timeout(rdma->regs + DISP_REG_RDMA_GLOBAL_CON, val,
+				 (val & RDMA_RESET_STATE_MASK) !=
+				 RDMA_RESET_STATE_IDLE, 1, 1000);
+	if (ret)
+		goto fail;
+	udelay(1);
+	writel(0, rdma->regs + DISP_REG_RDMA_GLOBAL_CON);
+	ret = readl_poll_timeout(rdma->regs + DISP_REG_RDMA_GLOBAL_CON, val,
+				 (val & RDMA_RESET_STATE_MASK) ==
+				 RDMA_RESET_STATE_IDLE, 1, 1000);
+	if (!ret) {
+		writel(0, rdma->regs + DISP_REG_RDMA_INT_STATUS);
+		readl(rdma->regs + DISP_REG_RDMA_INT_STATUS);
+		return 0;
+	}
+
+fail:
+	dev_err(dev,
+		"RDMA checked stop failed: %d global=%#x inten=%#x intsta=%#x\n",
+		ret, readl(rdma->regs + DISP_REG_RDMA_GLOBAL_CON),
+		readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE),
+		readl(rdma->regs + DISP_REG_RDMA_INT_STATUS));
+	return ret;
+}
+
+void mtk_rdma_handoff_dump(struct device *dev, const char *stage)
+{
+	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+
+	if (!rdma->data->checked_handoff)
+		return;
+
+	dev_err(dev,
+		"handoff %s: global=%#x inten=%#x intsta=%#x size=%#x/%#x fifo=%#x count=%#x/%#x/%#x/%#x dbg=%#x/%#x/%#x\n",
+		stage,
+		readl(rdma->regs + DISP_REG_RDMA_GLOBAL_CON),
+		readl(rdma->regs + DISP_REG_RDMA_INT_ENABLE),
+		readl(rdma->regs + DISP_REG_RDMA_INT_STATUS),
+		readl(rdma->regs + DISP_REG_RDMA_SIZE_CON_0),
+		readl(rdma->regs + DISP_REG_RDMA_SIZE_CON_1),
+		readl(rdma->regs + DISP_REG_RDMA_FIFO_CON),
+		readl(rdma->regs + DISP_REG_RDMA_IN_P_CNT),
+		readl(rdma->regs + DISP_REG_RDMA_IN_LINE_CNT),
+		readl(rdma->regs + DISP_REG_RDMA_OUT_P_CNT),
+		readl(rdma->regs + DISP_REG_RDMA_OUT_LINE_CNT),
+		readl(rdma->regs + DISP_REG_RDMA_DBG_OUT),
+		readl(rdma->regs + DISP_REG_RDMA_DBG_OUT1),
+		readl(rdma->regs + DISP_REG_RDMA_DBG_OUT2));
 }
 
 void mtk_rdma_config(struct device *dev, unsigned int width,
@@ -387,6 +469,7 @@ static const struct mtk_disp_rdma_data mt6789_rdma_driver_data = {
 		     SZ_512 + SZ_256 + SZ_64 + SZ_32,
 	.formats = mt8173_formats,
 	.num_formats = ARRAY_SIZE(mt8173_formats),
+	.checked_handoff = true,
 };
 
 static const struct mtk_disp_rdma_data mt8173_rdma_driver_data = {

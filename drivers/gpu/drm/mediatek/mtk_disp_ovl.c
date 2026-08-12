@@ -9,11 +9,15 @@
 
 #include <linux/clk.h>
 #include <linux/component.h>
+#include <linux/delay.h>
+#include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/soc/mediatek/mtk-cmdq.h>
+
+#include <asm/barrier.h>
 
 #include "mtk_crtc.h"
 #include "mtk_ddp_comp.h"
@@ -22,6 +26,8 @@
 
 #define DISP_REG_OVL_INTEN			0x0004
 #define OVL_FME_CPL_INT					BIT(1)
+#define OVL_SWRST_DONE_INT				BIT(3)
+#define OVL_ABNORMAL_SOF_INT				BIT(13)
 #define DISP_REG_OVL_INTSTA			0x0008
 #define DISP_REG_OVL_EN				0x000c
 #define OVL_EN_BYPASS_SHADOW			BIT(22)
@@ -44,6 +50,10 @@
 #define DISP_REG_OVL_RDMA_GMC(n)		(0x00c8 + 0x20 * (n))
 #define DISP_REG_OVL_ADDR_MT2701		0x0040
 #define DISP_REG_OVL_CLRFMT_EXT			0x02d0
+#define DISP_REG_OVL_FLOW_CTRL_DBG		0x0240
+#define OVL_FLOW_FSM_MASK			GENMASK(9, 0)
+#define OVL_FLOW_IDLE_MASK			GENMASK(1, 0)
+#define OVL_FLOW_H_W_RST			0x100
 #define OVL_CON_CLRFMT_BIT_DEPTH_MASK(n)		(GENMASK(1, 0) << (4 * (n)))
 #define OVL_CON_CLRFMT_BIT_DEPTH(depth, n)		((depth) << (4 * (n)))
 #define OVL_CON_CLRFMT_8_BIT				(0)
@@ -162,6 +172,8 @@ struct mtk_disp_ovl_data {
  * @data: platform data
  */
 struct mtk_disp_ovl {
+	struct device			*dev;
+	int				irq;
 	struct drm_crtc			*crtc;
 	struct clk			*clk;
 	void __iomem			*regs;
@@ -169,14 +181,40 @@ struct mtk_disp_ovl {
 	const struct mtk_disp_ovl_data	*data;
 	void				(*vblank_cb)(void *data);
 	void				*vblank_cb_data;
+	atomic_t			fme_seq;
+	wait_queue_head_t		fme_wait_queue;
 };
+
+static bool mtk_ovl_flow_operational(u32 flow)
+{
+	u32 fsm = flow & OVL_FLOW_FSM_MASK;
+
+	/* The non-reset states are one-hot from idle through engine-active. */
+	return fsm && !(fsm & (fsm - 1)) && fsm <= 0x20;
+}
 
 static irqreturn_t mtk_disp_ovl_irq_handler(int irq, void *dev_id)
 {
 	struct mtk_disp_ovl *priv = dev_id;
+	u32 status;
 
-	/* Clear frame completion interrupt */
+	status = readl(priv->regs + DISP_REG_OVL_INTSTA);
+	if (!status)
+		return IRQ_HANDLED;
+
+	/* OVL_INTSTA is write-zero-to-clear. */
 	writel(0x0, priv->regs + DISP_REG_OVL_INTSTA);
+	if (status & OVL_ABNORMAL_SOF_INT)
+		dev_err_ratelimited(priv->dev,
+				    "OVL abnormal SOF: status=%#x flow=%#x\n",
+				    status,
+				    readl(priv->regs + DISP_REG_OVL_FLOW_CTRL_DBG));
+
+	if (!(status & OVL_FME_CPL_INT))
+		return IRQ_HANDLED;
+
+	atomic_inc(&priv->fme_seq);
+	wake_up(&priv->fme_wait_queue);
 
 	/*
 	 * The bootloader can leave the OVL scanning out and its interrupt
@@ -286,6 +324,66 @@ void mtk_ovl_start(struct device *dev)
 	writel_relaxed(en, ovl->regs + DISP_REG_OVL_EN);
 }
 
+static int mtk_ovl_stop_checked(struct mtk_disp_ovl *ovl)
+{
+	u32 en = ovl->data->bypass_shadow ? OVL_EN_BYPASS_SHADOW : 0;
+	u32 val;
+	int ret;
+
+	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
+	readl(ovl->regs + DISP_REG_OVL_INTEN);
+	synchronize_irq(ovl->irq);
+	writel(en, ovl->regs + DISP_REG_OVL_EN);
+	ret = readl_poll_timeout(ovl->regs + DISP_REG_OVL_EN, val,
+				 val == en, 1, 1000);
+	if (ret)
+		return ret;
+
+	writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
+	readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	writel(1, ovl->regs + DISP_REG_OVL_RST);
+	ret = readl_poll_timeout(ovl->regs + DISP_REG_OVL_RST, val,
+				 val & 1, 1, 1000);
+	if (ret)
+		return ret;
+	udelay(1);
+	writel(0, ovl->regs + DISP_REG_OVL_RST);
+	ret = readl_poll_timeout(ovl->regs + DISP_REG_OVL_RST, val,
+				 !(val & 1), 1, 1000);
+	if (ret)
+		return ret;
+	ret = readl_poll_timeout(ovl->regs + DISP_REG_OVL_INTSTA, val,
+				 val & OVL_SWRST_DONE_INT, 1, 10000);
+	if (ret)
+		return ret;
+	writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
+
+	return readl_poll_timeout(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG,
+				  val,
+				  val & OVL_FLOW_IDLE_MASK,
+				  1, 10000);
+}
+
+int mtk_ovl_handoff_stop(struct device *dev)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	int ret;
+
+	if (!ovl->data->reset_on_stop)
+		return -EOPNOTSUPP;
+
+	ret = mtk_ovl_stop_checked(ovl);
+	if (ret)
+		dev_err(dev,
+			"OVL checked stop failed: %d en=%#x rst=%#x intsta=%#x flow=%#x\n",
+			ret, readl(ovl->regs + DISP_REG_OVL_EN),
+			readl(ovl->regs + DISP_REG_OVL_RST),
+			readl(ovl->regs + DISP_REG_OVL_INTSTA),
+			readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG));
+
+	return ret;
+}
+
 void mtk_ovl_stop(struct device *dev)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
@@ -298,11 +396,8 @@ void mtk_ovl_stop(struct device *dev)
 		 * status, then release reset.  Keep BYPASS_SHADOW set while EN itself
 		 * is clear.
 		 */
-		writel(0, ovl->regs + DISP_REG_OVL_INTEN);
-		writel(en, ovl->regs + DISP_REG_OVL_EN);
-		writel(1, ovl->regs + DISP_REG_OVL_RST);
-		writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
-		writel(0, ovl->regs + DISP_REG_OVL_RST);
+		if (mtk_ovl_stop_checked(ovl))
+			dev_err(dev, "OVL stop/reset readback failed\n");
 	} else {
 		writel_relaxed(en, ovl->regs + DISP_REG_OVL_EN);
 	}
@@ -501,6 +596,40 @@ static unsigned int mtk_ovl_fmt_convert(struct mtk_disp_ovl *ovl,
 	}
 }
 
+static void mtk_ovl_layer_values(struct mtk_disp_ovl *ovl,
+				 struct mtk_plane_state *state,
+				 u32 *con, u32 *pitch, u32 *addr)
+{
+	struct mtk_plane_pending_state *pending = &state->pending;
+	unsigned int blend_mode = state->base.pixel_blend_mode;
+	unsigned int rotation = pending->rotation;
+	unsigned int ignore_pixel_alpha = 0;
+
+	*con = mtk_ovl_fmt_convert(ovl, state);
+	*addr = pending->addr;
+	if (state->base.fb) {
+		*con |= state->base.alpha & OVL_CON_ALPHA;
+		if (blend_mode || state->base.fb->format->has_alpha)
+			*con |= OVL_CON_AEN;
+		if (blend_mode == DRM_MODE_BLEND_PIXEL_NONE ||
+		    !state->base.fb->format->has_alpha)
+			ignore_pixel_alpha = OVL_CONST_BLEND;
+	}
+
+	if (rotation & DRM_MODE_ROTATE_180)
+		rotation ^= DRM_MODE_REFLECT_X | DRM_MODE_REFLECT_Y;
+	if (rotation & DRM_MODE_REFLECT_Y) {
+		*con |= OVL_CON_VIRT_FLIP;
+		*addr += (pending->height - 1) * pending->pitch;
+	}
+	if (rotation & DRM_MODE_REFLECT_X) {
+		*con |= OVL_CON_HORZ_FLIP;
+		*addr += pending->pitch - 1;
+	}
+
+	*pitch = (pending->pitch & GENMASK(15, 0)) | ignore_pixel_alpha;
+}
+
 static void mtk_ovl_afbc_layer_config(struct mtk_disp_ovl *ovl,
 				      unsigned int idx,
 				      struct mtk_plane_pending_state *pending,
@@ -530,14 +659,11 @@ void mtk_ovl_layer_config(struct device *dev, unsigned int idx,
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
 	struct mtk_plane_pending_state *pending = &state->pending;
-	unsigned int addr = pending->addr;
-	unsigned int pitch_lsb = pending->pitch & GENMASK(15, 0);
+	unsigned int addr;
+	unsigned int pitch;
 	unsigned int fmt = pending->format;
-	unsigned int rotation = pending->rotation;
 	unsigned int offset = (pending->y << 16) | pending->x;
 	unsigned int src_size = (pending->height << 16) | pending->width;
-	unsigned int blend_mode = state->base.pixel_blend_mode;
-	unsigned int ignore_pixel_alpha = 0;
 	unsigned int con;
 
 	if (!pending->enable) {
@@ -545,43 +671,7 @@ void mtk_ovl_layer_config(struct device *dev, unsigned int idx,
 		return;
 	}
 
-	con = mtk_ovl_fmt_convert(ovl, state);
-	if (state->base.fb) {
-		con |= state->base.alpha & OVL_CON_ALPHA;
-
-		/*
-		 * For blend_modes supported SoCs, always enable alpha blending.
-		 * For blend_modes unsupported SoCs, enable alpha blending when has_alpha is set.
-		 */
-		if (blend_mode || state->base.fb->format->has_alpha)
-			con |= OVL_CON_AEN;
-
-		/*
-		 * Although the alpha channel can be ignored, CONST_BLD must be enabled
-		 * for XRGB format, otherwise OVL will still read the value from memory.
-		 * For RGB888 related formats, whether CONST_BLD is enabled or not won't
-		 * affect the result. Therefore we use !has_alpha as the condition.
-		 */
-		if (blend_mode == DRM_MODE_BLEND_PIXEL_NONE || !state->base.fb->format->has_alpha)
-			ignore_pixel_alpha = OVL_CONST_BLEND;
-	}
-
-	/*
-	 * Treat rotate 180 as flip x + flip y, and XOR the original rotation value
-	 * to flip x + flip y to support both in the same time.
-	 */
-	if (rotation & DRM_MODE_ROTATE_180)
-		rotation ^= DRM_MODE_REFLECT_X | DRM_MODE_REFLECT_Y;
-
-	if (rotation & DRM_MODE_REFLECT_Y) {
-		con |= OVL_CON_VIRT_FLIP;
-		addr += (pending->height - 1) * pending->pitch;
-	}
-
-	if (rotation & DRM_MODE_REFLECT_X) {
-		con |= OVL_CON_HORZ_FLIP;
-		addr += pending->pitch - 1;
-	}
+	mtk_ovl_layer_values(ovl, state, &con, &pitch, &addr);
 
 	if (ovl->data->supports_afbc)
 		mtk_ovl_set_afbc(ovl, cmdq_pkt, idx,
@@ -589,7 +679,7 @@ void mtk_ovl_layer_config(struct device *dev, unsigned int idx,
 
 	mtk_ddp_write_relaxed(cmdq_pkt, con, &ovl->cmdq_reg, ovl->regs,
 			      DISP_REG_OVL_CON(idx));
-	mtk_ddp_write_relaxed(cmdq_pkt, pitch_lsb | ignore_pixel_alpha,
+	mtk_ddp_write_relaxed(cmdq_pkt, pitch,
 			      &ovl->cmdq_reg, ovl->regs, DISP_REG_OVL_PITCH(idx));
 	mtk_ddp_write_relaxed(cmdq_pkt, src_size, &ovl->cmdq_reg, ovl->regs,
 			      DISP_REG_OVL_SRC_SIZE(idx));
@@ -603,6 +693,137 @@ void mtk_ovl_layer_config(struct device *dev, unsigned int idx,
 
 	mtk_ovl_set_bit_depth(dev, idx, fmt, cmdq_pkt);
 	mtk_ovl_layer_on(dev, idx, cmdq_pkt);
+}
+
+int mtk_ovl_handoff_layer_validate(struct device *dev, unsigned int idx,
+				   struct mtk_plane_state *state)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	struct mtk_plane_pending_state *pending = &state->pending;
+	u32 src_con;
+	u32 rdma;
+	u32 con, pitch, addr, size, offset;
+
+	if (idx >= ovl->data->layer_nr)
+		return -EINVAL;
+	src_con = readl(ovl->regs + DISP_REG_OVL_SRC_CON);
+	rdma = readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(idx));
+	if (!pending->enable) {
+		if (!(src_con & BIT(idx)) && !rdma)
+			return 0;
+		goto mismatch;
+	}
+
+	mtk_ovl_layer_values(ovl, state, &con, &pitch, &addr);
+	size = (pending->height << 16) | pending->width;
+	offset = (pending->y << 16) | pending->x;
+	if ((src_con & BIT(idx)) && rdma == 1 &&
+	    readl(ovl->regs + DISP_REG_OVL_CON(idx)) == con &&
+	    readl(ovl->regs + DISP_REG_OVL_ADDR(ovl, idx)) == addr &&
+	    readl(ovl->regs + DISP_REG_OVL_PITCH(idx)) == pitch &&
+	    readl(ovl->regs + DISP_REG_OVL_SRC_SIZE(idx)) == size &&
+	    readl(ovl->regs + DISP_REG_OVL_OFFSET(idx)) == offset)
+		return 0;
+
+mismatch:
+	dev_err(dev,
+		"OVL L%u readback mismatch: enable=%u src=%#x con=%#x addr=%#x pitch=%#x size=%#x offset=%#x rdma=%#x\n",
+		idx, pending->enable, src_con,
+		readl(ovl->regs + DISP_REG_OVL_CON(idx)),
+		readl(ovl->regs + DISP_REG_OVL_ADDR(ovl, idx)),
+		readl(ovl->regs + DISP_REG_OVL_PITCH(idx)),
+		readl(ovl->regs + DISP_REG_OVL_SRC_SIZE(idx)),
+		readl(ovl->regs + DISP_REG_OVL_OFFSET(idx)), rdma);
+	return -EIO;
+}
+
+int mtk_ovl_handoff_prepare(struct device *dev, unsigned int width,
+			    unsigned int height, u32 *fme_seq)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	u32 en = BIT(0) | OVL_EN_BYPASS_SHADOW;
+	u32 roi = height << 16 | width;
+	u32 src_con;
+
+	if (!ovl->data->bypass_shadow)
+		return -EOPNOTSUPP;
+
+	src_con = readl(ovl->regs + DISP_REG_OVL_SRC_CON);
+	if (readl(ovl->regs + DISP_REG_OVL_EN) != en ||
+	    readl(ovl->regs + DISP_REG_OVL_ROI_SIZE) != roi ||
+	    !(src_con & BIT(0))) {
+		dev_err(dev,
+			"OVL handoff invalid: en=%#x expected=%#x roi=%#x expected=%#x src=%#x flow=%#x\n",
+			readl(ovl->regs + DISP_REG_OVL_EN), en,
+			readl(ovl->regs + DISP_REG_OVL_ROI_SIZE), roi,
+			src_con,
+			readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG));
+		return -EIO;
+	}
+
+	/* Drain all preceding relaxed OVL writes before the cross-block trigger. */
+	readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(ovl->data->layer_nr - 1));
+	mb(); /* Complete OVL writes before enabling the display mutex. */
+	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
+	readl(ovl->regs + DISP_REG_OVL_INTEN);
+	writel(0, ovl->regs + DISP_REG_OVL_INTSTA);
+	readl(ovl->regs + DISP_REG_OVL_INTSTA);
+	synchronize_irq(ovl->irq);
+	*fme_seq = atomic_read(&ovl->fme_seq);
+	writel(OVL_FME_CPL_INT, ovl->regs + DISP_REG_OVL_INTEN);
+	if (readl(ovl->regs + DISP_REG_OVL_INTEN) != OVL_FME_CPL_INT)
+		return -EIO;
+
+	return 0;
+}
+
+int mtk_ovl_handoff_wait_for_fme(struct device *dev, u32 fme_seq)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	u32 flow;
+	int flow_ret;
+	long ret;
+
+	ret = wait_event_timeout(ovl->fme_wait_queue,
+				 atomic_read(&ovl->fme_seq) != fme_seq,
+				 msecs_to_jiffies(100));
+	flow_ret = readl_poll_timeout(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG,
+				      flow,
+				      mtk_ovl_flow_operational(flow),
+				      10, 20000);
+	if (!ret || flow_ret) {
+		dev_err(dev,
+			"OVL first-frame failure: seq=%u now=%u flow=%#x en=%#x rst=%#x inten=%#x intsta=%#x src=%#x roi=%#x bg=%#x l0con=%#x l0addr=%#x l0pitch=%#x l0size=%#x l0offset=%#x l0rdma=%#x\n",
+			fme_seq, atomic_read(&ovl->fme_seq), flow,
+			readl(ovl->regs + DISP_REG_OVL_EN),
+			readl(ovl->regs + DISP_REG_OVL_RST),
+			readl(ovl->regs + DISP_REG_OVL_INTEN),
+			readl(ovl->regs + DISP_REG_OVL_INTSTA),
+			readl(ovl->regs + DISP_REG_OVL_SRC_CON),
+			readl(ovl->regs + DISP_REG_OVL_ROI_SIZE),
+			readl(ovl->regs + DISP_REG_OVL_ROI_BGCLR),
+			readl(ovl->regs + DISP_REG_OVL_CON(0)),
+			readl(ovl->regs + DISP_REG_OVL_ADDR(ovl, 0)),
+			readl(ovl->regs + DISP_REG_OVL_PITCH(0)),
+			readl(ovl->regs + DISP_REG_OVL_SRC_SIZE(0)),
+			readl(ovl->regs + DISP_REG_OVL_OFFSET(0)),
+			readl(ovl->regs + DISP_REG_OVL_RDMA_CTRL(0)));
+		return !ret ? -ETIMEDOUT : flow_ret;
+	}
+
+	dev_info(dev, "OVL first frame complete: seq=%u flow=%#x\n",
+		 atomic_read(&ovl->fme_seq), flow);
+	return 0;
+}
+
+void mtk_ovl_handoff_abort(struct device *dev)
+{
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	u32 en = ovl->data->bypass_shadow ? OVL_EN_BYPASS_SHADOW : 0;
+
+	writel(0, ovl->regs + DISP_REG_OVL_INTEN);
+	writel(en, ovl->regs + DISP_REG_OVL_EN);
+	readl(ovl->regs + DISP_REG_OVL_EN);
 }
 
 void mtk_ovl_bgclr_in_on(struct device *dev)
@@ -651,10 +872,14 @@ static int mtk_disp_ovl_probe(struct platform_device *pdev)
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
+	priv->dev = dev;
+	atomic_set(&priv->fme_seq, 0);
+	init_waitqueue_head(&priv->fme_wait_queue);
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
+	priv->irq = irq;
 
 	priv->clk = devm_clk_get(dev, NULL);
 	if (IS_ERR(priv->clk))
