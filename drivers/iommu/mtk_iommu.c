@@ -385,6 +385,7 @@ static LIST_HEAD(m4ulist);	/* List all the M4U HWs */
 #define MT6789_OVL_PITCH_MSB(n)		(0x0040 + 0x20 * (n))
 #define MT6789_OVL_PITCH(n)		(0x0044 + 0x20 * (n))
 #define MT6789_OVL_RDMA_CTRL(n)		(0x00c0 + 0x20 * (n))
+#define MT6789_OVL_RDMA_EN		BIT(0)
 #define MT6789_OVL_FLOW_CTRL_DBG	0x0240
 #define MT6789_OVL_RDMA_DBG(n)		(0x024c + 0x4 * (n))
 #define MT6789_OVL_ADDR(n)		(0x0f40 + 0x20 * (n))
@@ -1466,7 +1467,7 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 		ret = -EBUSY;
 		goto out_log;
 	}
-	if (!(rdma & BIT(0)) || (datapath & BIT(4 + layer)) ||
+	if (!(rdma & MT6789_OVL_RDMA_EN) || (datapath & BIT(4 + layer)) ||
 	    (pitch_msb & MT6789_OVL_PITCH_MSB_2ND_SUBBUF) ||
 	    !width || !height || !pitch || width > 8192 || height > 8192 ||
 	    pitch < width || width != MT6789_JAGAR_FB_WIDTH ||
@@ -1511,7 +1512,8 @@ static int mt6789_boot_fb_resource(struct device *dev, struct resource *res)
 	con_after = readl(regs + MT6789_OVL_CON(layer));
 	addr_after = readl(regs + MT6789_OVL_ADDR(layer));
 	if (en_after != en || datapath_after != datapath ||
-	    src_after != src || rdma_after != rdma || con_after != con ||
+	    src_after != src || !(rdma_after & MT6789_OVL_RDMA_EN) ||
+	    con_after != con ||
 	    addr_after != addr ||
 	    readl(regs + MT6789_OVL_SRC_SIZE(layer)) != size ||
 	    readl(regs + MT6789_OVL_PITCH_MSB(layer)) != pitch_msb ||
