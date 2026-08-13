@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/touchscreen/tchip,ilitek.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Ilitek ILI2xxx I2C touchscreen controller
+
+maintainers:
+  - Denys Vitali <denys@denv.it>
+
+description: |
+  Ilitek I2C touchscreen controllers driven by
+  drivers/input/touchscreen/ilitek_ts_i2c.c.
+
+  NOTE: the "tchip,ilitek" compatible is a downstream (jagar) addition to
+  that driver, not an upstream of_match entry.  It was added together with a
+  vendor-reset quirk keyed off exactly this string, so substituting a real
+  "ilitek,ili2xxx" compatible would silently change the reset sequence this
+  panel expects.  This binding exists only to silence dtbs_check on the
+  downstream branch; upstream should instead identify the part and use a real
+  ilitek compatible, moving the reset sequence into a device-specific quirk.
+
+properties:
+  compatible:
+    const: tchip,ilitek
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  reset-gpios:
+    maxItems: 1
+
+  vdd-supply:
+    description: Power supply regulator for the touchscreen controller
+
+required:
+  - compatible
+  - reg
+
+allOf:
+  - $ref: touchscreen.yaml
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        touchscreen@41 {
+            compatible = "tchip,ilitek";
+            reg = <0x41>;
+            interrupt-parent = <&pio>;
+            interrupts = <12 IRQ_TYPE_EDGE_FALLING>;
+            reset-gpios = <&pio 40 GPIO_ACTIVE_HIGH>;
+            vdd-supply = <&reg_vctp_3v3>;
+        };
+    };

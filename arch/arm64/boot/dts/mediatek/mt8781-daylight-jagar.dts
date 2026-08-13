@@ -764,11 +764,12 @@
  *                   yet" no longer blocks it: the regulators are declared
  *                   standalone with regulator-boot-on, exactly as the factory
  *                   does, and a panel node can adopt them later.
- *   tchip,ilitek    "vendor-only" was WRONG.  It is a real upstream of_match
- *                   entry in drivers/input/touchscreen/ilitek_ts_i2c.c:681,
- *                   and :584 keys a vendor-reset quirk off exactly that
- *                   string, so it is the correct compatible for this part --
- *                   not a stand-in for ili210x.
+ *   tchip,ilitek    "vendor-only" was WRONG.  It is a jagar-local of_match
+ *                   entry added by commit e9cd5ca8ed2d8 to
+ *                   drivers/input/touchscreen/ilitek_ts_i2c.c, and :584 keys
+ *                   a vendor-reset quirk off exactly that string.  It is NOT
+ *                   upstream; an upstream path should identify the part and
+ *                   use a real ilitek,ili2xxx compatible.
  *
  * The remaining caveat is schema coverage, not driver coverage: "tchip,ilitek"
  * and "mediatek,mt6375" have drivers but NO binding schema anywhere under
@@ -886,12 +887,12 @@
 	clock-frequency = <400000>;
 
 	/*
-	 * Ilitek touchscreen.  "tchip,ilitek" is NOT a vendor-only alias to be
-	 * translated away: it is a real of_match entry in
-	 * drivers/input/touchscreen/ilitek_ts_i2c.c:681, and :584 keys a
-	 * vendor-reset quirk off exactly that string, so substituting an
-	 * ilitek,ili2xxx compatible would silently change the reset sequence
-	 * this panel expects.
+	 * Ilitek touchscreen.  "tchip,ilitek" is a jagar-local of_match entry
+	 * (added by commit e9cd5ca8ed2d8), not upstream; ilitek_ts_i2c.c:584
+	 * keys a vendor-reset quirk off exactly that string, so substituting a
+	 * real ilitek,ili2xxx compatible would silently change the reset
+	 * sequence this panel expects until that quirk is moved to a proper
+	 * device-specific mechanism.
 	 *
 	 * The driver takes vdd-supply through
 	 * devm_regulator_get_enable_optional and the reset line through the

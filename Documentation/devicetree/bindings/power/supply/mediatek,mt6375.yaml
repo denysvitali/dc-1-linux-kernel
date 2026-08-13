@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/mediatek,mt6375.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6375 read-only charger telemetry
+
+maintainers:
+  - Denys Vitali <denys@denv.it>
+
+description: |
+  Binding for the MediaTek MT6375 PMU I2C bank as consumed by the Daylight
+  DC-1 (jagar) read-only charger telemetry driver,
+  drivers/power/supply/mt6375-charger-readonly.c.
+
+  This binding is specific to that driver.  The MT6375 is a multi-address
+  device whose PMU bank sits at 0x34 with the charger registers at offsets
+  0x20..0xe1, but the driver only reports the charger configuration the
+  bootloader left behind and cannot change it (its regmap writeable_reg
+  returns false unconditionally).  The binding therefore carries no
+  properties beyond the I2C reg.
+
+  The MT6375 Type-C/PD controller, ADC, and backlight banks are deliberately
+  not described here, and the part is not register-compatible with the MT6360
+  or MT6370 devices that do have mainline bindings, so theirs must not be
+  borrowed for it.
+
+properties:
+  compatible:
+    const: mediatek,mt6375
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        pmic@34 {
+            compatible = "mediatek,mt6375";
+            reg = <0x34>;
+        };
+    };
