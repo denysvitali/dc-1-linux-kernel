@@ -636,11 +636,14 @@
  *   tps65132       there is a mainline regulator driver, but its only consumer
  *                   would be the panel node we cannot write yet.
  *
- * XXX UNKNOWN: the touchscreen.  The stock DT has an empty /touch node and a
- * "mediatek,goodix-fp" node, but the touch controller's bus, address, IRQ and
- * reset GPIO are configured by the vendor driver, not the DT.  pmaports MR
- * !8365 guesses goodix-berlin-spi for motorola-vicky; for jagar it is
- * unmeasured, so no touchscreen node is written.
+ * The touchscreen IS described in the shipped chain, but only after the
+ * factory DTBO is applied -- the vendor_boot base FDT alone has just an empty
+ * /touch node, which is what an earlier base-only read saw.  The merged tree
+ * has ilitek@41 on i2c0 (11e00000) with compatible "tchip,ilitek",
+ * ilitek,irq-gpio on GPIO12, ilitek,reset-gpio on GPIO40, a vdd-supply, and
+ * default/active/sleep pinctrl states.  No node is written here yet because
+ * "tchip,ilitek" is vendor-only: choosing between ili210x and ilitek_ts_i2c,
+ * and the binding to describe it with, is P3.2 work.
  */
 &i2c2 {
 	status = "okay";
@@ -667,11 +670,18 @@
 		reg = <0x55>;
 
 		/*
-		 * XXX UNKNOWN: the battery characteristics.  jagar's stock DT has
-		 * no simple-battery node and no design capacity anywhere, so
-		 * monitored-battery is omitted.  The gauge still reports
-		 * voltage/current/temperature/SoC from its own flash config, which
-		 * is enough to be a useful sign of life in
+		 * The battery characteristics ARE in the shipped chain, in a
+		 * simple-battery node the factory DTBO adds beside this gauge:
+		 * charge-full-design-microamp-hours = <8000000>,
+		 * energy-full-design-microwatt-hours = <30800000>,
+		 * voltage-min-design-microvolt = <3400000>.  An earlier read of
+		 * the vendor_boot base FDT alone did not see it.
+		 *
+		 * monitored-battery is still omitted here: wiring it up belongs
+		 * with P7.1's gauge bring-up, which has to establish the gauge's
+		 * supply, reset and seal state first.  Until then the gauge
+		 * reports voltage/current/temperature/SoC from its own flash
+		 * config, which is enough to be a useful sign of life in
 		 * /sys/class/power_supply/.
 		 */
 	};
