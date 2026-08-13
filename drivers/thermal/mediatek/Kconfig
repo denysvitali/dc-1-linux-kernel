@@ -34,4 +34,14 @@ config MTK_LVTS_THERMAL_DEBUGFS
        help
          Enable this option to debug the internals of the device driver.
 
+config MTK_LVTS_THERMAL_KUNIT_TEST
+	tristate "KUnit tests for MediaTek LVTS" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Test the source-derived MT6789 calibration byte offsets and
+	  temperature conversion without accessing LVTS hardware. The tests
+	  also verify that malformed calibration data is rejected and that
+	  the manual-RCK refinement threshold is strictly above 6.1 percent.
+
 endif

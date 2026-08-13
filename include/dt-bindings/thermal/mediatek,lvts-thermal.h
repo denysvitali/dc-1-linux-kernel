@@ -7,16 +7,19 @@
 #ifndef __MEDIATEK_LVTS_DT_H
 #define __MEDIATEK_LVTS_DT_H
 
-#define MT6789_AP_LITTLE_CPU0	0
-#define MT6789_AP_LITTLE_CPU1	1
-#define MT6789_AP_LITTLE_CPU2	2
-#define MT6789_AP_LITTLE_CPU3	3
-#define MT6789_AP_LITTLE_CPU4	4
-#define MT6789_AP_LITTLE_CPU5	5
-#define MT6789_AP_BIG_CPU0	6
-#define MT6789_AP_BIG_CPU1	7
-#define MT6789_AP_GPU0		8
-#define MT6789_AP_GPU1		9
+#define MT6789_TS1_0		0
+#define MT6789_TS1_1		1
+#define MT6789_TS1_2		2
+#define MT6789_TS1_3		3
+#define MT6789_TS2_0		4
+#define MT6789_TS2_1		5
+#define MT6789_TS2_2		6
+#define MT6789_TS2_3		7
+#define MT6789_TS3_0		8
+#define MT6789_TS3_1		9
+#define MT6789_TS3_2		10
+#define MT6789_TS3_3		11
+#define MT6789_TS4_0		12
 
 #define MT7987_CPU		0
 #define MT7987_ETH2P5G		1

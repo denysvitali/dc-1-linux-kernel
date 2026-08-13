@@ -20,6 +20,7 @@
 #include <dt-bindings/thermal/mediatek,lvts-thermal.h>
 
 #include "../thermal_hwmon.h"
+#include "lvts_thermal_internal.h"
 
 #define LVTS_MONCTL0(__base)	(__base + 0x0000)
 #define LVTS_MONCTL1(__base)	(__base + 0x0004)
@@ -107,6 +108,7 @@
 #define LVTS_MAX_CAL_OFFSETS		3
 #define LVTS_NUM_CAL_OFFSETS_MT7988	3
 #define LVTS_NUM_CAL_OFFSETS_MT8196	2
+#define LVTS_NUM_CAL_OFFSETS_MT6789	2
 
 static int golden_temp = LVTS_GOLDEN_TEMP_DEFAULT;
 static int golden_temp_offset;
@@ -144,6 +146,7 @@ struct lvts_ctrl_data {
 struct lvts_platform_ops {
 	int (*lvts_raw_to_temp)(u32 raw_temp, int temp_factor);
 	u32 (*lvts_temp_to_raw)(int temperature, int temp_factor);
+	int (*validate_calibration)(const u8 *efuse, size_t len);
 };
 
 struct lvts_data {
@@ -158,8 +161,14 @@ struct lvts_data {
 	int temp_factor;
 	int temp_offset;
 	int gt_calib_bit_offset;
+	u16 period_unit;
+	u16 group_interval;
+	u16 filter_interval;
+	u16 sensor_interval;
+	u8 hw_filter;
 	unsigned int def_calibration;
 	u16 msr_offset;
+	bool requires_manual_rck;
 };
 
 struct lvts_sensor {
@@ -327,6 +336,13 @@ static u32 lvts_temp_to_raw_mt7988(int temperature, int temp_factor)
 	raw_temp = div_s64(raw_temp, -temp_factor);
 
 	return raw_temp;
+}
+
+static int lvts_raw_to_temp_mt6789(u32 raw_temp, int temp_factor)
+{
+	(void)temp_factor;
+
+	return lvts_mt6789_raw_to_temp(raw_temp, golden_temp);
 }
 
 static u32 lvts_temp_to_raw_mt8196(int temperature, int temp_factor)
@@ -917,6 +933,13 @@ static int lvts_calibration_read(struct device *dev, struct lvts_domain *lvts_td
 	return 0;
 }
 
+static int lvts_validate_calibration_mt6789(const u8 *efuse, size_t len)
+{
+	struct lvts_mt6789_calibration cal;
+
+	return lvts_mt6789_decode_calibration(efuse, len, &cal);
+}
+
 static int lvts_golden_temp_init(struct device *dev, u8 *calib,
 				 const struct lvts_data *lvts_data)
 {
@@ -952,6 +975,14 @@ static int lvts_ctrl_init(struct device *dev, struct lvts_domain *lvts_td,
 	ret = lvts_calibration_read(dev, lvts_td, lvts_data);
 	if (ret)
 		return ret;
+
+	if (lvts_data->ops->validate_calibration) {
+		ret = lvts_data->ops->validate_calibration(lvts_td->calib,
+							  lvts_td->calib_len);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "Invalid LVTS calibration data\n");
+	}
 
 	ret = lvts_golden_temp_init(dev, lvts_td->calib, lvts_data);
 	if (ret)
@@ -1179,6 +1210,7 @@ static int lvts_ctrl_calibrate(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 
 static int lvts_ctrl_configure(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 {
+	const struct lvts_data *lvts_data = lvts_ctrl->lvts_data;
 	u32 value;
 
 	/*
@@ -1219,8 +1251,8 @@ static int lvts_ctrl_configure(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 	 * 6-8  : Sensor2 filter
 	 * 9-11 : Sensor3 filter
 	 */
-	value = LVTS_HW_FILTER << 9 |  LVTS_HW_FILTER << 6 |
-			LVTS_HW_FILTER << 3 | LVTS_HW_FILTER;
+	value = lvts_data->hw_filter << 9 | lvts_data->hw_filter << 6 |
+			lvts_data->hw_filter << 3 | lvts_data->hw_filter;
 	writel(value, LVTS_MSRCTL0(lvts_ctrl->base));
 
 	/*
@@ -1263,7 +1295,7 @@ static int lvts_ctrl_configure(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 	 *       9 - 0  : Period unit
 	 *
 	 */
-	value = LVTS_GROUP_INTERVAL << 20 | LVTS_PERIOD_UNIT;
+	value = lvts_data->group_interval << 20 | lvts_data->period_unit;
 	writel(value, LVTS_MONCTL1(lvts_ctrl->base));
 
 	/*
@@ -1276,7 +1308,7 @@ static int lvts_ctrl_configure(struct device *dev, struct lvts_ctrl *lvts_ctrl)
 	 *       9-0  : Interval unit in PERIOD_UNIT between each sensor
 	 *
 	 */
-	value = LVTS_FILTER_INTERVAL << 16 | LVTS_SENSOR_INTERVAL;
+	value = lvts_data->filter_interval << 16 | lvts_data->sensor_interval;
 	writel(value, LVTS_MONCTL2(lvts_ctrl->base));
 
 	return lvts_irq_init(lvts_ctrl);
@@ -1458,6 +1490,15 @@ static int lvts_probe(struct platform_device *pdev)
 	if (!lvts_data)
 		return -ENODEV;
 
+	/*
+	 * MT6789 needs a per-sensor manual-RCK pass before EDATA is valid.
+	 * Keep the source-only platform description fail-closed until that
+	 * hardware takeover is implemented and separately accepted.
+	 */
+	if (lvts_data->requires_manual_rck)
+		return dev_err_probe(dev, -EOPNOTSUPP,
+				     "manual RCK is not implemented\n");
+
 	lvts_td->clk = devm_clk_get_enabled(dev, NULL);
 	if (IS_ERR(lvts_td->clk))
 		return dev_err_probe(dev, PTR_ERR(lvts_td->clk), "Failed to retrieve clock\n");
@@ -1508,6 +1549,57 @@ static void lvts_remove(struct platform_device *pdev)
 	for (i = 0; i < lvts_td->num_lvts_ctrl; i++)
 		lvts_ctrl_set_enable(&lvts_td->lvts_ctrl[i], false);
 }
+
+/*
+ * MT6789 calibration byte stream (little-endian words):
+ *   word 0: golden temperature in bits 31:24
+ *   words 1-7: thirteen packed 16-bit count_r values
+ *   words 8-11: one 24-bit count_rc value per controller
+ *   word 12: present in the second nvmem block but unused by the shipped code
+ */
+static const struct lvts_ctrl_data mt6789_lvts_data_ctrl[] = {
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6789_TS1_0, .cal_offsets = { 4, 5 } },
+			{ .dt_id = MT6789_TS1_1, .cal_offsets = { 6, 7 } },
+			{ .dt_id = MT6789_TS1_2, .cal_offsets = { 8, 9 } },
+			{ .dt_id = MT6789_TS1_3, .cal_offsets = { 10, 11 } },
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 1),
+		.offset = 0x000,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6789_TS2_0, .cal_offsets = { 12, 13 } },
+			{ .dt_id = MT6789_TS2_1, .cal_offsets = { 14, 15 } },
+			{ .dt_id = MT6789_TS2_2, .cal_offsets = { 16, 17 } },
+			{ .dt_id = MT6789_TS2_3, .cal_offsets = { 18, 19 } },
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 1),
+		.offset = 0x100,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6789_TS3_0, .cal_offsets = { 20, 21 } },
+			{ .dt_id = MT6789_TS3_1, .cal_offsets = { 22, 23 } },
+			{ .dt_id = MT6789_TS3_2, .cal_offsets = { 24, 25 } },
+			{ .dt_id = MT6789_TS3_3, .cal_offsets = { 26, 27 } },
+		},
+		VALID_SENSOR_MAP(1, 1, 1, 1),
+		.offset = 0x200,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+	{
+		.lvts_sensor = {
+			{ .dt_id = MT6789_TS4_0, .cal_offsets = { 28, 29 } },
+		},
+		VALID_SENSOR_MAP(1, 0, 0, 0),
+		.offset = 0x300,
+		.mode = LVTS_MSR_FILTERED_MODE,
+	},
+};
 
 static const struct lvts_ctrl_data mt7987_lvts_ap_data_ctrl[] = {
 	{
@@ -2010,9 +2102,40 @@ static const struct lvts_platform_ops lvts_platform_ops_mt7988 = {
 	.lvts_temp_to_raw = lvts_temp_to_raw_mt7988,
 };
 
+static const struct lvts_platform_ops lvts_platform_ops_mt6789 = {
+	.lvts_raw_to_temp = lvts_raw_to_temp_mt6789,
+	.lvts_temp_to_raw = lvts_temp_to_raw_mt7988,
+	.validate_calibration = lvts_validate_calibration_mt6789,
+};
+
 static const struct lvts_platform_ops lvts_platform_ops_mt8196 = {
 	.lvts_raw_to_temp = lvts_raw_to_temp_mt7988,
 	.lvts_temp_to_raw = lvts_temp_to_raw_mt8196,
+};
+
+static const u32 mt6789_init_cmds[] = {
+	0xC1030300, 0xC1030420, 0xC1030500, 0xC10307A6,
+	0xC1030CFC, 0xC1030A8C, 0xC103098D, 0xC10308F1,
+};
+
+static const struct lvts_data mt6789_lvts_data = {
+	.lvts_ctrl	= mt6789_lvts_data_ctrl,
+	.num_lvts_ctrl	= ARRAY_SIZE(mt6789_lvts_data_ctrl),
+	.conn_cmd	= default_conn_cmds,
+	.init_cmd	= mt6789_init_cmds,
+	.num_conn_cmd	= ARRAY_SIZE(default_conn_cmds),
+	.num_init_cmd	= ARRAY_SIZE(mt6789_init_cmds),
+	.temp_factor	= LVTS_MT6789_COEFF_A,
+	.temp_offset	= LVTS_MT6789_COEFF_B,
+	.gt_calib_bit_offset = 24,
+	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT6789,
+	.period_unit	= 12,
+	.group_interval = 1,
+	.filter_interval = 1,
+	.sensor_interval = 1,
+	.hw_filter	= 0,
+	.ops		= &lvts_platform_ops_mt6789,
+	.requires_manual_rck = true,
 };
 
 static const struct lvts_data mt7987_lvts_ap_data = {
@@ -2172,6 +2295,7 @@ static const struct lvts_data mt8196_lvts_ap_data = {
 };
 
 static const struct of_device_id lvts_of_match[] = {
+	{ .compatible = "mediatek,mt6789-lvts", .data = &mt6789_lvts_data },
 	{ .compatible = "mediatek,mt7987-lvts-ap", .data = &mt7987_lvts_ap_data },
 	{ .compatible = "mediatek,mt7988-lvts-ap", .data = &mt7988_lvts_ap_data },
 	{ .compatible = "mediatek,mt8186-lvts", .data = &mt8186_lvts_data },
