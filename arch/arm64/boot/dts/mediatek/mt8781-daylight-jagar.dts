@@ -681,14 +681,19 @@
 	clock-frequency = <100000>;
 
 	/*
-	 * Board RTC, in addition to the PMIC RTC.  Measured extras not carried
-	 * over because rtc-s35390a does not consume them: an alarm EINT on
-	 * GPIO14 (level low, wakeup-source) with GPIO13/14 both pulled up, and
-	 * a stock default-time of 2023-03-01 00:00:00.
+	 * Board RTC, in addition to the PMIC RTC. The factory DTBO configures
+	 * GPIO13 and GPIO14 as pulled-up inputs, with GPIO14 alone carrying the
+	 * level-low alarm interrupt. Its default-time is intentionally omitted:
+	 * retained hardware time or userspace must establish the clock.
 	 */
 	rtc@30 {
 		compatible = "sii,s35390a";
 		reg = <0x30>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&rtc_pins>;
+		interrupt-parent = <&pio>;
+		interrupts = <14 IRQ_TYPE_LEVEL_LOW>;
+		wakeup-source;
 	};
 };
 
@@ -1106,6 +1111,15 @@
 		pins-bus {
 			pinmux = <PINMUX_GPIO146__FUNC_SCL8>,
 				 <PINMUX_GPIO147__FUNC_SDA8>;
+			bias-pull-up;
+			input-enable;
+		};
+	};
+
+	rtc_pins: rtc-pins {
+		pins-rtc {
+			pinmux = <PINMUX_GPIO13__FUNC_GPIO13>,
+				 <PINMUX_GPIO14__FUNC_GPIO14>;
 			bias-pull-up;
 			input-enable;
 		};

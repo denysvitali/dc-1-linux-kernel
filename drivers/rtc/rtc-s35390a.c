@@ -12,6 +12,10 @@
 #include <linux/bcd.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
+#include <linux/mutex.h>
+
+#include "rtc-s35390a-internal.h"
 
 #define S35390A_CMD_STATUS1	0
 #define S35390A_CMD_STATUS2	1
@@ -35,7 +39,6 @@
 /* flags for STATUS1 */
 #define S35390A_FLAG_POC	BIT(0)
 #define S35390A_FLAG_BLD	BIT(1)
-#define S35390A_FLAG_INT2	BIT(2)
 #define S35390A_FLAG_24H	BIT(6)
 #define S35390A_FLAG_RESET	BIT(7)
 
@@ -43,9 +46,6 @@
 #define S35390A_FLAG_TEST	BIT(0)
 
 /* INT2 pin output mode */
-#define S35390A_INT2_MODE_MASK		0x0E
-#define S35390A_INT2_MODE_NOINTR	0x00
-#define S35390A_INT2_MODE_ALARM		BIT(1) /* INT2AE */
 #define S35390A_INT2_MODE_PMIN_EDG	BIT(2) /* INT2ME */
 #define S35390A_INT2_MODE_FREQ		BIT(3) /* INT2FE */
 #define S35390A_INT2_MODE_PMIN		(BIT(3) | BIT(2)) /* INT2FE | INT2ME */
@@ -64,6 +64,9 @@ MODULE_DEVICE_TABLE(of, s35390a_of_match);
 
 struct s35390a {
 	struct i2c_client *client[8];
+	struct rtc_device *rtc;
+	/* Serialize STATUS/alarm transactions with threaded IRQ acknowledge. */
+	struct mutex lock;
 	int twentyfourhour;
 };
 
@@ -144,7 +147,7 @@ initialize:
  * To keep the information if an irq is pending, pass the value read from
  * STATUS1 to the caller.
  */
-static int s35390a_read_status(struct s35390a *s35390a, char *status1)
+static int s35390a_read_status(struct s35390a *s35390a, u8 *status1)
 {
 	int ret;
 
@@ -210,7 +213,7 @@ static int s35390a_rtc_set_time(struct device *dev, struct rtc_time *tm)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct s35390a	*s35390a = i2c_get_clientdata(client);
-	int i;
+	int i, err;
 	u8 buf[7], status;
 
 	dev_dbg(&client->dev, "%s: tm is secs=%d, mins=%d, hours=%d mday=%d, "
@@ -218,8 +221,13 @@ static int s35390a_rtc_set_time(struct device *dev, struct rtc_time *tm)
 		tm->tm_min, tm->tm_hour, tm->tm_mday, tm->tm_mon, tm->tm_year,
 		tm->tm_wday);
 
-	if (s35390a_read_status(s35390a, &status) == 1)
-		s35390a_init(s35390a);
+	mutex_lock(&s35390a->lock);
+
+	err = s35390a_read_status(s35390a, &status);
+	if (err == 1)
+		err = s35390a_init(s35390a);
+	if (err < 0)
+		goto unlock;
 
 	buf[S35390A_BYTE_YEAR] = bin2bcd(tm->tm_year - 100);
 	buf[S35390A_BYTE_MONTH] = bin2bcd(tm->tm_mon + 1);
@@ -233,7 +241,12 @@ static int s35390a_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	for (i = 0; i < 7; ++i)
 		buf[i] = bitrev8(buf[i]);
 
-	return s35390a_set_reg(s35390a, S35390A_CMD_TIME1, buf, sizeof(buf));
+	err = s35390a_set_reg(s35390a, S35390A_CMD_TIME1, buf, sizeof(buf));
+
+unlock:
+	mutex_unlock(&s35390a->lock);
+
+	return err;
 }
 
 static int s35390a_rtc_read_time(struct device *dev, struct rtc_time *tm)
@@ -243,12 +256,19 @@ static int s35390a_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	u8 buf[7], status;
 	int i, err;
 
-	if (s35390a_read_status(s35390a, &status) == 1)
-		return -EINVAL;
+	mutex_lock(&s35390a->lock);
+
+	err = s35390a_read_status(s35390a, &status);
+	if (err == 1) {
+		err = -EINVAL;
+		goto unlock;
+	}
+	if (err < 0)
+		goto unlock;
 
 	err = s35390a_get_reg(s35390a, S35390A_CMD_TIME1, buf, sizeof(buf));
 	if (err < 0)
-		return err;
+		goto unlock;
 
 	/* This chip returns the bits of each byte in reverse order */
 	for (i = 0; i < 7; ++i)
@@ -267,14 +287,60 @@ static int s35390a_rtc_read_time(struct device *dev, struct rtc_time *tm)
 		tm->tm_min, tm->tm_hour, tm->tm_mday, tm->tm_mon, tm->tm_year,
 		tm->tm_wday);
 
-	return 0;
+	err = 0;
+
+unlock:
+	mutex_unlock(&s35390a->lock);
+
+	return err;
+}
+
+static int s35390a_alarm_irq_enable_locked(struct s35390a *s35390a,
+					   bool enabled)
+{
+	u8 status1, status2;
+	int err;
+
+	err = s35390a_get_reg(s35390a, S35390A_CMD_STATUS2, &status2,
+			      sizeof(status2));
+	if (err < 0)
+		return err;
+
+	/* Disable INT2 before clearing its latched STATUS1 condition. */
+	status2 = s35390a_status2_alarm_mode(status2, false);
+	err = s35390a_set_reg(s35390a, S35390A_CMD_STATUS2, &status2,
+			      sizeof(status2));
+	if (err < 0)
+		return err;
+
+	err = s35390a_get_reg(s35390a, S35390A_CMD_STATUS1, &status1,
+			      sizeof(status1));
+	if (err < 0 || !enabled)
+		return err;
+
+	status2 = s35390a_status2_alarm_mode(status2, true);
+	return s35390a_set_reg(s35390a, S35390A_CMD_STATUS2, &status2,
+				 sizeof(status2));
+}
+
+static int s35390a_rtc_alarm_irq_enable(struct device *dev,
+					unsigned int enabled)
+{
+	struct s35390a *s35390a = dev_get_drvdata(dev);
+	int err;
+
+	mutex_lock(&s35390a->lock);
+	err = s35390a_alarm_irq_enable_locked(s35390a, enabled);
+	mutex_unlock(&s35390a->lock);
+
+	return err;
 }
 
 static int s35390a_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct s35390a *s35390a = i2c_get_clientdata(client);
-	u8 buf[3], sts = 0;
+	u8 buf[3];
 	int err, i;
 
 	dev_dbg(&client->dev, "%s: alm is secs=%d, mins=%d, hours=%d mday=%d, "\
@@ -282,25 +348,16 @@ static int s35390a_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 		alm->time.tm_min, alm->time.tm_hour, alm->time.tm_mday,
 		alm->time.tm_mon, alm->time.tm_year, alm->time.tm_wday);
 
-	/* disable interrupt (which deasserts the irq line) */
-	err = s35390a_set_reg(s35390a, S35390A_CMD_STATUS2, &sts, sizeof(sts));
-	if (err < 0)
-		return err;
+	mutex_lock(&s35390a->lock);
 
-	/* clear pending interrupt (in STATUS1 only), if any */
-	err = s35390a_get_reg(s35390a, S35390A_CMD_STATUS1, &sts, sizeof(sts));
+	err = s35390a_alarm_irq_enable_locked(s35390a, false);
 	if (err < 0)
-		return err;
-
-	if (alm->enabled)
-		sts = S35390A_INT2_MODE_ALARM;
-	else
-		sts = S35390A_INT2_MODE_NOINTR;
-
-	/* set interrupt mode*/
-	err = s35390a_set_reg(s35390a, S35390A_CMD_STATUS2, &sts, sizeof(sts));
-	if (err < 0)
-		return err;
+		goto unlock;
+	if (alm->enabled) {
+		err = s35390a_alarm_irq_enable_locked(s35390a, true);
+		if (err < 0)
+			goto unlock;
+	}
 
 	if (alm->time.tm_wday != -1)
 		buf[S35390A_ALRM_BYTE_WDAY] = bin2bcd(alm->time.tm_wday) | 0x80;
@@ -318,7 +375,10 @@ static int s35390a_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 		buf[i] = bitrev8(buf[i]);
 
 	err = s35390a_set_reg(s35390a, S35390A_CMD_INT2_REG1, buf,
-								sizeof(buf));
+				 sizeof(buf));
+
+unlock:
+	mutex_unlock(&s35390a->lock);
 
 	return err;
 }
@@ -330,9 +390,11 @@ static int s35390a_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alm)
 	u8 buf[3], sts;
 	int i, err;
 
+	mutex_lock(&s35390a->lock);
+
 	err = s35390a_get_reg(s35390a, S35390A_CMD_STATUS2, &sts, sizeof(sts));
 	if (err < 0)
-		return err;
+		goto unlock;
 
 	if ((sts & S35390A_INT2_MODE_MASK) != S35390A_INT2_MODE_ALARM) {
 		/*
@@ -340,14 +402,15 @@ static int s35390a_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alm)
 		 * the alarm time isn't accessible.
 		 */
 		alm->enabled = 0;
-		return 0;
+		err = 0;
+		goto unlock;
 	} else {
 		alm->enabled = 1;
 	}
 
 	err = s35390a_get_reg(s35390a, S35390A_CMD_INT2_REG1, buf, sizeof(buf));
 	if (err < 0)
-		return err;
+		goto unlock;
 
 	/* This chip returns the bits of each byte in reverse order */
 	for (i = 0; i < 3; ++i)
@@ -376,7 +439,12 @@ static int s35390a_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alm)
 			__func__, alm->time.tm_min, alm->time.tm_hour,
 			alm->time.tm_wday);
 
-	return 0;
+	err = 0;
+
+unlock:
+	mutex_unlock(&s35390a->lock);
+
+	return err;
 }
 
 static int s35390a_rtc_ioctl(struct device *dev, unsigned int cmd,
@@ -387,26 +455,57 @@ static int s35390a_rtc_ioctl(struct device *dev, unsigned int cmd,
 	u8 sts;
 	int err;
 
+	mutex_lock(&s35390a->lock);
+
 	switch (cmd) {
 	case RTC_VL_READ:
 		/* s35390a_reset set lowvoltage flag and init RTC if needed */
 		err = s35390a_read_status(s35390a, &sts);
 		if (err < 0)
-			return err;
+			goto unlock;
 		if (copy_to_user((void __user *)arg, &err, sizeof(int)))
-			return -EFAULT;
+			err = -EFAULT;
 		break;
 	case RTC_VL_CLR:
 		/* update flag and clear register */
 		err = s35390a_init(s35390a);
 		if (err < 0)
-			return err;
+			goto unlock;
 		break;
 	default:
-		return -ENOIOCTLCMD;
+		err = -ENOIOCTLCMD;
 	}
 
-	return 0;
+unlock:
+	mutex_unlock(&s35390a->lock);
+
+	return err < 0 ? err : 0;
+}
+
+static irqreturn_t s35390a_irq(int irq, void *dev_id)
+{
+	struct s35390a *s35390a = dev_id;
+	unsigned long events;
+	u8 status1;
+	int err;
+
+	mutex_lock(&s35390a->lock);
+	err = s35390a_get_reg(s35390a, S35390A_CMD_STATUS1, &status1,
+			      sizeof(status1));
+	mutex_unlock(&s35390a->lock);
+	if (err < 0) {
+		dev_err_ratelimited(&s35390a->client[0]->dev,
+				    "failed to clear alarm IRQ: %d\n", err);
+		return IRQ_NONE;
+	}
+
+	events = s35390a_status1_alarm_events(status1);
+	if (!events)
+		return IRQ_NONE;
+
+	rtc_update_irq(s35390a->rtc, 1, events);
+
+	return IRQ_HANDLED;
 }
 
 static const struct rtc_class_ops s35390a_rtc_ops = {
@@ -414,6 +513,7 @@ static const struct rtc_class_ops s35390a_rtc_ops = {
 	.set_time	= s35390a_rtc_set_time,
 	.set_alarm	= s35390a_rtc_set_alarm,
 	.read_alarm	= s35390a_rtc_read_alarm,
+	.alarm_irq_enable = s35390a_rtc_alarm_irq_enable,
 	.ioctl          = s35390a_rtc_ioctl,
 };
 
@@ -460,6 +560,7 @@ static int s35390a_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	s35390a->client[0] = client;
+	mutex_init(&s35390a->lock);
 	i2c_set_clientdata(client, s35390a);
 
 	/* This chip uses multiple addresses, use dummy devices for them */
@@ -477,6 +578,7 @@ static int s35390a_probe(struct i2c_client *client)
 	rtc = devm_rtc_allocate_device(dev);
 	if (IS_ERR(rtc))
 		return PTR_ERR(rtc);
+	s35390a->rtc = rtc;
 
 	err_read = s35390a_read_status(s35390a, &status1);
 	if (err_read < 0) {
@@ -505,17 +607,25 @@ static int s35390a_probe(struct i2c_client *client)
 		}
 	}
 
-	device_set_wakeup_capable(dev, 1);
-
 	rtc->ops = &s35390a_rtc_ops;
 	rtc->range_min = RTC_TIMESTAMP_BEGIN_2000;
 	rtc->range_max = RTC_TIMESTAMP_END_2099;
 
 	set_bit(RTC_FEATURE_ALARM_RES_MINUTE, rtc->features);
 	clear_bit(RTC_FEATURE_UPDATE_INTERRUPT, rtc->features);
+	if (client->irq > 0) {
+		err = devm_request_threaded_irq(dev, client->irq, NULL,
+						s35390a_irq, IRQF_ONESHOT,
+						dev_name(dev), s35390a);
+		if (err)
+			return dev_err_probe(dev, err,
+					     "unable to request alarm IRQ\n");
+	} else {
+		clear_bit(RTC_FEATURE_ALARM, rtc->features);
+	}
 
 	if (status1 & S35390A_FLAG_INT2)
-		rtc_update_irq(rtc, 1, RTC_AF);
+		rtc_update_irq(rtc, 1, RTC_IRQF | RTC_AF);
 
 	nvmem_cfg.priv = s35390a;
 	err = devm_rtc_nvmem_register(rtc, &nvmem_cfg);

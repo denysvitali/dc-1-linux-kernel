@@ -676,6 +676,16 @@ config RTC_DRV_S35390A
 	  This driver can also be built as a module. If so the module
 	  will be called rtc-s35390a.
 
+config RTC_DRV_S35390A_KUNIT_TEST
+	tristate "KUnit tests for S-35390A alarm helpers" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Test the S-35390A alarm mode update and pending-event decoding
+	  helpers without accessing RTC hardware. The tests verify that
+	  unrelated STATUS2 bits are preserved and that an INT2 event is
+	  reported with both RTC_IRQF and RTC_AF.
+
 config RTC_DRV_FM3130
 	tristate "Ramtron FM3130"
 	help
