@@ -170,8 +170,9 @@
 	 *   emi_mbist   EMI MBIST scratch
 	 *   crypto_hw   1 page, MPU protected
 	 *   dramc_rk0/1 the DRAM controller uses the last page of each rank
-	 *   framebuffer the scanout simpledrm is going to map -- must be no-map
-	 *               (see comment on that node)
+	 *   framebuffer LK's live scanout buffer, which jagar_fbcon renders the
+	 *               early console into -- reserved but deliberately NOT
+	 *               no-map (see the comment on that node)
 	 *   aee_lk      LK crash buffer; only 8 MiB and it lets LK's AEE survive
 	 *   log_store   preloader/LK log ring, readable from LK afterwards
 	 *   ramoops     see comment on that node -- this is a *feature* for us
@@ -265,9 +266,15 @@
 			no-map;
 		};
 
+		/*
+		 * LK's crash buffer.  Mapped, not no-map, matching LK's own
+		 * mblock-12-aee_lk -- see the framebuffer node for why the
+		 * no-map spelling never took effect on any of these four.  A log
+		 * buffer the kernel or userspace may want to read back is the
+		 * last thing to put outside the linear map.
+		 */
 		aee_lk_mem: aee-lk@50700000 {
 			reg = <0x0 0x50700000 0x0 0x800000>;
-			no-map;
 		};
 
 		consys_emi_mem: consys-emi@7e000000 {
@@ -280,9 +287,14 @@
 			no-map;
 		};
 
+		/*
+		 * GenieZone's log ring, matching LK's mblock-6-gz-log.  Mapped
+		 * for the same reason as aee-lk above.  Note this is the LOG
+		 * region only: gz@7f800000, where the hypervisor is actually
+		 * executing, keeps its no-map and must keep it.
+		 */
 		gz_log_mem: gz-log@7f200000 {
 			reg = <0x0 0x7f200000 0x0 0x41000>;
-			no-map;
 		};
 
 		unmap_mem: unmap@7f400000 {
@@ -300,9 +312,13 @@
 			no-map;
 		};
 
+		/*
+		 * Preloader/LK log ring, matching LK's mblock-7-log_store.
+		 * Mapped: tools/logstore-dump.sh exists precisely to read this
+		 * back, which no-map would obstruct.
+		 */
 		log_store_mem: log-store@7ffbf000 {
 			reg = <0x0 0x7ffbf000 0x0 0x40000>;
-			no-map;
 		};
 
 		mbist_mem: emi-mbist@7ffff000 {
@@ -355,14 +371,44 @@
 		 * (0x173e000), not just the one frame simpledrm maps, because LK's
 		 * display engine may still be flipping inside it.
 		 *
-		 * "no-map" is required, not cosmetic: simpledrm does ioremap_wc() on
-		 * this range, and ioremap of memory that is in the kernel's linear
-		 * map is refused.  Stock leaves this region mapped because the
-		 * vendor display driver reaches it a different way.
+		 * NO "no-map" here, and that is a deliberate P5.2 reversal of what
+		 * this comment used to claim.  The old text said no-map was
+		 * "required, not cosmetic" because simpledrm ioremap_wc()s the
+		 * range.  Three things refute it:
+		 *
+		 * 1. It never took effect.  LK PREPENDS its own 25 mblock-N-*
+		 *    children into /reserved-memory, so its mblock-13-framebuffer
+		 *    -- same reg, no no-map -- is scanned first and takes the
+		 *    memblock_reserve().  When this node is reached,
+		 *    early_init_dt_reserve_memory() sees the range already
+		 *    reserved and returns -EBUSY (of_reserved_mem.c:130), and
+		 *    __reserved_mem_reserve_reg() only pr_err()s and carries on
+		 *    (:174).  Prepend order verified against the live
+		 *    /sys/firmware/fdt: mblock-25 first, mblock-1 last, and the
+		 *    one pre-existing vendor child last of all.
+		 * 2. It contradicts the console that actually runs.  arch/arm64/
+		 *    kernel/jagar_fbcon.c reaches this buffer with __va() from
+		 *    setup_arch, and its own header comment states the opposite
+		 *    requirement to the old text here: the range must stay in the
+		 *    linear map. no-map would make jagar_fbcon_early_init() fatal.
+		 * 3. Being mapped costs nothing we need.  LK's reservation already
+		 *    keeps the allocator out; "reserved" and "linear-mapped" are
+		 *    independent, and mapped is what __va() requires.
+		 *
+		 * So this is a landmine removed, not a behaviour change: today
+		 * both spellings produce an identical mapped range, and only the
+		 * no-map spelling breaks the moment LK stops publishing its own
+		 * copy.  Pre-registered observable for P5.5: with these four nodes
+		 * corrected, the four "Reserved memory: failed to reserve memory
+		 * for node" pr_errs should be absent from dmesg.
+		 *
+		 * If simpledrm is ever made the display path it will need this
+		 * range OUT of the linear map, and jagar_fbcon must lose its
+		 * __va() in the same commit.  That is a kernel-side decision; do
+		 * not make it by editing this node alone.
 		 */
 		fb_mem: framebuffer@fe8c1000 {
 			reg = <0x0 0xfe8c1000 0x0 0x173e000>;
-			no-map;
 		};
 
 		/*
@@ -387,6 +433,81 @@
 		regulator-name = "vsys";
 		regulator-always-on;
 		regulator-boot-on;
+	};
+
+	/*
+	 * Touch and pen rails.  All three are transcribed from the factory
+	 * /soc/odm/regulator_* nodes in the merged chain: fixed regulators
+	 * gated by a GPIO, enable-active-high, with the exact names and
+	 * voltages below.  The GPIO numbers are the factory's, decoded from
+	 * <&pio PIN FLAG> triples.
+	 */
+	reg_vctp_3v3: regulator-vctp-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "VCTP-3V3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&pio 154 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	reg_wacom_1v8: regulator-wacom-1v8 {
+		compatible = "regulator-fixed";
+		regulator-name = "WACOM-1V8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&pio 150 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	/*
+	 * The digitiser's second rail.  The factory names it vddl-supply on
+	 * the device node, but wacom,w9007a-lt03.yaml is
+	 * unevaluatedProperties: false and has no vddl-supply, so it cannot be
+	 * referenced from there.  regulator-always-on is what keeps it up
+	 * instead; without it nothing would ever enable this rail and the pen
+	 * would never answer.  startup-delay-us is the factory's.
+	 */
+	reg_wacom_3v3: regulator-wacom-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "WACOM-3V3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&pio 41 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <3000>;
+		regulator-always-on;
+	};
+
+	/*
+	 * Battery characteristics.  The factory chain puts this at
+	 * /soc/i2c@11f00000/battery -- a child of the i2c7 controller with no
+	 * reg, which dtc's own i2c_bus_reg check rejects.  battery.yaml
+	 * describes a standalone node that chargers and gauges reach by
+	 * phandle, so it moves to the root here and gains a label.
+	 *
+	 * The three values are read with fdtget from two independent sources:
+	 * the reconstructed base+overlay merge and the FDT the boot chain
+	 * actually handed a running kernel on this device.  They are mutually
+	 * consistent -- 30.8 Wh / 8.0 Ah = 3.85 V nominal exactly, and a 3.4 V
+	 * drained figure is 1S -- i.e. one 8000 mAh high-voltage Li-ion cell.
+	 *
+	 * Two numbers elsewhere in the chain disagree and are NOT used: the
+	 * MT6375 charger's cv = 4200 mV, which sits among untouched MediaTek
+	 * reference defaults, and the USB-PD bat-info0 design_cap = 3000 mAh,
+	 * which carries Richtek's own vid/pid and is a reference-design
+	 * placeholder rather than this pack.
+	 *
+	 * Only the three properties the factory states are declared;
+	 * battery.yaml is additionalProperties: false and the rest are not
+	 * guessed.  No consumer references this node yet -- see the
+	 * monitored-battery note on the fuel gauge.
+	 */
+	jagar_battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <8000000>;
+		energy-full-design-microwatt-hours = <30800000>;
+		voltage-min-design-microvolt = <3400000>;
 	};
 
 	/*
@@ -620,31 +741,44 @@
  *   i2c8 @11eb2000  Seiko S-35390A RTC @0x30
  *   i2c9 @11eb3000  Wacom EMR digitiser @0x09
  *
+ * Also on the shipped chain and now declared below (P5.2): i2c0 @11e00000
+ * carries the ilitek touchscreen @0x41, and i2c5 additionally carries the
+ * MT6375 PMU @0x34.
+ *
  * Declared below: the devices that have a driver in this tree and a real
  * binding, including both richtek,rt4539 frontlights -- amber @i2c2 0x3c with
  * enable GPIO99 and white @i2c5 0x3c with enable GPIO98, driven by
- * drivers/video/backlight/rt4539.c (CONFIG_BACKLIGHT_RT4539).  Not declared,
- * and why:
- *   emr,wacom_i2c   no mainline driver (measured: i2c9 0x09, IRQ GPIO9,
- *                   reset GPIO88 active-low, vdd WACOM-1V8 = GPIO150,
- *                   vddl WACOM-3V3 = GPIO41, 110 ms post-power-on delay)
- *   richtek,rt9471  driver exists (drivers/power/supply/rt9471.c) but on jagar
- *                   this part is the *secondary* charger of a dual-charger
- *                   topology, with a CE GPIO (GPIO151, active low) and an IRQ
- *                   on GPIO8.  Bringing up half of a dual-charger setup on a
- *                   device with a non-removable battery is not something to do
- *                   blind, so it is left out.
- *   tps65132       there is a mainline regulator driver, but its only consumer
- *                   would be the panel node we cannot write yet.
+ * drivers/video/backlight/rt4539.c (CONFIG_BACKLIGHT_RT4539).
+ *
+ * P5.2 closed the six-device gap that inventory.py reported between this tree
+ * and the merged factory chain.  Three claims that stood in this comment
+ * before are RETRACTED, each refuted by re-reading this tree:
+ *
+ *   emr,wacom_i2c   "no mainline driver" was WRONG.  drivers/input/
+ *                   touchscreen/wacom_w9000.c (upstream, "Input: Add support
+ *                   for Wacom W9000-series penabled touchscreens") binds
+ *                   wacom,w9002 / w9007a-lt03 / w9007a-v1 and has a schema at
+ *                   Documentation/devicetree/bindings/input/touchscreen/
+ *                   wacom,w9007a-lt03.yaml.  Declared on i2c9 below.
+ *   tps65132        the "only consumer would be the panel node we cannot write
+ *                   yet" no longer blocks it: the regulators are declared
+ *                   standalone with regulator-boot-on, exactly as the factory
+ *                   does, and a panel node can adopt them later.
+ *   tchip,ilitek    "vendor-only" was WRONG.  It is a real upstream of_match
+ *                   entry in drivers/input/touchscreen/ilitek_ts_i2c.c:681,
+ *                   and :584 keys a vendor-reset quirk off exactly that
+ *                   string, so it is the correct compatible for this part --
+ *                   not a stand-in for ili210x.
+ *
+ * The remaining caveat is schema coverage, not driver coverage: "tchip,ilitek"
+ * and "mediatek,mt6375" have drivers but NO binding schema anywhere under
+ * Documentation/devicetree/bindings, so both are undocumented-compatible
+ * warnings under dtbs_check until schemas are written.  That is the open half
+ * of P5.2, tracked in TODO.md.
  *
  * The touchscreen IS described in the shipped chain, but only after the
  * factory DTBO is applied -- the vendor_boot base FDT alone has just an empty
- * /touch node, which is what an earlier base-only read saw.  The merged tree
- * has ilitek@41 on i2c0 (11e00000) with compatible "tchip,ilitek",
- * ilitek,irq-gpio on GPIO12, ilitek,reset-gpio on GPIO40, a vdd-supply, and
- * default/active/sleep pinctrl states.  No node is written here yet because
- * "tchip,ilitek" is vendor-only: choosing between ili210x and ilitek_ts_i2c,
- * and the binding to describe it with, is P3.2 work.
+ * /touch node, which is what an earlier base-only read saw.
  */
 &i2c2 {
 	status = "okay";
@@ -653,7 +787,46 @@
 	pinctrl-0 = <&i2c2_pins>;
 	clock-frequency = <100000>;
 
-	/* tps65132@3e -- panel AVDD/AVEE, see the display section */
+	/*
+	 * Panel bias.  outp/outn are the panel's positive and negative rails
+	 * (factory regulator-name "LCD_AVDD" / "LCD_AVEE"), each gated by its
+	 * own enable GPIO.  drivers/regulator/tps65132-regulator.c binds
+	 * "ti,tps65132" and looks the two rails up by the sub-node names
+	 * "outp" and "outn"; the factory spells the compatible as a bare
+	 * "tps65132" with no vendor prefix, which is exactly the vendor-only
+	 * alias P5.2 exists to eliminate.
+	 *
+	 * The voltage limits are read with fdtget from the merged factory
+	 * chain, not from the decompiled text: dtc mis-typed
+	 * regulator-min-microvolt as a string and printed it garbled.  Both
+	 * rails are 4000000..6000000 uV.
+	 *
+	 * regulator-boot-on matches the factory: LK has already brought the
+	 * panel up, so these must not be treated as off at probe.  No
+	 * consumer is wired yet -- a panel node can take them as
+	 * power-supply/enable-supply once it exists -- so they are declared
+	 * standalone here rather than left out.
+	 */
+	regulator@3e {
+		compatible = "ti,tps65132";
+		reg = <0x3e>;
+
+		reg_panel_avdd: outp {
+			regulator-name = "LCD_AVDD";
+			regulator-min-microvolt = <4000000>;
+			regulator-max-microvolt = <6000000>;
+			enable-gpios = <&pio 39 GPIO_ACTIVE_HIGH>;
+			regulator-boot-on;
+		};
+
+		reg_panel_avee: outn {
+			regulator-name = "LCD_AVEE";
+			regulator-min-microvolt = <4000000>;
+			regulator-max-microvolt = <6000000>;
+			enable-gpios = <&pio 38 GPIO_ACTIVE_HIGH>;
+			regulator-boot-on;
+		};
+	};
 
 	/*
 	 * Amber frontlight.  Every value below is transcribed from the stock
@@ -693,6 +866,110 @@
 };
 
 /*
+ * Touchscreen bus.  Unlike i2c2/5/7/8, the factory chain has NO i2c0_default
+ * pinctrl state -- it configures no pins for this controller at all -- so
+ * i2c0_pins below is NOT transcribed from stock the way the other four are.
+ * It is derived from the SoC pin table (SCL0 = GPIO130 func 1, SDA0 = GPIO131
+ * func 1, drivers/pinctrl/mediatek/pinctrl-mtk-mt6789.h), which makes it
+ * [inferred], not measured.  If touch does not respond, this is the first
+ * thing to check against a scope or the bootloader's pin state.
+ *
+ * The factory runs this bus at 1 MHz (clock-frequency = 0xf4240).  That is
+ * Fast-mode Plus and it is not conservative, so it is deliberately dropped to
+ * 400 kHz here; raise it only with a working touchscreen to regress against.
+ */
+&i2c0 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_pins>;
+	clock-frequency = <400000>;
+
+	/*
+	 * Ilitek touchscreen.  "tchip,ilitek" is NOT a vendor-only alias to be
+	 * translated away: it is a real of_match entry in
+	 * drivers/input/touchscreen/ilitek_ts_i2c.c:681, and :584 keys a
+	 * vendor-reset quirk off exactly that string, so substituting an
+	 * ilitek,ili2xxx compatible would silently change the reset sequence
+	 * this panel expects.
+	 *
+	 * The driver takes vdd-supply through
+	 * devm_regulator_get_enable_optional and the reset line through the
+	 * standard "reset-gpios"; the factory's ilitek,irq-gpio and
+	 * ilitek,reset-gpio spellings are vendor-only and are dropped in
+	 * favour of interrupts and reset-gpios.
+	 *
+	 * Caveat: no binding schema for "tchip,ilitek" exists anywhere under
+	 * Documentation/devicetree/bindings, so this node is an
+	 * undocumented-compatible warning under dtbs_check until one is
+	 * written.  See the retraction note in the I2C header comment.
+	 */
+	touchscreen@41 {
+		compatible = "tchip,ilitek";
+		reg = <0x41>;
+
+		interrupt-parent = <&pio>;
+		interrupts = <12 IRQ_TYPE_EDGE_FALLING>;
+		reset-gpios = <&pio 40 GPIO_ACTIVE_HIGH>;
+		vdd-supply = <&reg_vctp_3v3>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&ilitek_pins>;
+	};
+};
+
+/*
+ * Wacom EMR digitiser bus.  Same caveat as i2c0: the factory chain has no
+ * i2c9_default pinctrl state, so i2c9_pins is [inferred] from the SoC pin
+ * table (SCL9 = GPIO148, SDA9 = GPIO149) rather than measured, and the
+ * factory 1 MHz rate is dropped to 400 kHz.
+ */
+&i2c9 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c9_pins>;
+	clock-frequency = <400000>;
+
+	/*
+	 * The pen digitiser.  The old claim in this file that "emr,wacom_i2c"
+	 * has no mainline driver is retracted: drivers/input/touchscreen/
+	 * wacom_w9000.c binds wacom,w9002 / wacom,w9007a-lt03 /
+	 * wacom,w9007a-v1 with a schema at Documentation/devicetree/bindings/
+	 * input/touchscreen/wacom,w9007a-lt03.yaml.
+	 *
+	 * WHICH of the three variants this panel is has NOT been established.
+	 * The factory compatible "emr,wacom_i2c" does not say, and the parts
+	 * differ in firmware behaviour rather than in the DT.  w9007a-lt03 is
+	 * the starting point because it is the variant the binding is named
+	 * for; if the pen enumerates but reports nonsense, try wacom,w9007a-v1
+	 * and then wacom,w9002 before suspecting anything else.
+	 * [unverified -- no hardware has seen this node]
+	 *
+	 * The schema is unevaluatedProperties: false and allows vdd-supply but
+	 * NOT vddl-supply, so only one of the part's two rails can be named
+	 * here.  vdd-supply takes the 1V8 rail, which is what the factory's
+	 * vdd-supply points at; the 3V3 rail the factory calls vddl is
+	 * declared regulator-always-on instead, since nothing else can turn it
+	 * on.  post-power-on-delay-ms = 110 in the factory node likewise has
+	 * no schema counterpart and is dropped -- the 3 ms startup delay on
+	 * the 3V3 regulator is the only sequencing left.
+	 */
+	digitizer@9 {
+		compatible = "wacom,w9007a-lt03";
+		reg = <0x09>;
+
+		interrupt-parent = <&pio>;
+		interrupts = <9 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&pio 88 GPIO_ACTIVE_LOW>;
+		vdd-supply = <&reg_wacom_1v8>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&wacom_pins>;
+	};
+};
+
+/*
  * i2c5 exists only to carry the white frontlight.  The controller is the same
  * part as the amber one at the same address on a different bus, with its own
  * enable GPIO, so both are described identically apart from label and GPIO.
@@ -703,6 +980,38 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c5_pins>;
 	clock-frequency = <100000>;
+
+	/*
+	 * MT6375: one part carrying the primary charger, a Type-C/PD port
+	 * controller and an ADC, reached at its PMU bank address 0x34.  The
+	 * factory node is a vendor MFD with adc/chg/tcpc/dbg children, an
+	 * irq domain of its own and a complete USB-PD description; none of
+	 * those five vendor compatibles has a mainline binding or driver, and
+	 * MT6375 is not register-compatible with the MT6360/MT6370 parts that
+	 * do, so theirs must not be borrowed for it.  [inferred, source
+	 * inspection]
+	 *
+	 * What is described is exactly what drivers/power/supply/
+	 * mt6375-charger-readonly.c binds to (of_match_table at :292): a plain
+	 * i2c client, no property beyond reg.  That driver reports the charger
+	 * configuration the bootloader left behind and cannot change it -- its
+	 * regmap .writeable_reg returns false unconditionally.  The Kconfig
+	 * symbol is already set in jagar_defconfig but binds nothing today
+	 * because no DT node existed, so this node is what finally puts a
+	 * charger entry in /sys/class/power_supply/.
+	 *
+	 * Dropped from the factory node for want of any mainline binding, and
+	 * with it: kernel control of charging, USB OTG VBUS, PD negotiation,
+	 * role swap and DP alt mode.  The charger keeps running autonomously
+	 * on the settings LK left, which is what the read-only driver exists
+	 * to observe.  interrupt-controller/interrupts are dropped too: the
+	 * driver implements no irq_chip, so publishing an irq domain nothing
+	 * drives would only strand a consumer.
+	 */
+	pmic@34 {
+		compatible = "mediatek,mt6375";
+		reg = <0x34>;
+	};
 
 	backlight_white: backlight@3c {
 		compatible = "richtek,rt4539";
@@ -740,26 +1049,77 @@
 	pinctrl-0 = <&i2c7_pins>;
 	clock-frequency = <400000>;
 
-	/* richtek,rt9471@53 -- secondary charger, see above */
+	/*
+	 * Secondary charger of jagar's dual-charger topology; the factory
+	 * calls it "secondary_chg" and the MT6375 block on i2c5 the primary.
+	 * drivers/power/supply/rt9471.c binds this compatible and its schema
+	 * richtek,rt9471.yaml is additionalProperties: false, so every vendor
+	 * property on the stock node is dropped: chg_alias_name / chg_name are
+	 * vendor charger-framework naming, phys/phy-names = "usb2-phy" has no
+	 * counterpart because the mainline driver never touches the USB PHY,
+	 * and interrupt-controller/#interrupt-cells are unnecessary since the
+	 * driver publishes sub-interrupts through its own regmap-irq domain.
+	 * Nothing in the shipped chain consumed the stock node's phandle.
+	 *
+	 * charge-enable-gpios is deliberately NOT set, although the binding
+	 * allows it and the pin is known (stock ceb-gpios = <&pio 151
+	 * GPIO_ACTIVE_LOW>).  rt9471.c takes that GPIO GPIOD_OUT_HIGH, i.e.
+	 * it asserts the active-low CE line at probe and never releases it,
+	 * and probe also writes REG_FUNC bit 0 = CHG_EN.  Handing the driver
+	 * the GPIO would therefore turn the second charge path ON at first
+	 * bind.  Leaving it out makes the pad the only thing holding that
+	 * path off, and rt9471_pins parks GPIO151 high -- the level the stock
+	 * rt9471_default state programs.  [inferred, source inspection]
+	 *
+	 * Note when that park happens: a "default" pinctrl state is applied by
+	 * pinctrl_bind_pins() immediately before this driver's probe and only
+	 * then.  While CONFIG_CHARGER_RT9471 is unset nothing binds, the group
+	 * is never applied, and GPIO151 stays as the bootloader left it --
+	 * unmeasured here.  Describing the part is inert today; the park is
+	 * protection for the boot where the driver is first enabled.  Bringing
+	 * up half of a dual-charger topology on a device with a non-removable
+	 * battery is still not something to do blind: this node makes the
+	 * hardware describable, not enabled.
+	 */
+	charger@53 {
+		compatible = "richtek,rt9471";
+		reg = <0x53>;
+
+		interrupts-extended = <&pio 8 IRQ_TYPE_LEVEL_LOW>;
+		wakeup-source;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&rt9471_pins>;
+	};
 
 	fuel-gauge@55 {
 		compatible = "ti,bq78z100";
 		reg = <0x55>;
 
 		/*
-		 * The battery characteristics ARE in the shipped chain, in a
-		 * simple-battery node the factory DTBO adds beside this gauge:
-		 * charge-full-design-microamp-hours = <8000000>,
-		 * energy-full-design-microwatt-hours = <30800000>,
-		 * voltage-min-design-microvolt = <3400000>.  An earlier read of
-		 * the vendor_boot base FDT alone did not see it.
+		 * The battery characteristics are now declared as &jagar_battery
+		 * at the root; see the comment there for where the numbers come
+		 * from and why they moved out of the bus node.
 		 *
-		 * monitored-battery is still omitted here: wiring it up belongs
-		 * with P7.1's gauge bring-up, which has to establish the gauge's
-		 * supply, reset and seal state first.  Until then the gauge
-		 * reports voltage/current/temperature/SoC from its own flash
-		 * config, which is enough to be a useful sign of life in
+		 * monitored-battery is still omitted here, and P5.2 kept that
+		 * decision rather than reversing it.  Wiring it up belongs with
+		 * P7.1's gauge bring-up, which has to establish the gauge's
+		 * supply, reset and seal state first.  Two further reasons found
+		 * while checking: battery.yaml itself says a battery node is for
+		 * systems with no suitable non-volatile memory or where that NVM
+		 * is unprogrammed, and the BQ78Z100 is a smart gauge that has
+		 * such flash; and bq27xxx_battery.c calls
+		 * power_supply_get_battery_info() before checking di->dm_regs,
+		 * which is NULL for this family, so adding the property would
+		 * emit a "data memory update not supported" warning on every
+		 * boot and change nothing.  Until then the gauge reports
+		 * voltage/current/temperature/SoC from its own flash config,
+		 * which is enough to be a useful sign of life in
 		 * /sys/class/power_supply/.
+		 *
+		 * bq27xxx.yaml also sets interrupts: false for ti,bq78z100, so
+		 * the gauge's alert pin may not be described here.  The factory
+		 * node declares none either.
 		 */
 	};
 };
@@ -1182,6 +1542,94 @@
 				 <PINMUX_GPIO61__FUNC_MSDC0_DAT3>;
 			drive-strength = <3>;
 			input-enable;
+		};
+	};
+
+	/*
+	 * i2c0 and i2c9 bus pins.  These two are NOT measured: the factory
+	 * chain has no i2c0_default or i2c9_default state at all, so the pin
+	 * numbers come from the SoC pin table in
+	 * drivers/pinctrl/mediatek/pinctrl-mtk-mt6789.h (SCL0 = GPIO130,
+	 * SDA0 = GPIO131, SCL9 = GPIO148, SDA9 = GPIO149, all function 1) and
+	 * the bias matches what the other four buses use.  [inferred]
+	 */
+	i2c0_pins: i2c0-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO130__FUNC_SCL0>,
+				 <PINMUX_GPIO131__FUNC_SDA0>;
+			bias-pull-up;
+			input-enable;
+		};
+	};
+
+	i2c9_pins: i2c9-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO148__FUNC_SCL9>,
+				 <PINMUX_GPIO149__FUNC_SDA9>;
+			bias-pull-up;
+			input-enable;
+		};
+	};
+
+	/*
+	 * Touchscreen reset, transcribed from the stock ilitek_default state
+	 * (pins_rst: pin 40 func 0, output-low).  The stock active/sleep
+	 * states are not carried over: the mainline driver requests only a
+	 * "default" state.
+	 */
+	ilitek_pins: ilitek-pins {
+		pins-reset {
+			pinmux = <PINMUX_GPIO40__FUNC_GPIO40>;
+			output-low;
+		};
+	};
+
+	/*
+	 * Digitiser reset and interrupt, transcribed from the stock
+	 * wacom_default state (pins_reset: pin 88 func 0, output-low;
+	 * pins_irq: pin 9 func 0, input-enable, bias-disable).  The bias is
+	 * deliberately left disabled to match stock -- this line is externally
+	 * biased.
+	 */
+	wacom_pins: wacom-pins {
+		pins-reset {
+			pinmux = <PINMUX_GPIO88__FUNC_GPIO88>;
+			output-low;
+		};
+
+		pins-irq {
+			pinmux = <PINMUX_GPIO9__FUNC_GPIO9>;
+			input-enable;
+			bias-disable;
+		};
+	};
+
+	/*
+	 * Secondary-charger CE and INT, transcribed from the stock
+	 * rt9471_default state (pins_ceb: pin 151 func 0, output-high;
+	 * pins_intr: pin 8 func 0, input-enable, bias-pull-up).  Applied only
+	 * when the rt9471 driver binds -- see the note on the charger node.
+	 */
+	rt9471_pins: rt9471-pins {
+		/*
+		 * CE is active low and the driver is deliberately not given the
+		 * GPIO, so this state alone decides it: high = second charge
+		 * path off, which is the level stock programs.
+		 */
+		pins-ce {
+			pinmux = <PINMUX_GPIO151__FUNC_GPIO151>;
+			output-high;
+		};
+
+		/*
+		 * Open-drain active-low INT.  mtk-eint re-muxes this pad to its
+		 * EINT mode when the irq is requested; the pull-up and IES here
+		 * are the part it does not set.
+		 */
+		pins-irq {
+			pinmux = <PINMUX_GPIO8__FUNC_GPIO8>;
+			input-enable;
+			bias-pull-up;
 		};
 	};
 
