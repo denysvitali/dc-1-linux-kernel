@@ -15,6 +15,7 @@
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_wakeirq.h>
@@ -26,6 +27,8 @@
 struct hall_switch {
 	struct gpio_desc *gpio;
 	struct input_dev *input;
+	/* Serializes GPIO samples and input reports. */
+	struct mutex lock;
 	bool active_low;
 };
 
@@ -96,16 +99,23 @@ out_put_fwnode:
 static int hall_switch_report(struct hall_switch *hall)
 {
 	int closed;
+	int error = 0;
 
+	mutex_lock(&hall->lock);
 	closed = gpiod_get_raw_value_cansleep(hall->gpio);
-	if (closed < 0)
-		return closed;
+	if (closed < 0) {
+		error = closed;
+		goto out_unlock;
+	}
 
 	closed = !!closed ^ hall->active_low;
 	input_report_switch(hall->input, SW_LID, closed);
 	input_sync(hall->input);
 
-	return 0;
+out_unlock:
+	mutex_unlock(&hall->lock);
+
+	return error;
 }
 
 static irqreturn_t hall_switch_irq(int irq, void *data)
@@ -133,6 +143,7 @@ static int hall_switch_probe(struct platform_device *pdev)
 	hall = devm_kzalloc(dev, sizeof(*hall), GFP_KERNEL);
 	if (!hall)
 		return -ENOMEM;
+	mutex_init(&hall->lock);
 
 	hall->gpio = hall_switch_get_gpio(dev, &hall->active_low);
 	if (IS_ERR(hall->gpio))
@@ -168,11 +179,6 @@ static int hall_switch_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, error,
 				     "failed to register input device\n");
 
-	error = hall_switch_report(hall);
-	if (error)
-		return dev_err_probe(dev, error,
-				     "failed to read initial hall state\n");
-
 	wakeup = device_property_read_bool(dev, "linux,wakeup");
 	if (wakeup) {
 		error = devm_device_init_wakeup(dev);
@@ -187,6 +193,12 @@ static int hall_switch_probe(struct platform_device *pdev)
 	}
 
 	enable_irq(irq);
+
+	error = hall_switch_report(hall);
+	if (error)
+		return dev_err_probe(dev, error,
+				     "failed to read initial hall state\n");
+
 	platform_set_drvdata(pdev, hall);
 
 	return 0;
