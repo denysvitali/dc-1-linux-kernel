@@ -620,10 +620,11 @@
  *   i2c8 @11eb2000  Seiko S-35390A RTC @0x30
  *   i2c9 @11eb3000  Wacom EMR digitiser @0x09
  *
- * Declared below: only the two devices that have a real mainline driver and a
- * real binding.  Not declared, and why:
- *   richtek,rt4539  no mainline driver at all (dual amber+white backlight;
- *                   measured: amber @i2c2 0x3c enable GPIO99, white @i2c5 0x3c)
+ * Declared below: the devices that have a driver in this tree and a real
+ * binding, including both richtek,rt4539 frontlights -- amber @i2c2 0x3c with
+ * enable GPIO99 and white @i2c5 0x3c with enable GPIO98, driven by
+ * drivers/video/backlight/rt4539.c (CONFIG_BACKLIGHT_RT4539).  Not declared,
+ * and why:
  *   emr,wacom_i2c   no mainline driver (measured: i2c9 0x09, IRQ GPIO9,
  *                   reset GPIO88 active-low, vdd WACOM-1V8 = GPIO150,
  *                   vddl WACOM-3V3 = GPIO41, 110 ms post-power-on delay)
@@ -653,7 +654,83 @@
 	clock-frequency = <100000>;
 
 	/* tps65132@3e -- panel AVDD/AVEE, see the display section */
-	/* backlight amber richtek,rt4539@3c -- no mainline driver */
+
+	/*
+	 * Amber frontlight.  Every value below is transcribed from the stock
+	 * backlight_amber@3c node in the merged factory chain, restricted to
+	 * the properties drivers/video/backlight/rt4539.c actually reads; the
+	 * vendor-only display/hwcomposer delay properties are deliberately not
+	 * carried over.  default-state must be "off": the driver refuses to
+	 * probe otherwise, and nothing may light this panel before the display
+	 * handoff is accepted.
+	 *
+	 * The stock enable-GPIO pinctrl state is not carried over either:
+	 * mtk-pinctrl muxes a pin to GPIO mode on gpiolib request, so the
+	 * enable-gpios reference is sufficient.  If a probe ever finds the pin
+	 * left in a peripheral function, that assumption is what to revisit.
+	 */
+	backlight_amber: backlight@3c {
+		compatible = "richtek,rt4539";
+		reg = <0x3c>;
+
+		label = "lcd-backlight-amber";
+		default-state = "off";
+		enable-gpios = <&pio 99 GPIO_ACTIVE_HIGH>;
+		enable-post-delay = <20>;
+
+		max-brightness = <255>;
+		max-hw-brightness = <4095>;
+		hw-brightness-on-threshold = <16>;
+
+		current = <98>;
+		control = <1>;
+		time-ctrl = <95>;
+		screen-off-backlight-off-time-ctrl = <103>;
+		soft-start-ctrl = <2>;
+		clk-pfm-ctrl = <121>;
+		fbs = <1 1 0 1 0 0>;
+	};
+};
+
+/*
+ * i2c5 exists only to carry the white frontlight.  The controller is the same
+ * part as the amber one at the same address on a different bus, with its own
+ * enable GPIO, so both are described identically apart from label and GPIO.
+ */
+&i2c5 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c5_pins>;
+	clock-frequency = <100000>;
+
+	backlight_white: backlight@3c {
+		compatible = "richtek,rt4539";
+		reg = <0x3c>;
+
+		label = "lcd-backlight";
+		default-state = "off";
+		enable-gpios = <&pio 98 GPIO_ACTIVE_HIGH>;
+		enable-post-delay = <20>;
+
+		max-brightness = <255>;
+		max-hw-brightness = <4095>;
+		hw-brightness-on-threshold = <16>;
+
+		current = <98>;
+		control = <1>;
+		time-ctrl = <95>;
+		screen-off-backlight-off-time-ctrl = <103>;
+		soft-start-ctrl = <2>;
+		clk-pfm-ctrl = <121>;
+		fbs = <1 1 0 1 0 0>;
+	};
+
+	/*
+	 * mt6375@34 is also on this bus.  It is not described here: the
+	 * compatible the factory uses is vendor-only, and P7.2 owns choosing
+	 * how to represent the charger/Type-C/ADC blocks.
+	 */
 };
 
 &i2c7 {
@@ -1113,6 +1190,16 @@
 		pins-bus {
 			pinmux = <PINMUX_GPIO134__FUNC_SCL2>,
 				 <PINMUX_GPIO135__FUNC_SDA2>;
+			bias-pull-up;
+			input-enable;
+		};
+	};
+
+	/* Stock i2c5_default: pins 140/141 in function 1, pulled up. */
+	i2c5_pins: i2c5-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO140__FUNC_SCL5>,
+				 <PINMUX_GPIO141__FUNC_SDA5>;
 			bias-pull-up;
 			input-enable;
 		};
