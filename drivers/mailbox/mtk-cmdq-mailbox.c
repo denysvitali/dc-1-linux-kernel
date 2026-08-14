@@ -610,11 +610,23 @@ out:
 wait:
 	cmdq_thread_resume(thread);
 	spin_unlock_irqrestore(&thread->chan->lock, flags);
+	/*
+	 * mbox_flush() documents @timeout in milliseconds, but the timeout
+	 * argument of readl_poll_timeout_atomic() is in microseconds.  The
+	 * raw pass-through cut every caller's budget by 1000x: a display
+	 * disable packet that legitimately waits for the next frame boundary
+	 * (~16.7 ms) was given 2 ms and failed with -EFAULT (observed on
+	 * jagar hardware, 2026-08-14).  Convert, and release the runtime-PM
+	 * reference on the failure path exactly as the success paths do.
+	 */
 	if (readl_poll_timeout_atomic(thread->base + CMDQ_THR_ENABLE_TASK,
-				      enable, enable == 0, 1, timeout)) {
+				      enable, enable == 0, 1,
+				      timeout * USEC_PER_MSEC)) {
 		dev_err(cmdq->mbox.dev, "Fail to wait GCE thread 0x%x done\n",
 			(u32)(thread->base - cmdq->base));
 
+		pm_runtime_mark_last_busy(cmdq->mbox.dev);
+		pm_runtime_put_autosuspend(cmdq->mbox.dev);
 		return -EFAULT;
 	}
 	pm_runtime_mark_last_busy(cmdq->mbox.dev);

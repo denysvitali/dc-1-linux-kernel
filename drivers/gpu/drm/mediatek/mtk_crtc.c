@@ -383,6 +383,37 @@ ddp_cmdq_cb_out:
 }
 #endif
 
+static int mtk_crtc_handoff_prove_idle(struct mtk_crtc *mtk_crtc,
+				       struct mtk_ddp_comp *ovl,
+				       struct mtk_ddp_comp *rdma,
+				       struct mtk_ddp_comp *dsi)
+{
+	int ret;
+
+	ret = mtk_ovl_handoff_wait_terminal(ovl->dev);
+	if (ret)
+		return ret;
+	ret = mtk_rdma_handoff_wait_idle(rdma->dev);
+	if (ret)
+		return ret;
+	ret = mtk_mmsys_ddp_handoff_wait_idle(mtk_crtc->mmsys_dev);
+	if (ret)
+		return ret;
+	ret = mtk_ovl_handoff_validate_terminal(ovl->dev);
+	if (ret)
+		return ret;
+	ret = mtk_rdma_handoff_validate_idle(rdma->dev);
+	if (ret)
+		return ret;
+	ret = mtk_mmsys_ddp_handoff_validate_idle(mtk_crtc->mmsys_dev);
+	if (ret)
+		return ret;
+	ret = mtk_mutex_validate_disabled(mtk_crtc->mutex);
+	if (ret)
+		return ret;
+	return mtk_dsi_handoff_validate_quiesced(dsi->dev);
+}
+
 static int mtk_crtc_handoff_stop_pipeline(struct mtk_crtc *mtk_crtc,
 					  struct mtk_ddp_comp *ovl,
 					  struct mtk_ddp_comp *rdma,
@@ -420,37 +451,35 @@ static int mtk_crtc_handoff_stop_pipeline(struct mtk_crtc *mtk_crtc,
 		mtk_rdma_handoff_frame_cancel(rdma->dev);
 		ovl_touched = false;
 		rdma_touched = false;
-		ret = mtk_ovl_handoff_wait_terminal(ovl->dev);
-		if (ret)
-			goto cancel_irqs;
-		ret = mtk_rdma_handoff_wait_idle(rdma->dev);
-		if (ret)
-			goto cancel_irqs;
-		ret = mtk_mmsys_ddp_handoff_wait_idle(mtk_crtc->mmsys_dev);
-		if (ret)
-			goto cancel_irqs;
-		ret = mtk_ovl_handoff_validate_terminal(ovl->dev);
-		if (ret)
-			goto cancel_irqs;
-		ret = mtk_rdma_handoff_validate_idle(rdma->dev);
-		if (ret)
-			goto cancel_irqs;
-		ret = mtk_mmsys_ddp_handoff_validate_idle(mtk_crtc->mmsys_dev);
-		if (ret)
-			goto cancel_irqs;
-		ret = mtk_mutex_validate_disabled(mtk_crtc->mutex);
-		if (ret)
-			goto cancel_irqs;
-		ret = mtk_dsi_handoff_validate_quiesced(dsi->dev);
+		ret = mtk_crtc_handoff_prove_idle(mtk_crtc, ovl, rdma, dsi);
 		if (ret)
 			goto cancel_irqs;
 		drm_info(drm,
 			 "MT6789 reset authorized by source-starved terminal-idle proof\n");
 	} else {
 		ret = mtk_ovl_handoff_frame_wait(ovl->dev, fme_seq);
-		if (ret)
-			goto cancel_irqs;
-		ret = mtk_rdma_handoff_frame_wait(rdma->dev, rdma_frame_seq);
+		if (!ret)
+			ret = mtk_rdma_handoff_frame_wait(rdma->dev,
+							  rdma_frame_seq);
+		if (ret == -ETIMEDOUT) {
+			/*
+			 * The edge waits run after the DSI has been quiesced
+			 * and the mutex disabled.  With the panel in command
+			 * mode nothing generates a further frame, so the edge
+			 * can be unobtainable by construction (observed
+			 * seq==now at the timeout on hardware, 2026-08-14).
+			 * Substitute the strictly stronger terminal-idle
+			 * proof the source-starved arm already relies on.
+			 */
+			mtk_ovl_handoff_frame_cancel(ovl->dev);
+			mtk_rdma_handoff_frame_cancel(rdma->dev);
+			ovl_touched = false;
+			rdma_touched = false;
+			drm_info(drm,
+				 "MT6789 frame edge unobtainable; proving terminal idle\n");
+			ret = mtk_crtc_handoff_prove_idle(mtk_crtc, ovl, rdma,
+							  dsi);
+		}
 		if (ret)
 			goto cancel_irqs;
 		ovl_touched = false;
