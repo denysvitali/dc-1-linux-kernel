@@ -29,6 +29,15 @@ CONFIG_ADVISE_SYSCALLS=y
 CONFIG_MEMBARRIER=y
 CONFIG_RSEQ=y
 CONFIG_CGROUPS=y
+# Namespaces are a systemd prerequisite, and CONFIG_EXPERT above turns them
+# off by default: NAMESPACES is "default !EXPERT" (init/Kconfig:1403), and
+# USER_NS is "default n" even under it (:1439). Without them systemd's
+# PrivateUsers=yes fails at exec with 217/USER, which on device killed
+# upower, colord and power-profiles-daemon on every boot -- i.e. no battery
+# or AC state reached the desktop at all. UTS/IPC/PID/NET/TIME_NS are
+# "default y" once NAMESPACES is on, so these two lines cover the set.
+CONFIG_NAMESPACES=y
+CONFIG_USER_NS=y
 # CONFIG_CACHESTAT_SYSCALL is not set
 # CONFIG_KALLSYMS is not set
 CONFIG_ARCH_MEDIATEK=y
