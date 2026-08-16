@@ -2864,6 +2864,18 @@ static int mt6789_afe_pcm_dev_probe(struct platform_device *pdev)
 	afe->release_dram_resource = mt6789_afe_dram_release;
 
 
+	/*
+	 * Register the component with the AFE resumed, which is what upstream's
+	 * mt8186 does and this port did not. The machine card binds synchronously
+	 * from inside this call, and DAPM initialises register-backed widgets --
+	 * AUD_PAD_TOP sits on AFE_AUD_PAD_TOP, which is volatile -- as it goes.
+	 * Against a cache-only regmap those reads return -EBUSY and the whole
+	 * card registration fails with "failed to register soundcard -16",
+	 * observed on hardware 2026-08-17. The matching put below leaves the AFE
+	 * suspended and cache-only again; a PCM open resumes it.
+	 */
+	pm_runtime_get_sync(&pdev->dev);
+
 	/* register component */
 	ret = devm_snd_soc_register_component(&pdev->dev,
 					      &mt6789_afe_component,
@@ -2871,8 +2883,11 @@ static int mt6789_afe_pcm_dev_probe(struct platform_device *pdev)
 					      afe->num_dai_drivers);
 	if (ret) {
 		dev_warn(dev, "afe component err: %d\n", ret);
+		pm_runtime_put_sync(&pdev->dev);
 		goto err_pm_disable;
 	}
+
+	pm_runtime_put_sync(&pdev->dev);
 
 #if IS_ENABLED(CONFIG_MTK_ULTRASND_PROXIMITY) && !defined(CONFIG_FPGA_EARLY_PORTING)
 	ultra_set_dsp_afe(afe);

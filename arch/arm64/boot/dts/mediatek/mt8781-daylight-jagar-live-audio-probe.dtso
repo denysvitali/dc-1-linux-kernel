@@ -24,6 +24,7 @@
 /dts-v1/;
 /plugin/;
 
+#include <dt-bindings/clock/mediatek,mt6789-clk.h>
 #include <dt-bindings/power/mediatek,mt6789-power.h>
 
 / {
@@ -52,6 +53,76 @@
 	};
 };
 
+/*
+ * Two things the AFE needs from its own node.
+ *
+ * power-domains: the nested provider above, instead of the flat SCPSYS node
+ * that has none.
+ *
+ * clocks: the shipped node numbers topckgen with the vendor BSP's IDs, which
+ * are not the IDs clk-mt6789-topckgen registers -- "top_mux_audio" (BSP 22)
+ * lands on our CLK_TOP_APLL2_D8, "top_clk26m_clk" (BSP 130) on an I2S mux, and
+ * so on down the list. The AFE then reparents whatever it was handed and
+ * fails: "clk_set_parent top_mux_audio-top_clk26m_clk fail -22", runtime
+ * resume errors out, and the regmap never leaves cache-only. The audiosys,
+ * infracfg and apmixedsys IDs in that node happen to agree with ours, so only
+ * the topckgen half is wrong -- but a DT property is replaced whole, so the
+ * whole array is restated here, in the shipped clock-names order.
+ */
 &afe {
 	power-domains = <&jagar_audio_spm MT6789_POWER_DOMAIN_AUDIO>;
+
+	clocks = <&afe_clk CLK_AFE_AFE>,
+		 <&afe_clk CLK_AFE_DAC>,
+		 <&afe_clk CLK_AFE_DAC_PREDIS>,
+		 <&afe_clk CLK_AFE_ADC>,
+		 <&afe_clk CLK_AFE_22M>,
+		 <&afe_clk CLK_AFE_24M>,
+		 <&afe_clk CLK_AFE_APLL_TUNER>,
+		 <&afe_clk CLK_AFE_APLL2_TUNER>,
+		 <&afe_clk CLK_AFE_TML>,
+		 <&afe_clk CLK_AFE_NLE>,
+		 <&afe_clk CLK_AFE_DAC_HIRES>,
+		 <&afe_clk CLK_AFE_ADC_HIRES>,
+		 <&afe_clk CLK_AFE_ADC_HIRES_TML>,
+		 <&afe_clk CLK_AFE_I2S1_BCLK>,
+		 <&afe_clk CLK_AFE_I2S2_BCLK>,
+		 <&afe_clk CLK_AFE_I2S3_BCLK>,
+		 <&afe_clk CLK_AFE_I2S4_BCLK>,
+		 <&afe_clk CLK_AFE_GENERAL3_ASRC>,
+		 <&afe_clk CLK_AFE_CONNSYS_I2S_ASRC>,
+		 <&afe_clk CLK_AFE_GENERAL1_ASRC>,
+		 <&afe_clk CLK_AFE_GENERAL2_ASRC>,
+		 <&infracfg_ao_clk CLK_IFRAO_AUDIO>,
+		 <&infracfg_ao_clk CLK_IFRAO_AUDIO_26M_BCLK>,
+		 <&apmixedsys_clk CLK_APMIXED_APLL1>,
+		 <&apmixedsys_clk CLK_APMIXED_APLL2>,
+		 <&topckgen_clk CLK_TOP_AUDIO_SEL>,
+		 <&topckgen_clk CLK_TOP_AUD_INTBUS_SEL>,
+		 <&topckgen_clk CLK_TOP_MAINPLL_D4_D4>,
+		 <&topckgen_clk CLK_TOP_AUD_1_SEL>,
+		 <&topckgen_clk CLK_TOP_APLL1>,
+		 <&topckgen_clk CLK_TOP_AUD_2_SEL>,
+		 <&topckgen_clk CLK_TOP_APLL2>,
+		 <&topckgen_clk CLK_TOP_AUD_ENGEN1_SEL>,
+		 <&topckgen_clk CLK_TOP_APLL1_D4>,
+		 <&topckgen_clk CLK_TOP_APLL1_D8>,
+		 <&topckgen_clk CLK_TOP_AUD_ENGEN2_SEL>,
+		 <&topckgen_clk CLK_TOP_APLL2_D4>,
+		 <&topckgen_clk CLK_TOP_APLL2_D8>,
+		 <&topckgen_clk CLK_TOP_APLL_I2S0_MCK_SEL>,
+		 <&topckgen_clk CLK_TOP_APLL_I2S1_MCK_SEL>,
+		 <&topckgen_clk CLK_TOP_APLL_I2S2_MCK_SEL>,
+		 <&topckgen_clk CLK_TOP_APLL_I2S3_MCK_SEL>,
+		 <&topckgen_clk CLK_TOP_APLL_I2S4_MCK_SEL>,
+		 <&topckgen_clk CLK_TOP_APLL_I2S5_MCK_SEL>,
+		 <&topckgen_clk CLK_TOP_APLL12_CK_DIV0>,
+		 <&topckgen_clk CLK_TOP_APLL12_CK_DIV1>,
+		 <&topckgen_clk CLK_TOP_APLL12_CK_DIV2>,
+		 <&topckgen_clk CLK_TOP_APLL12_CK_DIV3>,
+		 <&topckgen_clk CLK_TOP_APLL12_CK_DIV4>,
+		 <&topckgen_clk CLK_TOP_APLL12_CK_DIVB>,
+		 <&topckgen_clk CLK_TOP_APLL12_CK_DIV5>,
+		 <&topckgen_clk CLK_TOP_AUDIO_H_SEL>,
+		 <&topckgen_clk CLK_TOP_TCK_26M_MX9>;
 };
