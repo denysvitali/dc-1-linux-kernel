@@ -172,8 +172,13 @@ static int dc1_check_cold_base(struct device_node **scpsys_out,
 		goto out_put_nodes;
 	}
 
-	/* Rollback may depopulate this node, so require an empty shipped base. */
-	child = of_get_next_child(scpsys, NULL);
+	/*
+	 * Refuse to apply this overlay twice: rollback may depopulate the node,
+	 * so a second apply must not run over its own controller. Only OUR
+	 * child is disqualifying -- the audio bridge adds a sibling provider to
+	 * the same SCPSYS node, and the two must work in either order.
+	 */
+	child = of_get_child_by_name(scpsys, DC1_MFG_CONTROLLER_NAME);
 	if (child) {
 		of_node_put(child);
 		ret = -EALREADY;

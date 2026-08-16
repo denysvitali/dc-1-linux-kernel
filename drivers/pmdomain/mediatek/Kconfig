@@ -44,6 +44,22 @@ config MTK_MT6789_LIVE_GPU_OVERLAY
 	  the nested power controller, and retains those resources until reboot.
 	  It deliberately has no module exit path.  Say N on other MT6789 boards.
 
+config MTK_MT6789_LIVE_AUDIO_OVERLAY
+	tristate "MT6789 shipped-DT audio power-domain overlay loader"
+	depends on MTK_SCPSYS_PM_DOMAINS
+	depends on OF_OVERLAY
+	depends on FW_LOADER
+	help
+	  Build the opt-in Daylight DC-1 loader for the packaged MT6789 live-DT
+	  audio overlay.  The production firmware passes a legacy flat
+	  power-domain node that provides no AUDIO domain, so the AFE never
+	  probes and the device has no sound card.  The overlay adds a second,
+	  nested provider containing only that domain and points the AFE at it.
+
+	  The domain is registered off and is powered by the AFE's runtime PM,
+	  so loading this module energises nothing on its own.  It has no module
+	  exit path: reboot is the rollback.  Say N on other MT6789 boards.
+
 config MTK_MFG_PM_DOMAIN
 	bool "MediaTek MFlexGraphics power domain"
 	default ARCH_MEDIATEK

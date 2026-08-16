@@ -192,3 +192,4 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6789-xiaomi-emerald.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt8781-daylight-jagar.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt8781-daylight-jagar-gpu-probe.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt8781-daylight-jagar-live-gpu-probe.dtbo
+dtb-$(CONFIG_ARCH_MEDIATEK) += mt8781-daylight-jagar-live-audio-probe.dtbo

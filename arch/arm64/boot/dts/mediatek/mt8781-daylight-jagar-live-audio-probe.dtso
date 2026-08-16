@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Daylight DC-1 audio power-domain overlay for LK's shipped MT6789 DT
+ *
+ * The shipped DT points the AFE at the flat legacy SCPSYS node
+ * (power-domains = <&scpsys MT6789_POWER_DOMAIN_AUDIO>), and the only provider
+ * registered on that node is the bootloader-handoff one in mt6789-pm-domain.c,
+ * which publishes DISP alone. So the AFE waits for a domain nobody provides and
+ * gives up: "deferred probe timeout, ignoring dependency", probe -110, no card.
+ *
+ * AUDIO is genuinely OFF at handoff -- SPM PWR_STATUS/PWR_STATUS_2ND bit 22
+ * read 0 on a booted device -- so it cannot be handed over as always-on the way
+ * DISP is. It has to be sequenced. Add a nested provider carrying only
+ * MT6789_POWER_DOMAIN_AUDIO, driven by the generic MediaTek PM-domain driver
+ * with the reviewed MT6789 data (control 0x358, status bit 22, INFRA bus
+ * protection bit 4), and retarget the AFE at it. The domain is registered off
+ * and powers up when the AFE's runtime PM asks for it -- nothing here energises
+ * anything by itself.
+ *
+ * This mirrors what the GPU overlay does for MFG0..MFG3 and is independent of
+ * it: each bridge looks for its own controller child, so either order works.
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/power/mediatek,mt6789-power.h>
+
+/ {
+	compatible = "mediatek,MT6789";
+};
+
+/*
+ * Deliberately no compatible/#address-cells override on &scpsys, even though
+ * the GPU overlay adds "simple-mfd" there: that overlay's loader validates the
+ * shipped compatible list before applying, so changing it here would make
+ * whichever bridge runs second refuse. The loader populates this one child
+ * explicitly, which needs no bus compatible on the parent.
+ */
+&scpsys {
+	jagar_audio_spm: power-controller-audio {
+		compatible = "mediatek,mt6789-power-controller";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		#power-domain-cells = <1>;
+
+		power-domain@MT6789_POWER_DOMAIN_AUDIO {
+			reg = <MT6789_POWER_DOMAIN_AUDIO>;
+			mediatek,infracfg = <&infracfg_ao_clk>;
+			#power-domain-cells = <0>;
+		};
+	};
+};
+
+&afe {
+	power-domains = <&jagar_audio_spm MT6789_POWER_DOMAIN_AUDIO>;
+};
