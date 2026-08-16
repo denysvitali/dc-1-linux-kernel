@@ -1850,4 +1850,13 @@
 		     <GIC_SPI 472 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>;
 	interrupt-names = "ipc0", "ipc1", "mbox0", "mbox1", "mbox2",
 			  "mbox3", "mbox4";
+
+	/* The SCP wake/IPC registers (INFRA_IRQ_SET/CLEAR) live inside the
+	 * infracfg_ao syscon block at 0x10001000 (the vendor's
+	 * "scp_infra@10001000" is the same silicon). Refer to it as a syscon
+	 * so mt6789-scp can poke the SCP awake.
+	 */
+	mediatek,scp-infra = <&infracfg_ao>;
 };
+
+#include "mt8781-daylight-jagar-audio.dtsi"
