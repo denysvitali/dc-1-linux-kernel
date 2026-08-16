@@ -6,8 +6,11 @@
  *  Author: Yujie Xiao <yujie.xiao@mediatek.com>
  */
 
+#include <linux/delay.h>
 #include <linux/module.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/pm_runtime.h>
+#include <linux/regulator/consumer.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
@@ -32,14 +35,83 @@
  */
 #define EXT_SPK_AMP_W_NAME "Ext_Speaker_Amp"
 
+/*
+ * Settling time between raising the amplifier enable pins and letting audio
+ * through, taken from the factory sequence (enable rail -> pins high -> wait ->
+ * audio). The RT9101 needs its enable pins stable before the buffers drive it;
+ * shortening this is what turns a clean start into an audible pop.
+ */
+#define EXT_SPK_AMP_ENABLE_DELAY_MS	22
+
+struct mt6789_mt6366_priv {
+	struct regulator *extamp_reg;
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *extamp_high;
+	struct pinctrl_state *extamp_low;
+	bool extamp_on;
+};
+
+/*
+ * The DC-1's speakers hang off an RT9101 behind the codec's headphone buffers.
+ * The amplifier takes its power from the PMIC VIBR rail (fixed 2.8 V in DT) and
+ * is enabled by a coupled GPIO158/GPIO159 pair, exposed here as the
+ * "extamp-pullhigh"/"extamp-pulllow" pinctrl states. Order matters in both
+ * directions: rail up, then pins high, then wait, and on the way down pins low
+ * before the rail, so the amplifier is never enabled into an unpowered or
+ * collapsing supply.
+ */
 static int mt6789_mt6366_spk_amp_event(struct snd_soc_dapm_widget *w,
 					struct snd_kcontrol *kcontrol,
 					int event)
 {
 	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
+	struct mt6789_mt6366_priv *priv = snd_soc_card_get_drvdata(card);
+	int ret;
 
-	dev_info(card->dev, "%s(), event %d\n", __func__, event);
-	/* External speaker amp enable GPIOs are wired up in P8.2 */
+	dev_dbg(card->dev, "%s(), event %d\n", __func__, event);
+
+	if (!priv || !priv->extamp_reg || !priv->extamp_high || !priv->extamp_low)
+		return 0;
+
+	switch (event) {
+	case SND_SOC_DAPM_POST_PMU:
+		if (priv->extamp_on)
+			return 0;
+
+		ret = regulator_enable(priv->extamp_reg);
+		if (ret) {
+			dev_err(card->dev, "%s(), enable extamp supply failed: %d\n",
+				__func__, ret);
+			return ret;
+		}
+
+		ret = pinctrl_select_state(priv->pinctrl, priv->extamp_high);
+		if (ret) {
+			dev_err(card->dev, "%s(), extamp-pullhigh failed: %d\n",
+				__func__, ret);
+			regulator_disable(priv->extamp_reg);
+			return ret;
+		}
+
+		msleep(EXT_SPK_AMP_ENABLE_DELAY_MS);
+		priv->extamp_on = true;
+		break;
+	case SND_SOC_DAPM_PRE_PMD:
+		if (!priv->extamp_on)
+			return 0;
+
+		ret = pinctrl_select_state(priv->pinctrl, priv->extamp_low);
+		if (ret)
+			dev_err(card->dev, "%s(), extamp-pulllow failed: %d\n",
+				__func__, ret);
+
+		regulator_disable(priv->extamp_reg);
+		priv->extamp_on = false;
+		break;
+	default:
+		break;
+	}
+
 	return 0;
 }
 
@@ -888,6 +960,64 @@ int mtk_update_scp_audio_info(struct snd_soc_card *card,
 }
 #endif
 
+/*
+ * Look up the amplifier rail and the two pinctrl states it is gated by. Every
+ * piece is optional: a board that wires no external amplifier (or a DT that has
+ * not described one yet) still gets a working card, it just leaves the
+ * Ext_Speaker_Amp widget as the no-op it was before.
+ */
+static int mt6789_mt6366_extamp_init(struct platform_device *pdev,
+				     struct snd_soc_card *card)
+{
+	struct mt6789_mt6366_priv *priv;
+
+	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	snd_soc_card_set_drvdata(card, priv);
+
+	priv->extamp_reg = devm_regulator_get_optional(&pdev->dev, "extamp");
+	if (IS_ERR(priv->extamp_reg)) {
+		int ret = PTR_ERR(priv->extamp_reg);
+
+		priv->extamp_reg = NULL;
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		dev_info(&pdev->dev, "no extamp supply (%d), speakers stay off\n",
+			 ret);
+		return 0;
+	}
+
+	priv->pinctrl = devm_pinctrl_get(&pdev->dev);
+	if (IS_ERR(priv->pinctrl)) {
+		int ret = PTR_ERR(priv->pinctrl);
+
+		priv->pinctrl = NULL;
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		dev_info(&pdev->dev, "no pinctrl (%d), speakers stay off\n", ret);
+		return 0;
+	}
+
+	priv->extamp_high = pinctrl_lookup_state(priv->pinctrl,
+						 "extamp-pullhigh");
+	priv->extamp_low = pinctrl_lookup_state(priv->pinctrl, "extamp-pulllow");
+	if (IS_ERR(priv->extamp_high) || IS_ERR(priv->extamp_low)) {
+		dev_info(&pdev->dev,
+			 "no extamp pinctrl states, speakers stay off\n");
+		priv->extamp_high = NULL;
+		priv->extamp_low = NULL;
+		return 0;
+	}
+
+	/*
+	 * Leave the amplifier down until DAPM asks for it: "default" is the
+	 * pulled-low state, and pinctrl has already applied it by now.
+	 */
+	return 0;
+}
+
 static int mt6789_mt6366_dev_probe(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = &mt6789_mt6366_soc_card;
@@ -964,6 +1094,10 @@ static int mt6789_mt6366_dev_probe(struct platform_device *pdev)
 #endif
 
 	card->dev = &pdev->dev;
+
+	ret = mt6789_mt6366_extamp_init(pdev, card);
+	if (ret)
+		return ret;
 
 	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret)
