@@ -35,7 +35,6 @@
 		gpio_usage_mapping: gpio-usage-mapping-stub { };
 		gps: gps-stub { };
 		infracfg_rst: infracfg-rst-stub { };
-		keypad: keypad-stub { };
 		lk_charger: lk-charger-stub { };
 		lvts: lvts-stub { };
 		md_auxadc: md-auxadc-stub { };

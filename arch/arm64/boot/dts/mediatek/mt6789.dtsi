@@ -655,6 +655,15 @@
 			};
 		};
 
+		keypad: keypad@10010000 {
+			compatible = "mediatek,mt6779-keypad";
+			reg = <0 0x10010000 0 0x1000>;
+			interrupts = <GIC_SPI 106 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>;
+			clocks = <&clk26m>;
+			clock-names = "kpd";
+			status = "disabled";
+		};
+
 		dvfsrc: system-controller@10012000 {
 			compatible = "mediatek,mt6789-dvfsrc";
 			reg = <0 0x10012000 0 0x1000>;

@@ -1495,8 +1495,8 @@
 		 * Power and volume-up come in through the PMIC, not through GPIOs:
 		 * the stock /odm/gpio-keys node is empty and /mt6366keys carries
 		 * KEY_POWER (0x74) and KEY_VOLUMEUP (0x73).
-		 * XXX UNKNOWN: volume-down.  It is not in the stock DT at all; the
-		 * DC-1 may simply not have one.
+		 * Volume-down is separate: the stock keypad node (mt6779-keypad)
+		 * maps matrix (0,0) to KEY_VOLUMEDOWN -- see &keypad below.
 		 */
 		mt6358_keys: keys {
 			compatible = "mediatek,mt6358-keys";
@@ -1679,6 +1679,29 @@
 			input-enable;
 		};
 	};
+};
+
+/*
+ * Volume-down (and two auxiliary keys) sit on the MediaTek KPD matrix keypad,
+ * not on the PMIC.  The stock dtbo already supplies the pinctrl (KPCOL0/1 on
+ * GPIO66/67, KPROW0/1 on GPIO68/69) and status=okay via its &keypad fragment;
+ * we add the matrix keymap here.  LK applies the stock dtbo on top of this
+ * DTB, and its pinctrl encoding matches mainline's (same pinfunc header), so
+ * no pinctrl node is re-declared.
+ *
+ * The stock hw-init-map has three live positions: KEY_VOLUMEDOWN at (0,0),
+ * KEY_F11 at (0,1) and KEY_F12 at (1,1); (1,0) is unmapped.  KEY_F11/KEY_F12
+ * are transcribed verbatim from stock and need on-device confirmation.
+ */
+&keypad {
+	status = "okay";
+	keypad,num-rows = <2>;
+	keypad,num-columns = <2>;
+	linux,keymap = <
+		MATRIX_KEY(0, 0, KEY_VOLUMEDOWN)
+		MATRIX_KEY(0, 1, KEY_F11)
+		MATRIX_KEY(1, 1, KEY_F12)
+	>;
 };
 
 /*
