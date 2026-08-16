@@ -25,7 +25,15 @@
 			topckgen = <&topckgen>;
 			apmixedsys = <&apmixedsys>;
 			infracfg = <&infracfg_ao>;
-			power-domains = <&spm MT6789_POWER_DOMAIN_AUDIO>;
+			/*
+			 * Deliberately no "power-domains" here, for the same
+			 * reason the simple-framebuffer node omits it (see the
+			 * board file): the AUDIO genpd is handed off by LK and
+			 * pd_ignore_unused keeps it on, but a power-domains
+			 * property makes the AFE wait on the scpsys provider and
+			 * deferred-probe-timeout with -110 before mt6789-audio
+			 * ever probes. The AFE enables its own clocks.
+			 */
 
 			clocks = <&afe CLK_AFE_AFE>,
 				 <&afe CLK_AFE_DAC>,
