@@ -228,9 +228,14 @@ static const struct mfd_cell mt6358_devs[] = {
 		 * MT6366 exposes the same key block as MT6358. The stock DC-1
 		 * DTB presents it as "mt6366-keys", so bind that node through
 		 * its own cell (the mt6358-keys cell above only matches
-		 * "mediatek,mt6358-keys" nodes).
+		 * "mediatek,mt6358-keys" nodes). The device name differs from
+		 * the mt6358-keys cell: reusing it would create two platform
+		 * devices of the same name under the same parent, which fails
+		 * in sysfs (EEXIST) and panics the early boot. The mtk-pmic-keys
+		 * driver binds by of_compatible, so the platform device name is
+		 * free to differ.
 		 */
-		.name = "mt6358-keys",
+		.name = "mt6366-keys",
 		.num_resources = ARRAY_SIZE(mt6358_keys_resources),
 		.resources = mt6358_keys_resources,
 		.of_compatible = "mediatek,mt6366-keys"
