@@ -205,12 +205,37 @@
 };
 
 &pmic {
+	/*
+	 * "mediatek,mt6358-sound", not the factory overlay's
+	 * "mediatek,mt6366-sound", even though mt6358.c matches both: the codec
+	 * is an MFD cell of the PMIC, and mt6397-core's mt6358_devs[] declares
+	 * that cell with .of_compatible = "mediatek,mt6358-sound". mfd-core
+	 * attaches the DT node by that compatible alone, so the mt6366 spelling
+	 * leaves the codec with no of_node -- "mt6358-sound: Failed to locate
+	 * of_node [id: -1]" -- and it then probes blind: no dmic-mode, no Avdd,
+	 * no supplies at all. Verified on hardware 2026-08-17.
+	 *
+	 * Likewise Avdd-supply, not the factory overlay's reg_vaud28-supply:
+	 * mainline mt6358.c asks for "Avdd". VAUD28 is always-on here, so the
+	 * wrong name cost nothing visible -- it still has to be right.
+	 */
 	mt6358codec {
-		compatible = "mediatek,mt6366-sound";
+		compatible = "mediatek,mt6358-sound";
 		mediatek,dmic-mode = <0>;
 		mediatek,mic-type = <2>;
-		reg_vaud28-supply = <&mt6366_vaud28_reg>;
+		Avdd-supply = <&mt6366_vaud28_reg>;
 	};
+};
+
+/*
+ * VIBR is the RT9101 amplifier rail on this board (there is no vibrator), and
+ * the factory driver drives it at a fixed 2.8 V. Pin the constraint here rather
+ * than leaving the PMIC's full 1.2-3.3 V range open to a set_voltage() from any
+ * consumer: the amplifier sits directly behind the codec's headphone buffers.
+ */
+&mt6366_vibr_reg {
+	regulator-min-microvolt = <2800000>;
+	regulator-max-microvolt = <2800000>;
 };
 
 &pio {
