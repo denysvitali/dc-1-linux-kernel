@@ -1793,3 +1793,61 @@
 		};
 	};
 };
+
+/*
+ * SCP (sensor co-processor). The firmware is loaded by LK and is already
+ * running; this node only maps the SCP's control and tinysys-mailbox
+ * registers so the mt6789-scp driver can exchange IPIs with it (the
+ * sensorhub path). Layout transcribed from the stock FDT scp@10500000 node.
+ */
+&scp {
+	compatible = "mediatek,mt6789-tinysys-scp";
+	status = "okay";
+
+	reg = <0 0x10500000 0 0xc0000>,	/* sram / TCM */
+	      <0 0x10724000 0 0x1000>,	/* cfgreg */
+	      <0 0x10721000 0 0x1000>,	/* clkreg */
+	      <0 0x10730000 0 0x3000>,	/* cfgreg_core0 */
+	      <0 0x10740000 0 0x1000>,	/* cfgreg_core1 */
+	      <0 0x10752000 0 0x1000>,	/* bus_tracker */
+	      <0 0x10760000 0 0x40000>,	/* l1creg */
+	      <0 0x107a5000 0 0x4>,		/* cfgreg_sec */
+	      <0 0x107fb000 0 0x100>,	/* mbox0_base */
+	      <0 0x107fb100 0 0x4>,		/* mbox0_set */
+	      <0 0x107fb10c 0 0x4>,		/* mbox0_clr */
+	      <0 0x107a5020 0 0x4>,		/* mbox0_init */
+	      <0 0x107fc000 0 0x100>,	/* mbox1_base */
+	      <0 0x107fc100 0 0x4>,		/* mbox1_set */
+	      <0 0x107fc10c 0 0x4>,		/* mbox1_clr */
+	      <0 0x107a5024 0 0x4>,		/* mbox1_init */
+	      <0 0x107fd000 0 0x100>,	/* mbox2_base */
+	      <0 0x107fd100 0 0x4>,		/* mbox2_set */
+	      <0 0x107fd10c 0 0x4>,		/* mbox2_clr */
+	      <0 0x107a5028 0 0x4>,		/* mbox2_init */
+	      <0 0x107fe000 0 0x100>,	/* mbox3_base */
+	      <0 0x107fe100 0 0x4>,		/* mbox3_set */
+	      <0 0x107fe10c 0 0x4>,		/* mbox3_clr */
+	      <0 0x107a502c 0 0x4>,		/* mbox3_init */
+	      <0 0x107ff000 0 0x100>,	/* mbox4_base */
+	      <0 0x107ff100 0 0x4>,		/* mbox4_set */
+	      <0 0x107ff10c 0 0x4>,		/* mbox4_clr */
+	      <0 0x107a5030 0 0x4>;		/* mbox4_init */
+	reg-names = "scp_sram_base", "scp_cfgreg", "scp_clkreg",
+		    "scp_cfgreg_core0", "scp_cfgreg_core1", "scp_bus_tracker",
+		    "scp_l1creg", "scp_cfgreg_sec",
+		    "mbox0_base", "mbox0_set", "mbox0_clr", "mbox0_init",
+		    "mbox1_base", "mbox1_set", "mbox1_clr", "mbox1_init",
+		    "mbox2_base", "mbox2_set", "mbox2_clr", "mbox2_init",
+		    "mbox3_base", "mbox3_set", "mbox3_clr", "mbox3_init",
+		    "mbox4_base", "mbox4_set", "mbox4_clr", "mbox4_init";
+
+	interrupts = <GIC_SPI 466 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>,
+		     <GIC_SPI 467 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>,
+		     <GIC_SPI 468 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>,
+		     <GIC_SPI 469 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>,
+		     <GIC_SPI 470 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>,
+		     <GIC_SPI 471 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>,
+		     <GIC_SPI 472 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>;
+	interrupt-names = "ipc0", "ipc1", "mbox0", "mbox1", "mbox2",
+			  "mbox3", "mbox4";
+};

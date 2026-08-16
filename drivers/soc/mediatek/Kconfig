@@ -89,4 +89,21 @@ config MTK_SOCINFO
 	  information about the SoC to the userspace including the
 	  manufacturer name, marketing name and soc name.
 
+config MTK_MBOX
+	tristate "MediaTek Tinysys Mailbox"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	help
+	  Shared-memory mailbox used to exchange IPIs with a MediaTek tinysys
+	  co-processor (SCP/SSPM). This is the transport underneath the SCP
+	  sensorhub firmware on MT6789/MT8781.
+
+config MTK_TINYSYS_SCP
+	tristate "MediaTek MT6789 tinysys SCP support"
+	depends on ARCH_MEDIATEK
+	select MTK_MBOX
+	help
+	  Driver for the MediaTek MT6789/MT8781 sensor co-processor (SCP). The
+	  SCP firmware is loaded by the bootloader; this driver maps its
+	  mailbox registers so the AP can exchange IPIs with it.
+
 endmenu
