@@ -241,9 +241,9 @@ static const struct mfd_cell mt6358_devs[] = {
 		.of_compatible = "mediatek,mt6366-keys"
 	}, {
 		/*
-		 * A device for mt6358_vbat_battery.c, which reports the pack
-		 * voltage the AUXADC measures on boards whose real fuel gauge
-		 * cannot be reached.
+		 * A device for mt6358_fg.c, which reports pack current and
+		 * coulomb-counted charge from the PMIC's FGADC on boards whose
+		 * pack-side gauge cannot be reached.
 		 *
 		 * Deliberately NO of_compatible, even though the stock DC-1 DTB
 		 * has an obvious node for it ("mediatek,mt6358-gauge", the
@@ -256,12 +256,12 @@ static const struct mfd_cell mt6358_devs[] = {
 		 * with no of_compatible gets no firmware node, hence no
 		 * supplier links, and the driver matches it by name instead.
 		 * The driver needs nothing from the node anyway: it reaches the
-		 * AUXADC through this MFD's regmap.
+		 * FGADC and AUXADC through this MFD's regmap.
 		 *
 		 * Inert without that driver: an unbound platform device costs a
 		 * sysfs entry and nothing else.
 		 */
-		.name = "mt6358-vbat-battery",
+		.name = "mt6358-fg",
 	},
 };
 
