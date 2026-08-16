@@ -81,7 +81,7 @@ static const char * const mt6789_sgen_mute_str[] = {
 static int mt6789_sgen_get(struct snd_kcontrol *kcontrol,
 			   struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 
@@ -92,7 +92,7 @@ static int mt6789_sgen_get(struct snd_kcontrol *kcontrol,
 static int mt6789_sgen_set(struct snd_kcontrol *kcontrol,
 			   struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
@@ -126,7 +126,7 @@ static int mt6789_sgen_set(struct snd_kcontrol *kcontrol,
 static int mt6789_sgen_rate_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 
@@ -137,7 +137,7 @@ static int mt6789_sgen_rate_get(struct snd_kcontrol *kcontrol,
 static int mt6789_sgen_rate_set(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
@@ -165,7 +165,7 @@ static int mt6789_sgen_rate_set(struct snd_kcontrol *kcontrol,
 static int mt6789_sgen_amplitude_get(struct snd_kcontrol *kcontrol,
 				     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 
@@ -176,7 +176,7 @@ static int mt6789_sgen_amplitude_get(struct snd_kcontrol *kcontrol,
 static int mt6789_sgen_amplitude_set(struct snd_kcontrol *kcontrol,
 				     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
@@ -209,7 +209,7 @@ static int mt6789_sgen_amplitude_set(struct snd_kcontrol *kcontrol,
 static int mt6789_sgen_mute_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	int mute = 0;
 
@@ -224,7 +224,7 @@ static int mt6789_sgen_mute_get(struct snd_kcontrol *kcontrol,
 static int mt6789_sgen_mute_set(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	int mute;
@@ -282,7 +282,7 @@ static const struct snd_kcontrol_new mt6789_afe_sgen_controls[] = {
 static int mt6789_usb_echo_ref_get(struct snd_kcontrol *kcontrol,
 				   struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 
@@ -293,7 +293,7 @@ static int mt6789_usb_echo_ref_get(struct snd_kcontrol *kcontrol,
 static int mt6789_usb_echo_ref_set(struct snd_kcontrol *kcontrol,
 				   struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 	int dl_id = MT6789_MEMIF_DL1;
@@ -381,13 +381,6 @@ static int mt6789_usb_echo_ref_set(struct snd_kcontrol *kcontrol,
 					   dl_memif->dma_bytes);
 
 			afe_priv->usb_call_echo_ref_reallocate = true;
-		}
-
-		/* just to double confirm the buffer size is align */
-		if (dl_memif->dma_bytes !=
-		    word_size_align(dl_memif->dma_bytes)) {
-			dev_err(afe->dev, "%s(), buffer size not align\n",
-				__func__);
 		}
 
 		/* let ul use the same memory as dl */
@@ -486,7 +479,7 @@ static void *get_sph_property_by_name(struct mt6789_afe_private *afe_priv,
 static int speech_property_get(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 	int *sph_property;
@@ -505,7 +498,7 @@ static int speech_property_get(struct snd_kcontrol *kcontrol,
 static int speech_property_set(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 	int *sph_property;
@@ -576,42 +569,6 @@ static const struct snd_kcontrol_new mt6789_afe_speech_controls[] = {
 };
 
 /* VOW barge in control */
-static int mt6789_afe_vow_barge_in_get(struct snd_kcontrol *kcontrol,
-				      struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
-	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
-	int id;
-
-	id = MT6789_BARGE_INMEMIF;
-	ucontrol->value.integer.value[0] = afe->memif[id].vow_barge_in_enable;
-
-	return 0;
-}
-
-static int mt6789_afe_vow_barge_in_set(struct snd_kcontrol *kcontrol,
-				      struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
-	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
-	int id;
-	int val;
-
-	id = MT6789_BARGE_INMEMIF;
-	val = ucontrol->value.integer.value[0];
-	dev_info(afe->dev, "%s(), %d\n", __func__, val);
-
-	afe->memif[id].vow_barge_in_enable = (val > 0) ? true : false;
-
-	return 0;
-}
-
-static const struct snd_kcontrol_new mt6789_afe_barge_in_controls[] = {
-	SOC_SINGLE_EXT("Vow_bargein_echo_ref", SND_SOC_NOPM, 0, 0x1, 0,
-		       mt6789_afe_vow_barge_in_get,
-		       mt6789_afe_vow_barge_in_set),
-};
-
 int mt6789_add_misc_control(struct snd_soc_component *component)
 {
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
@@ -629,10 +586,6 @@ int mt6789_add_misc_control(struct snd_soc_component *component)
 	snd_soc_add_component_controls(component,
 				      mt6789_afe_speech_controls,
 				      ARRAY_SIZE(mt6789_afe_speech_controls));
-
-	snd_soc_add_component_controls(component,
-					  mt6789_afe_barge_in_controls,
-					  ARRAY_SIZE(mt6789_afe_barge_in_controls));
 
 	return 0;
 }

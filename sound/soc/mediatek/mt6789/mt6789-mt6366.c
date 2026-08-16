@@ -25,8 +25,6 @@
 #include <mt-plat/cust_gpios.h>
 #endif
 
-#include "../common/mtk-sp-spk-amp.h"
-
 /*
  * if need additional control for the ext spk amp that is connected
  * after Lineout Buffer / HP Buffer on the codec, put the control in
@@ -34,121 +32,16 @@
  */
 #define EXT_SPK_AMP_W_NAME "Ext_Speaker_Amp"
 
-
-extern int aw87xxx_set_profile(int dev_index, char *profile);
-
-static char *aw_profile[] = {"Music", "Off"};
-enum aw87xxx_dev_index {
-       AW_DEV_0 = 0,
-       AW_DEV_1 = 1,   
-       AW_DEV_2 = 2,
-       AW_DEV_3 = 3,
-};
-
-static int g_extamp_mode = 1;
-
-static const char *const mt6789_spk_type_str[] = {MTK_SPK_NOT_SMARTPA_STR,
-						  MTK_SPK_RICHTEK_RT5509_STR,
-						  MTK_SPK_MEDIATEK_MT6660_STR,
-						  MTK_SPK_GOODIX_TFA98XX_STR,
-						  MTK_SPK_RICHTEK_RT5512_STR,
-						  MTK_SPK_AWINIC_AW883XX_STR,
-						  MTK_SPK_FOURSEMI_FS18XX_STR,
-						  MTK_SPK_CIRRUS_CS35L45_STR,
-						  MTK_SPK_AWINIC_AW882XX_STR};
-static const char *const
-	mt6789_spk_i2s_type_str[] = {MTK_SPK_I2S_0_STR,
-				     MTK_SPK_I2S_1_STR,
-				     MTK_SPK_I2S_2_STR,
-				     MTK_SPK_I2S_3_STR,
-				     MTK_SPK_I2S_5_STR,
-					 };
-
-static const struct soc_enum mt6789_spk_type_enum[] = {
-	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6789_spk_type_str),
-			    mt6789_spk_type_str),
-	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6789_spk_i2s_type_str),
-			    mt6789_spk_i2s_type_str),
-};
-
-static int mt6789_spk_type_get(struct snd_kcontrol *kcontrol,
-			       struct snd_ctl_elem_value *ucontrol)
-{
-	int idx = mtk_spk_get_type();
-
-	printk("%s() = %d\n", __func__, idx);
-	ucontrol->value.integer.value[0] = idx;
-	return 0;
-}
-
-static int mt6789_spk_i2s_out_type_get(struct snd_kcontrol *kcontrol,
-				       struct snd_ctl_elem_value *ucontrol)
-{
-	int idx = mtk_spk_get_i2s_out_type();
-
-	printk("%s() = %d\n", __func__, idx);
-	ucontrol->value.integer.value[0] = idx;
-	return 0;
-}
-
-static int mt6789_spk_i2s_in_type_get(struct snd_kcontrol *kcontrol,
-				      struct snd_ctl_elem_value *ucontrol)
-{
-	int idx = mtk_spk_get_i2s_in_type();
-
-	printk("%s() = %d\n", __func__, idx);
-	ucontrol->value.integer.value[0] = idx;
-	return 0;
-}
-#if IS_ENABLED(CONFIG_WB_TYPEC_EARPIECE) || defined(CONFIG_WB_TYPEC_EARPIECE) //jnier 20230829
-extern bool cust_get_typec_accdet_status(void);
-#endif
 static int mt6789_mt6366_spk_amp_event(struct snd_soc_dapm_widget *w,
 					struct snd_kcontrol *kcontrol,
 					int event)
 {
-	struct snd_soc_dapm_context *dapm = w->dapm;
-	struct snd_soc_card *card = dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 
 	dev_info(card->dev, "%s(), event %d\n", __func__, event);
-
-	switch (event) {
-	case SND_SOC_DAPM_POST_PMU:
-		/* spk amp on control */
-#if IS_ENABLED(CONFIG_WB_TYPEC_EARPIECE) || defined(CONFIG_WB_TYPEC_EARPIECE) //jnier 20230829
-		if(cust_get_typec_accdet_status()) {
-			printk("%s accdet spk amp on\n",__func__);
-			cust_gpio_set_value(CUST_GPIO_AUHPR_SPK_SW, 0);
-			cust_gpio_set_value(CUST_GPIO_USB_HP_SW,0);
-		}
-#endif
-		AudDrv_GPIO_EXTAMP_Select(true, g_extamp_mode);
-        aw87xxx_set_profile(AW_DEV_0, aw_profile[0]);
-        aw87xxx_set_profile(AW_DEV_1, aw_profile[0]);
-        aw87xxx_set_profile(AW_DEV_2, aw_profile[0]);
-        aw87xxx_set_profile(AW_DEV_3, aw_profile[0]);
-		break;
-	case SND_SOC_DAPM_PRE_PMD:
-		/* spk amp off control */
-		AudDrv_GPIO_EXTAMP_Select(false, g_extamp_mode);
-        aw87xxx_set_profile(AW_DEV_0, aw_profile[1]);
-        aw87xxx_set_profile(AW_DEV_1, aw_profile[1]);
-        aw87xxx_set_profile(AW_DEV_2, aw_profile[1]);
-        aw87xxx_set_profile(AW_DEV_3, aw_profile[1]);
-#if IS_ENABLED(CONFIG_WB_TYPEC_EARPIECE) || defined(CONFIG_WB_TYPEC_EARPIECE) //jnier 20230829
-		if(cust_get_typec_accdet_status()) {
-			printk("%s accdet spk amp off \n",__func__);
-			cust_gpio_set_value(CUST_GPIO_AUHPR_SPK_SW, 1);
-			cust_gpio_set_value(CUST_GPIO_USB_HP_SW,1);
-		}
-#endif
-		break;
-	default:
-		break;
-	}
-
+	/* External speaker amp enable GPIOs are wired up in P8.2 */
 	return 0;
-};
+}
 
 static const struct snd_soc_dapm_widget mt6789_mt6366_widgets[] = {
 	SND_SOC_DAPM_SPK(EXT_SPK_AMP_W_NAME, mt6789_mt6366_spk_amp_event),
@@ -162,13 +55,8 @@ static const struct snd_soc_dapm_route mt6789_mt6366_routes[] = {
 
 static const struct snd_kcontrol_new mt6789_mt6366_controls[] = {
 	SOC_DAPM_PIN_SWITCH(EXT_SPK_AMP_W_NAME),
-	SOC_ENUM_EXT("MTK_SPK_TYPE_GET", mt6789_spk_type_enum[0],
-		     mt6789_spk_type_get, NULL),
-	SOC_ENUM_EXT("MTK_SPK_I2S_OUT_TYPE_GET", mt6789_spk_type_enum[1],
-		     mt6789_spk_i2s_out_type_get, NULL),
-	SOC_ENUM_EXT("MTK_SPK_I2S_IN_TYPE_GET", mt6789_spk_type_enum[1],
-		     mt6789_spk_i2s_in_type_get, NULL),
 };
+
 
 /*
  * define mtk_spk_i2s_mck node in dts when need mclk,
@@ -181,7 +69,7 @@ static int mt6789_mt6366_i2s_hw_params(struct snd_pcm_substream *substream,
 	unsigned int rate = params_rate(params);
 	unsigned int mclk_fs_ratio = 128;
 	unsigned int mclk_fs = rate * mclk_fs_ratio;
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 
 	return snd_soc_dai_set_sysclk(cpu_dai,
 				      0, mclk_fs, SND_SOC_CLOCK_OUT);
@@ -191,148 +79,6 @@ static const struct snd_soc_ops mt6789_mt6366_i2s_ops = {
 	.hw_params = mt6789_mt6366_i2s_hw_params,
 };
 
-static int mt6789_mt6366_mtkaif_calibration(struct snd_soc_pcm_runtime *rtd)
-{
-#if !defined(CONFIG_FPGA_EARLY_PORTING) && !defined(SKIP_SB)
-	struct snd_soc_component *component =
-		snd_soc_rtdcom_lookup(rtd, AFE_PCM_NAME);
-	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
-	struct mt6789_afe_private *afe_priv = afe->platform_priv;
-	struct snd_soc_component *codec_component =
-		snd_soc_rtdcom_lookup(rtd, CODEC_MT6358_NAME);
-	int phase;
-	unsigned int monitor = 0;
-	int test_done_1, test_done_2;
-	int miso0_need_calib, miso1_need_calib;
-	int cycle_1, cycle_2;
-	int prev_cycle_1, prev_cycle_2;
-	int counter;
-	int mtkaif_calib_ok;
-
-	dev_info(afe->dev, "%s(), start\n", __func__);
-
-	pm_runtime_get_sync(afe->dev);
-
-	miso0_need_calib = mt6789_afe_gpio_is_prepared(MT6789_AFE_GPIO_DAT_MISO0_ON);
-	miso1_need_calib = mt6789_afe_gpio_is_prepared(MT6789_AFE_GPIO_DAT_MISO1_ON);
-
-	mt6789_afe_gpio_request(afe, true, MT6789_DAI_ADDA, 1);
-	mt6789_afe_gpio_request(afe, true, MT6789_DAI_ADDA, 0);
-
-	mt6358_mtkaif_calibration_enable(codec_component);
-
-	/* set clock protocol 2 */
-	regmap_update_bits(afe->regmap, AFE_AUD_PAD_TOP, 0xff, 0x38);
-	regmap_update_bits(afe->regmap, AFE_AUD_PAD_TOP, 0xff, 0x39);
-
-	/* set test type to synchronizer pulse */
-	regmap_update_bits(afe_priv->topckgen,
-			   CKSYS_AUD_TOP_CFG, 0xffff, 0x4);
-
-	mtkaif_calib_ok = true;
-	afe_priv->mtkaif_calibration_num_phase = 42;	/* mt6358: 0 ~ 42 */
-	afe_priv->mtkaif_chosen_phase[0] = -1;
-	afe_priv->mtkaif_chosen_phase[1] = -1;
-
-	for (phase = 0;
-	     phase <= afe_priv->mtkaif_calibration_num_phase &&
-	     mtkaif_calib_ok;
-	     phase++) {
-		mt6358_set_mtkaif_calibration_phase(codec_component,
-						    phase, phase);
-
-		regmap_update_bits(afe_priv->topckgen,
-				   CKSYS_AUD_TOP_CFG, 0x1, 0x1);
-
-		test_done_1 = miso0_need_calib ? 0 : -1;
-		test_done_2 = miso1_need_calib ? 0 : -1;
-		cycle_1 = -1;
-		cycle_2 = -1;
-		counter = 0;
-		while (test_done_1 == 0 || test_done_2 == 0) {
-			regmap_read(afe_priv->topckgen,
-				    CKSYS_AUD_TOP_MON, &monitor);
-
-			/* get test status */
-			if (test_done_1 == 0)
-				test_done_1 = (monitor >> 28) & 0x1;
-			if (test_done_2 == 0)
-				test_done_2 = (monitor >> 29) & 0x1;
-
-			/* get delay cycle */
-			if (test_done_1 == 1)
-				cycle_1 = monitor & 0xf;
-			if (test_done_2 == 1)
-				cycle_2 = (monitor >> 4) & 0xf;
-
-			/* handle if never test done */
-			if (++counter > 10000) {
-				dev_err(afe->dev, "%s(), test fail, cycle_1 %d, cycle_2 %d, monitor 0x%x\n",
-					__func__,
-					cycle_1, cycle_2, monitor);
-				mtkaif_calib_ok = false;
-				break;
-			}
-		}
-
-		if (phase == 0) {
-			prev_cycle_1 = cycle_1;
-			prev_cycle_2 = cycle_2;
-		}
-
-		if (miso0_need_calib &&
-		    cycle_1 != prev_cycle_1 &&
-		    afe_priv->mtkaif_chosen_phase[0] < 0) {
-			afe_priv->mtkaif_chosen_phase[0] = phase - 1;
-			afe_priv->mtkaif_phase_cycle[0] = prev_cycle_1;
-		}
-
-		if (miso1_need_calib &&
-		    cycle_2 != prev_cycle_2 &&
-		    afe_priv->mtkaif_chosen_phase[1] < 0) {
-			afe_priv->mtkaif_chosen_phase[1] = phase - 1;
-			afe_priv->mtkaif_phase_cycle[1] = prev_cycle_2;
-		}
-
-		regmap_update_bits(afe_priv->topckgen,
-				   CKSYS_AUD_TOP_CFG, 0x1, 0x0);
-	}
-
-	mt6358_set_mtkaif_calibration_phase(codec_component,
-		(afe_priv->mtkaif_chosen_phase[0] < 0) ?
-		0 : afe_priv->mtkaif_chosen_phase[0],
-		(afe_priv->mtkaif_chosen_phase[1] < 0) ?
-		0 : afe_priv->mtkaif_chosen_phase[1]);
-
-	/* disable rx fifo */
-	regmap_update_bits(afe->regmap, AFE_AUD_PAD_TOP, 0xff, 0x38);
-
-	mt6358_mtkaif_calibration_disable(codec_component);
-
-	mt6789_afe_gpio_request(afe, false, MT6789_DAI_ADDA, 1);
-	mt6789_afe_gpio_request(afe, false, MT6789_DAI_ADDA, 0);
-
-	/* disable syncword if miso pin not prepared */
-	if (!miso0_need_calib)
-		regmap_update_bits(afe->regmap, AFE_ADDA_MTKAIF_SYNCWORD_CFG,
-				   RG_ADDA_MTKAIF_RX_SYNC_WORD1_DISABLE_MASK_SFT,
-				   0x1 << RG_ADDA_MTKAIF_RX_SYNC_WORD1_DISABLE_SFT);
-	if (!miso1_need_calib)
-		regmap_update_bits(afe->regmap, AFE_ADDA_MTKAIF_SYNCWORD_CFG,
-				   RG_ADDA_MTKAIF_RX_SYNC_WORD2_DISABLE_MASK_SFT,
-				   0x1 << RG_ADDA_MTKAIF_RX_SYNC_WORD2_DISABLE_SFT);
-
-	pm_runtime_put(afe->dev);
-
-	dev_info(afe->dev, "%s(), mtkaif_chosen_phase[0/1]:%d/%d, miso_need_calib[%d/%d]\n",
-		 __func__,
-		 afe_priv->mtkaif_chosen_phase[0],
-		 afe_priv->mtkaif_chosen_phase[1],
-		 miso0_need_calib, miso1_need_calib);
-#endif
-	return 0;
-}
-
 static int mt6789_mt6366_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_component *component =
@@ -340,31 +86,16 @@ static int mt6789_mt6366_init(struct snd_soc_pcm_runtime *rtd)
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
 	struct mt6789_afe_private *afe_priv = afe->platform_priv;
 	struct snd_soc_component *codec_component =
-		snd_soc_rtdcom_lookup(rtd, CODEC_MT6358_NAME);
-	struct snd_soc_dapm_context *dapm = &rtd->card->dapm;
-	struct mt6358_codec_ops ops;
-
-	/* set dc component callback function for codec */
-	ops.enable_dc_compensation = mt6789_enable_dc_compensation;
-	ops.set_lch_dc_compensation = mt6789_set_lch_dc_compensation;
-	ops.set_rch_dc_compensation = mt6789_set_rch_dc_compensation;
-	ops.adda_dl_gain_control = mt6789_adda_dl_gain_control;
-	mt6358_set_codec_ops(codec_component, &ops);
+		snd_soc_rtd_to_codec(rtd, 0)->component;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(rtd->card);
 
 	/* set mtkaif protocol */
 	mt6358_set_mtkaif_protocol(codec_component,
 				   MT6358_MTKAIF_PROTOCOL_1);
 	afe_priv->mtkaif_protocol = MT6358_MTKAIF_PROTOCOL_1;
 
-	/* mtkaif calibration */
-	if (afe_priv->mtkaif_protocol == MTKAIF_PROTOCOL_2_CLK_P2)
-		mt6789_mt6366_mtkaif_calibration(rtd);
-
 	/* disable ext amp connection */
 	snd_soc_dapm_disable_pin(dapm, EXT_SPK_AMP_W_NAME);
-#if IS_ENABLED(CONFIG_SND_SOC_MT6366_ACCDET)
-	mt6358_accdet_init(codec_component, rtd->card);
-#endif
 	return 0;
 }
 
@@ -708,7 +439,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
 		SND_SOC_DAILINK_REG(playback1),
 	},
 	{
@@ -717,7 +447,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
 		SND_SOC_DAILINK_REG(playback12),
 	},
 	{
@@ -726,7 +455,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
 		SND_SOC_DAILINK_REG(playback2),
 	},
 	{
@@ -735,7 +463,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
 		SND_SOC_DAILINK_REG(playback3),
 	},
 	{
@@ -744,7 +471,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
 		SND_SOC_DAILINK_REG(playback4),
 	},
 	{
@@ -753,7 +479,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
 		SND_SOC_DAILINK_REG(playback5),
 	},
 	{
@@ -762,7 +487,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
 		SND_SOC_DAILINK_REG(playback6),
 	},
 	{
@@ -771,7 +495,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
 		SND_SOC_DAILINK_REG(playback7),
 	},
 	{
@@ -780,7 +503,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
 		SND_SOC_DAILINK_REG(playback8),
 	},
 	{
@@ -789,7 +511,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture1),
 	},
 	{
@@ -798,7 +519,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture2),
 	},
 	{
@@ -807,7 +527,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture3),
 	},
 	{
@@ -816,7 +535,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture4),
 	},
 	{
@@ -825,7 +543,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture5),
 	},
 	{
@@ -834,7 +551,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture6),
 	},
 	{
@@ -843,7 +559,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture7),
 	},
 	{
@@ -852,7 +567,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture8),
 	},
 	{
@@ -861,7 +575,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture_mono_1),
 	},
 	{
@@ -870,7 +583,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture_mono_2),
 	},
 	{
@@ -879,7 +591,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		SND_SOC_DAILINK_REG(capture_mono_3),
 	},
 	{
@@ -888,8 +599,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_lpbk),
 	},
@@ -899,8 +608,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_fm),
 	},
@@ -910,8 +617,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_speech),
 	},
@@ -921,8 +626,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_sph_echo_ref),
 	},
@@ -932,8 +635,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_spk_init),
 	},
@@ -943,7 +644,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_adda_dl_i2s_out),
 	},
@@ -953,8 +653,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_src1),
 	},
@@ -964,8 +662,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_src_bargein),
 	},
@@ -973,8 +669,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 	{
 		.name = "Primary Codec",
 		.no_pcm = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		.init = mt6789_mt6366_init,
 		SND_SOC_DAILINK_REG(adda),
@@ -982,13 +676,12 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 	{
 		.name = "AP_DMIC",
 		.no_pcm = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(ap_dmic),
 	},
 	{
 		.name = "I2S0",
-		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBS_CFS
+		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBC_CFC
 			| SND_SOC_DAIFMT_GATED,
 		.ops = &mt6789_mt6366_i2s_ops,
 #if IS_ENABLED(CONFIG_SND_SOC_AW882XX)
@@ -996,7 +689,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.codecs = awinic_codecs,
 #endif
 		.no_pcm = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		.ignore_pmdown_time = 1,
 		.be_hw_params_fixup = mt6789_i2s_hw_params_fixup,
@@ -1004,7 +696,7 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 	},
 	{
 		.name = "I2S1",
-		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBS_CFS
+		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBC_CFC
 			| SND_SOC_DAIFMT_GATED,
 		.ops = &mt6789_mt6366_i2s_ops,
 #if IS_ENABLED(CONFIG_SND_SOC_AW882XX)
@@ -1012,14 +704,13 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.codecs = awinic_codecs,
 #endif
 		.no_pcm = 1,
-		.dpcm_playback = 1,
 		.ignore_suspend = 1,
 		.be_hw_params_fixup = mt6789_i2s_hw_params_fixup,
 		SND_SOC_DAILINK_REG(i2s1),
 	},
 	{
 		.name = "I2S2",
-		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBS_CFS
+		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBC_CFC
 			| SND_SOC_DAIFMT_GATED,
 		.ops = &mt6789_mt6366_i2s_ops,
 #if IS_ENABLED(CONFIG_SND_SOC_AW882XX)
@@ -1027,14 +718,13 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.codecs = awinic_codecs,
 #endif
 		.no_pcm = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		.be_hw_params_fixup = mt6789_i2s_hw_params_fixup,
 		SND_SOC_DAILINK_REG(i2s2),
 	},
 	{
 		.name = "I2S3",
-		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBS_CFS
+		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBC_CFC
 			| SND_SOC_DAIFMT_GATED,
 		.ops = &mt6789_mt6366_i2s_ops,
 #if IS_ENABLED(CONFIG_SND_SOC_AW882XX)
@@ -1042,7 +732,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.codecs = awinic_codecs,
 #endif
 		.no_pcm = 1,
-		.dpcm_playback = 1,
 		.ignore_suspend = 1,
 		.ignore_pmdown_time = 1,
 		.be_hw_params_fixup = mt6789_i2s_hw_params_fixup,
@@ -1051,47 +740,36 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 	{
 		.name = "HW Gain 1",
 		.no_pcm = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hw_gain1),
 	},
 	{
 		.name = "HW Gain 2",
 		.no_pcm = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hw_gain2),
 	},
 	{
 		.name = "HW_SRC_1",
 		.no_pcm = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hw_src1),
 	},
 	{
 		.name = "HW_SRC_2",
 		.no_pcm = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hw_src2),
 	},
 	{
 		.name = "CONNSYS_I2S",
 		.no_pcm = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(connsys_i2s),
 	},
 	{
 		.name = "PCM 2",
 		.no_pcm = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(pcm2),
 	},
@@ -1099,28 +777,24 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 	{
 		.name = "Hostless_UL1",
 		.no_pcm = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_ul1),
 	},
 	{
 		.name = "Hostless_UL2",
 		.no_pcm = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_ul2),
 	},
 	{
 		.name = "Hostless_UL3",
 		.no_pcm = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_ul3),
 	},
 	{
 		.name = "Hostless_UL6",
 		.no_pcm = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_ul6),
 	},
@@ -1130,7 +804,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_hw_gain_aaudio),
 	},
@@ -1140,8 +813,6 @@ static struct snd_soc_dai_link mt6789_mt6366_dai_links[] = {
 		.trigger = {SND_SOC_DPCM_TRIGGER_PRE,
 			    SND_SOC_DPCM_TRIGGER_PRE},
 		.dynamic = 1,
-		.dpcm_playback = 1,
-		.dpcm_capture = 1,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(hostless_src_aaudio),
 	},
@@ -1230,14 +901,6 @@ static int mt6789_mt6366_dev_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "%s()\n", __func__);
 
-	/* update speaker type */
-	ret = mtk_spk_update_info(card, pdev);
-	if (ret) {
-		dev_err(&pdev->dev, "%s(), mtk_spk_update_info error\n",
-			__func__);
-		return -EINVAL;
-	}
-
 	/* get platform node */
 	platform_node = of_parse_phandle(pdev->dev.of_node,
 					 "mediatek,platform", 0);
@@ -1299,11 +962,6 @@ static int mt6789_mt6366_dev_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "can't find scp audio node\n");
 	}
 #endif
-
-	if (of_property_read_u32(pdev->dev.of_node, "extamp_mode", &g_extamp_mode)) {
-		g_extamp_mode = 1;
-		dev_err(&pdev->dev, "Not find extamp_mode\n");
-	}
 
 	card->dev = &pdev->dev;
 

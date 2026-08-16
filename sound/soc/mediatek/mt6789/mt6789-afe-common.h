@@ -114,6 +114,19 @@ enum {
 	MT6789_IRQ_NUM,
 };
 
+/* MTKAIF protocol between the AFE and the MT6366 codec */
+enum {
+	MTKAIF_PROTOCOL_1 = 0,
+	MTKAIF_PROTOCOL_2,
+	MTKAIF_PROTOCOL_2_CLK_P2,
+};
+
+enum {
+	MTK_AFE_ADDA_DL_GAIN_MUTE = 0,
+	MTK_AFE_ADDA_DL_GAIN_NORMAL = 0xf74f,
+	/* SA suggest apply -0.3db to audio/speech path */
+};
+
 /* MCLK */
 enum {
 	MT6789_I2S0_MCK = 0,

@@ -9,7 +9,38 @@
 #include "mt6789-afe-common.h"
 #include <linux/pm_runtime.h>
 
-#include "../common/mtk-sram-manager.h"
+enum {
+	MTK_AFE_RATE_8K = 0,
+	MTK_AFE_RATE_11K,
+	MTK_AFE_RATE_12K,
+	MTK_AFE_RATE_384K,
+	MTK_AFE_RATE_16K,
+	MTK_AFE_RATE_22K,
+	MTK_AFE_RATE_24K,
+	MTK_AFE_RATE_352K,
+	MTK_AFE_RATE_32K,
+	MTK_AFE_RATE_44K,
+	MTK_AFE_RATE_48K,
+	MTK_AFE_RATE_88K,
+	MTK_AFE_RATE_96K,
+	MTK_AFE_RATE_176K,
+	MTK_AFE_RATE_192K,
+	MTK_AFE_RATE_260K,
+};
+
+enum {
+	MTK_AFE_DAI_MEMIF_RATE_8K = 0,
+	MTK_AFE_DAI_MEMIF_RATE_16K,
+	MTK_AFE_DAI_MEMIF_RATE_32K,
+	MTK_AFE_DAI_MEMIF_RATE_48K,
+};
+
+enum {
+	MTK_AFE_PCM_RATE_8K = 0,
+	MTK_AFE_PCM_RATE_16K,
+	MTK_AFE_PCM_RATE_32K,
+	MTK_AFE_PCM_RATE_48K,
+};
 
 /* don't use this directly if not necessary */
 static struct mtk_base_afe *local_afe;
