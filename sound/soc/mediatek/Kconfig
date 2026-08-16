@@ -216,6 +216,31 @@ config SND_SOC_MT8186_MT6366
 	  Select Y if you have such device.
 	  If unsure select "N".
 
+config SND_SOC_MT6789
+	tristate "ASoC support for MediaTek MT6789 chip"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on COMMON_CLK
+	select SND_SOC_MEDIATEK
+	select SND_SOC_MT6358
+	select MFD_SYSCON if SND_SOC_MT6358
+	help
+	  This adds ASoC platform driver support for MediaTek MT6789 chip
+	  that can be used with other codecs.
+	  Select Y if you have such device.
+	  If unsure select "N".
+
+config SND_SOC_MT6789_MT6366
+	tristate "ASoC Audio driver for MT6789 with MT6366 and I2S codecs"
+	depends on I2C && GPIOLIB
+	depends on SND_SOC_MT6789 && MTK_PMIC_WRAP
+	select SND_SOC_MT6358
+	select SND_SOC_DMIC
+	help
+	  This adds the ASoC machine driver for MediaTek MT6789 boards
+	  with the MT6366(MT6358) and other I2S audio codecs.
+	  Select Y if you have such device.
+	  If unsure select "N".
+
 config SND_SOC_MTK_BTCVSD
 	tristate "ALSA BT SCO CVSD/MSBC Driver"
 	help
