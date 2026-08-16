@@ -20,6 +20,8 @@
 #ifndef __MTK6789_SCP_H__
 #define __MTK6789_SCP_H__
 
+#include <linux/regmap.h>
+
 #define SCP_MBOX_TOTAL 5
 
 struct scp_regs {
@@ -30,7 +32,14 @@ struct scp_regs {
 	void __iomem *l1cctrl;		/* scp_l1creg */
 	void __iomem *bus_tracker;	/* scp_bus_tracker */
 	void __iomem *cfg_sec;		/* scp_cfgreg_sec */
+	struct regmap *infracfg;	/* infracfg_ao syscon (wake/IPC) */
 };
+
+/* infracfg_ao offsets (the vendor "scp_infra" block) */
+#define SCP_INFRA_IRQ_SET		0x0b14
+#define SCP_INFRA_IRQ_CLEAR		0x0b18
+#define SCP_INFRA_AP_AWAKE_LOCK		BIT(0)
+#define SCP_INFRA_AWAKE_MAGIC		0xa0
 
 /* Offsets relative to scp_regs.cfg (scp_cfgreg) */
 #define SCP_SEMAPHORE			0x0018
