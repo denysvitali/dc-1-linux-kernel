@@ -317,6 +317,10 @@ static const struct of_device_id of_mtk_pmic_keys_match_tbl[] = {
 		.compatible = "mediatek,mt6359-keys",
 		.data = &mt6359_regs,
 	}, {
+		/* MT6366 uses the MT6358 key block. */
+		.compatible = "mediatek,mt6366-keys",
+		.data = &mt6358_regs,
+	}, {
 		/* sentinel */
 	}
 };

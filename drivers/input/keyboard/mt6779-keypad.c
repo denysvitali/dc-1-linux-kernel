@@ -24,8 +24,10 @@
 #define MTK_KPD_SEL_ROW	GENMASK(9, 4)
 #define MTK_KPD_SEL_COLMASK(c)	GENMASK((c) + 9, 10)
 #define MTK_KPD_SEL_ROWMASK(r)	GENMASK((r) + 3, 4)
+#define MTK_KPD_EN		0x0024
 #define MTK_KPD_NUM_MEMS	5
 #define MTK_KPD_NUM_BITS	136	/* 4*32+8 MEM5 only use 8 BITS */
+#define MTK_KPD_NUM_KEYS	72
 
 struct mt6779_keypad {
 	struct regmap *regmap;
@@ -36,6 +38,7 @@ struct mt6779_keypad {
 	void (*calc_row_col)(unsigned int key,
 			     unsigned int *row, unsigned int *col);
 	DECLARE_BITMAP(keymap_state, MTK_KPD_NUM_BITS);
+	bool use_hw_init_map;
 };
 
 static const struct regmap_config mt6779_keypad_regmap_cfg = {
@@ -71,9 +74,19 @@ static irqreturn_t mt6779_keypad_irq_handler(int irq, void *dev_id)
 			continue;
 
 		key = bit_nr / 32 * 16 + bit_nr % 32;
-		keypad->calc_row_col(key, &row, &col);
 
-		scancode = MATRIX_SCAN_CODE(row, col, row_shift);
+		if (keypad->use_hw_init_map) {
+			/*
+			 * Downstream keypads expose a flat keymap indexed
+			 * directly by hardware key position, not a matrix.
+			 */
+			if (key >= MTK_KPD_NUM_KEYS)
+				continue;
+			scancode = key;
+		} else {
+			keypad->calc_row_col(key, &row, &col);
+			scancode = MATRIX_SCAN_CODE(row, col, row_shift);
+		}
 		/* 1: not pressed, 0: pressed */
 		pressed = !test_bit(bit_nr, new_state);
 		dev_dbg(&keypad->input_dev->dev, "%s",
@@ -145,68 +158,132 @@ static int mt6779_keypad_pdrv_probe(struct platform_device *pdev)
 	keypad->input_dev->name = MTK_KPD_NAME;
 	keypad->input_dev->id.bustype = BUS_HOST;
 
-	error = matrix_keypad_parse_properties(&pdev->dev, &keypad->n_rows,
-					       &keypad->n_cols);
-	if (error) {
-		dev_err(&pdev->dev, "Failed to parse keypad params\n");
-		return error;
+	if (device_property_present(&pdev->dev, "mediatek,hw-init-map")) {
+		/*
+		 * Downstream-compatible node (mediatek,kp): a flat 72-entry
+		 * hw-init-map indexed by hardware key position, with no matrix
+		 * geometry. Report KEY_* codes straight from that map and
+		 * leave row/column selection at reset (single-key mode),
+		 * mirroring the stock MTK kpd driver.
+		 */
+		u32 hw_map[MTK_KPD_NUM_KEYS];
+		u32 n_keys;
+		int i;
+
+		keypad->use_hw_init_map = true;
+
+		if (device_property_read_u32(&pdev->dev, "mediatek,hw-map-num",
+					     &n_keys) ||
+		    n_keys > MTK_KPD_NUM_KEYS) {
+			dev_err(&pdev->dev, "invalid mediatek,hw-map-num\n");
+			return -EINVAL;
+		}
+
+		if (device_property_read_u32_array(&pdev->dev,
+						   "mediatek,hw-init-map",
+						   hw_map, n_keys)) {
+			dev_err(&pdev->dev, "Failed to parse hw-init-map\n");
+			return -EINVAL;
+		}
+
+		keypad->input_dev->keycode =
+			devm_kcalloc(&pdev->dev, MTK_KPD_NUM_KEYS,
+				     sizeof(unsigned short), GFP_KERNEL);
+		if (!keypad->input_dev->keycode)
+			return -ENOMEM;
+		keypad->input_dev->keycodesize = sizeof(unsigned short);
+		keypad->input_dev->keycodemax = MTK_KPD_NUM_KEYS;
+
+		for (i = 0; i < n_keys; i++) {
+			((unsigned short *)keypad->input_dev->keycode)[i] =
+				hw_map[i];
+			if (hw_map[i])
+				input_set_capability(keypad->input_dev, EV_KEY,
+						     hw_map[i]);
+		}
+
+		/* The stock node's value is a raw debounce register setting. */
+		if (device_property_read_u32(&pdev->dev,
+					     "mediatek,key-debounce-ms",
+					     &debounce))
+			debounce = 0;
+
+		wakeup = false;
+	} else {
+		error = matrix_keypad_parse_properties(&pdev->dev,
+						       &keypad->n_rows,
+						       &keypad->n_cols);
+		if (error) {
+			dev_err(&pdev->dev, "Failed to parse keypad params\n");
+			return error;
+		}
+
+		if (device_property_read_u32(&pdev->dev, "debounce-delay-ms",
+					     &debounce))
+			debounce = 16;
+
+		if (debounce > MTK_KPD_DEBOUNCE_MAX_MS) {
+			dev_err(&pdev->dev,
+				"Debounce time exceeds the maximum allowed time %dms\n",
+				MTK_KPD_DEBOUNCE_MAX_MS);
+			return -EINVAL;
+		}
+
+		if (device_property_read_u32(&pdev->dev,
+					     "mediatek,keys-per-group",
+					     &keys_per_group))
+			keys_per_group = 1;
+
+		switch (keys_per_group) {
+		case 1:
+			keypad->calc_row_col = mt6779_keypad_calc_row_col_single;
+			break;
+		case 2:
+			keypad->calc_row_col = mt6779_keypad_calc_row_col_double;
+			break;
+		default:
+			dev_err(&pdev->dev,
+				"Invalid keys-per-group: %d\n", keys_per_group);
+			return -EINVAL;
+		}
+
+		wakeup = device_property_read_bool(&pdev->dev, "wakeup-source");
+
+		error = matrix_keypad_build_keymap(NULL, NULL,
+						   keypad->n_rows,
+						   keypad->n_cols,
+						   NULL, keypad->input_dev);
+		if (error) {
+			dev_err(&pdev->dev, "Failed to build keymap\n");
+			return error;
+		}
 	}
-
-	if (device_property_read_u32(&pdev->dev, "debounce-delay-ms",
-				     &debounce))
-		debounce = 16;
-
-	if (debounce > MTK_KPD_DEBOUNCE_MAX_MS) {
-		dev_err(&pdev->dev,
-			"Debounce time exceeds the maximum allowed time %dms\n",
-			MTK_KPD_DEBOUNCE_MAX_MS);
-		return -EINVAL;
-	}
-
-	if (device_property_read_u32(&pdev->dev, "mediatek,keys-per-group",
-				     &keys_per_group))
-		keys_per_group = 1;
-
-	switch (keys_per_group) {
-	case 1:
-		keypad->calc_row_col = mt6779_keypad_calc_row_col_single;
-		break;
-	case 2:
-		keypad->calc_row_col = mt6779_keypad_calc_row_col_double;
-		break;
-	default:
-		dev_err(&pdev->dev,
-			"Invalid keys-per-group: %d\n", keys_per_group);
-		return -EINVAL;
-	}
-
-	wakeup = device_property_read_bool(&pdev->dev, "wakeup-source");
 
 	dev_dbg(&pdev->dev, "n_row=%d n_col=%d debounce=%d\n",
 		keypad->n_rows, keypad->n_cols, debounce);
 
-	error = matrix_keypad_build_keymap(NULL, NULL,
-					   keypad->n_rows, keypad->n_cols,
-					   NULL, keypad->input_dev);
-	if (error) {
-		dev_err(&pdev->dev, "Failed to build keymap\n");
-		return error;
-	}
-
 	input_set_capability(keypad->input_dev, EV_MSC, MSC_SCAN);
 
-	regmap_write(keypad->regmap, MTK_KPD_DEBOUNCE,
-		     (debounce * (1 << 5)) & MTK_KPD_DEBOUNCE_MASK);
+	if (keypad->use_hw_init_map) {
+		regmap_write(keypad->regmap, MTK_KPD_DEBOUNCE,
+			     debounce & MTK_KPD_DEBOUNCE_MASK);
+		regmap_write(keypad->regmap, MTK_KPD_EN, 1);
+	} else {
+		regmap_write(keypad->regmap, MTK_KPD_DEBOUNCE,
+			     (debounce * (1 << 5)) & MTK_KPD_DEBOUNCE_MASK);
 
-	if (keys_per_group == 2)
+		if (keys_per_group == 2)
+			regmap_update_bits(keypad->regmap, MTK_KPD_SEL,
+					   MTK_KPD_SEL_DOUBLE_KP_MODE,
+					   MTK_KPD_SEL_DOUBLE_KP_MODE);
+
 		regmap_update_bits(keypad->regmap, MTK_KPD_SEL,
-				   MTK_KPD_SEL_DOUBLE_KP_MODE,
-				   MTK_KPD_SEL_DOUBLE_KP_MODE);
-
-	regmap_update_bits(keypad->regmap, MTK_KPD_SEL, MTK_KPD_SEL_ROW,
-			   MTK_KPD_SEL_ROWMASK(keypad->n_rows));
-	regmap_update_bits(keypad->regmap, MTK_KPD_SEL, MTK_KPD_SEL_COL,
-			   MTK_KPD_SEL_COLMASK(keypad->n_cols));
+				   MTK_KPD_SEL_ROW,
+				   MTK_KPD_SEL_ROWMASK(keypad->n_rows));
+		regmap_update_bits(keypad->regmap, MTK_KPD_SEL,
+				   MTK_KPD_SEL_COL,
+				   MTK_KPD_SEL_COLMASK(keypad->n_cols));
+	}
 
 	keypad->clk = devm_clk_get_enabled(&pdev->dev, "kpd");
 	if (IS_ERR(keypad->clk))
@@ -242,6 +319,8 @@ static int mt6779_keypad_pdrv_probe(struct platform_device *pdev)
 static const struct of_device_id mt6779_keypad_of_match[] = {
 	{ .compatible = "mediatek,mt6779-keypad" },
 	{ .compatible = "mediatek,mt6873-keypad" },
+	/* Downstream name used by the DC-1 stock DTB. */
+	{ .compatible = "mediatek,kp" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mt6779_keypad_of_match);
