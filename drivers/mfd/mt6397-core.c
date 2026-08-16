@@ -239,6 +239,29 @@ static const struct mfd_cell mt6358_devs[] = {
 		.num_resources = ARRAY_SIZE(mt6358_keys_resources),
 		.resources = mt6358_keys_resources,
 		.of_compatible = "mediatek,mt6366-keys"
+	}, {
+		/*
+		 * A device for mt6358_vbat_battery.c, which reports the pack
+		 * voltage the AUXADC measures on boards whose real fuel gauge
+		 * cannot be reached.
+		 *
+		 * Deliberately NO of_compatible, even though the stock DC-1 DTB
+		 * has an obvious node for it ("mediatek,mt6358-gauge", the
+		 * vendor coulomb-counter block). That node carries
+		 * nvmem-cells = <&fg_soc ...> into the RTC's spare registers,
+		 * and nothing in mainline provides those cells, so fw_devlink
+		 * parks any consumer of that node in deferred probe forever --
+		 * verified on hardware: "mt6358-vbat-battery platform: wait for
+		 * supplier /soc/pwrap@10026000/mt6366/mt6358rtc/fg_soc". A cell
+		 * with no of_compatible gets no firmware node, hence no
+		 * supplier links, and the driver matches it by name instead.
+		 * The driver needs nothing from the node anyway: it reaches the
+		 * AUXADC through this MFD's regmap.
+		 *
+		 * Inert without that driver: an unbound platform device costs a
+		 * sysfs entry and nothing else.
+		 */
+		.name = "mt6358-vbat-battery",
 	},
 };
 

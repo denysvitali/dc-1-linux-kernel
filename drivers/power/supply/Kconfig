@@ -743,6 +743,20 @@ config CHARGER_MT6375_READONLY
 
 	  If built as a module, it will be called mt6375-charger-readonly.
 
+config BATTERY_MT6358_VBAT
+	tristate "MediaTek MT6358/MT6366 voltage-estimated battery"
+	depends on MFD_MT6397 || COMPILE_TEST
+	depends on OF
+	help
+	  Say Y here to present the MT6358/MT6366 PMIC's BATADC channel as a
+	  battery, with a state of charge interpolated from an open-circuit
+	  voltage table. It is for boards whose real fuel gauge is unreachable,
+	  such as the Daylight DC-1, where the pack's BQ78Z100 does not answer
+	  on i2c. There is no current measurement and no coulomb counting, so
+	  the capacity is a coarse estimate that sags under load.
+
+	  If built as a module, it will be called mt6358_vbat_battery.
+
 config CHARGER_QCOM_SMBB
 	tristate "Qualcomm Switch-Mode Battery Charger and Boost"
 	depends on MFD_SPMI_PMIC || COMPILE_TEST
