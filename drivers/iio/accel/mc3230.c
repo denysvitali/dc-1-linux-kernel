@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * mCube MC3230 3-Axis Accelerometer
+ * mCube MC3230/MC3416 3-Axis Accelerometer
  *
  * Copyright (c) 2016 Hans de Goede <hdegoede@redhat.com>
  *
- * IIO driver for mCube MC3230; 7-bit I2C address: 0x4c.
+ * IIO driver for mCube MC3230 and MC3416; 7-bit I2C address: 0x4c.
  */
 
 #include <linux/i2c.h>
@@ -16,19 +16,32 @@
 #define MC3230_REG_YOUT			0x01
 #define MC3230_REG_ZOUT			0x02
 
+/*
+ * The MC3416 has no usable 8-bit sample registers -- 0x00 is a status
+ * register there -- and reports each axis as a 16-bit little-endian value in
+ * its own register pair instead.
+ */
+#define MC3416_REG_XOUT_EX_L		0x0d
+#define MC3416_REG_YOUT_EX_L		0x0f
+#define MC3416_REG_ZOUT_EX_L		0x11
+
 #define MC3230_REG_MODE			0x07
 #define MC3230_MODE_OPCON_MASK		0x03
 #define MC3230_MODE_OPCON_WAKE		0x01
 #define MC3230_MODE_OPCON_STANDBY	0x03
+/* MC3416 spells standby 0b00; 0b11 is reserved on that part. */
+#define MC3416_MODE_OPCON_STANDBY	0x00
 
 #define MC3230_REG_CHIP_ID		0x18
 #define MC3230_REG_PRODUCT_CODE		0x3b
 
 /*
- * The accelerometer has one measurement range:
+ * The MC3230 has one measurement range:
  *
  * -1.5g - +1.5g (8-bit, signed)
  *
+ * The MC3416 powers up in its own default range of -2g - +2g, reported as a
+ * 16-bit signed value at 16384 LSB/g.
  */
 
 struct mc3230_chip_info {
@@ -36,22 +49,11 @@ struct mc3230_chip_info {
 	const u8 chip_id;
 	const u8 product_code;
 	const int scale;
-};
-
-static const struct mc3230_chip_info mc3230_chip_info = {
-	.name = "mc3230",
-	.chip_id = 0x01,
-	.product_code = 0x19,
-	/* (1.5 + 1.5) * 9.81 / (2^8 - 1) = 0.115411765 */
-	.scale = 115411765,
-};
-
-static const struct mc3230_chip_info mc3510c_chip_info = {
-	.name = "mc3510c",
-	.chip_id = 0x23,
-	.product_code = 0x10,
-	/* Was obtained empirically */
-	.scale = 625000000,
+	const u8 opcon_standby;
+	/* Sample registers are 16-bit little-endian rather than 8-bit. */
+	const bool wide_samples;
+	const struct iio_chan_spec *channels;
+	const int num_channels;
 };
 
 #define MC3230_CHANNEL(reg, axis) {	\
@@ -90,6 +92,46 @@ static const struct iio_chan_spec mc3230_channels[] = {
 	MC3230_CHANNEL(MC3230_REG_ZOUT, Z),
 };
 
+static const struct iio_chan_spec mc3416_channels[] = {
+	MC3230_CHANNEL(MC3416_REG_XOUT_EX_L, X),
+	MC3230_CHANNEL(MC3416_REG_YOUT_EX_L, Y),
+	MC3230_CHANNEL(MC3416_REG_ZOUT_EX_L, Z),
+};
+
+static const struct mc3230_chip_info mc3230_chip_info = {
+	.name = "mc3230",
+	.chip_id = 0x01,
+	.product_code = 0x19,
+	/* (1.5 + 1.5) * 9.81 / (2^8 - 1) = 0.115411765 */
+	.scale = 115411765,
+	.opcon_standby = MC3230_MODE_OPCON_STANDBY,
+	.channels = mc3230_channels,
+	.num_channels = ARRAY_SIZE(mc3230_channels),
+};
+
+static const struct mc3230_chip_info mc3510c_chip_info = {
+	.name = "mc3510c",
+	.chip_id = 0x23,
+	.product_code = 0x10,
+	/* Was obtained empirically */
+	.scale = 625000000,
+	.opcon_standby = MC3230_MODE_OPCON_STANDBY,
+	.channels = mc3230_channels,
+	.num_channels = ARRAY_SIZE(mc3230_channels),
+};
+
+static const struct mc3230_chip_info mc3416_chip_info = {
+	.name = "mc3416",
+	.chip_id = 0xa0,
+	.product_code = 0x22,
+	/* Power-on range is +-2g at 16384 LSB/g: 9.80665 / 16384 */
+	.scale = 598550,
+	.opcon_standby = MC3416_MODE_OPCON_STANDBY,
+	.wide_samples = true,
+	.channels = mc3416_channels,
+	.num_channels = ARRAY_SIZE(mc3416_channels),
+};
+
 static int mc3230_set_opcon(struct mc3230_data *data, int opcon)
 {
 	int ret;
@@ -122,6 +164,14 @@ static int mc3230_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
+		if (data->chip_info->wide_samples) {
+			ret = i2c_smbus_read_word_data(data->client,
+						       chan->address);
+			if (ret < 0)
+				return ret;
+			*val = sign_extend32(ret, 15);
+			return IIO_VAL_INT;
+		}
 		ret = i2c_smbus_read_byte_data(data->client, chan->address);
 		if (ret < 0)
 			return ret;
@@ -180,8 +230,8 @@ static int mc3230_probe(struct i2c_client *client)
 	indio_dev->info = &mc3230_info;
 	indio_dev->name = chip_info->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
-	indio_dev->channels = mc3230_channels;
-	indio_dev->num_channels = ARRAY_SIZE(mc3230_channels);
+	indio_dev->channels = chip_info->channels;
+	indio_dev->num_channels = chip_info->num_channels;
 
 	ret = mc3230_set_opcon(data, MC3230_MODE_OPCON_WAKE);
 	if (ret < 0)
@@ -194,7 +244,7 @@ static int mc3230_probe(struct i2c_client *client)
 	ret = iio_device_register(indio_dev);
 	if (ret < 0) {
 		dev_err(&client->dev, "device_register failed\n");
-		mc3230_set_opcon(data, MC3230_MODE_OPCON_STANDBY);
+		mc3230_set_opcon(data, chip_info->opcon_standby);
 	}
 
 	return ret;
@@ -203,10 +253,11 @@ static int mc3230_probe(struct i2c_client *client)
 static void mc3230_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
+	struct mc3230_data *data = iio_priv(indio_dev);
 
 	iio_device_unregister(indio_dev);
 
-	mc3230_set_opcon(iio_priv(indio_dev), MC3230_MODE_OPCON_STANDBY);
+	mc3230_set_opcon(data, data->chip_info->opcon_standby);
 }
 
 static int mc3230_suspend(struct device *dev)
@@ -215,7 +266,7 @@ static int mc3230_suspend(struct device *dev)
 
 	data = iio_priv(i2c_get_clientdata(to_i2c_client(dev)));
 
-	return mc3230_set_opcon(data, MC3230_MODE_OPCON_STANDBY);
+	return mc3230_set_opcon(data, data->chip_info->opcon_standby);
 }
 
 static int mc3230_resume(struct device *dev)
@@ -232,6 +283,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(mc3230_pm_ops, mc3230_suspend, mc3230_resume);
 static const struct i2c_device_id mc3230_i2c_id[] = {
 	{ .name = "mc3230", .driver_data = (kernel_ulong_t)&mc3230_chip_info },
 	{ .name = "mc3510c", .driver_data = (kernel_ulong_t)&mc3510c_chip_info },
+	{ .name = "mc3416", .driver_data = (kernel_ulong_t)&mc3416_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mc3230_i2c_id);
@@ -239,6 +291,7 @@ MODULE_DEVICE_TABLE(i2c, mc3230_i2c_id);
 static const struct of_device_id mc3230_of_match[] = {
 	{ .compatible = "mcube,mc3230", &mc3230_chip_info },
 	{ .compatible = "mcube,mc3510c", &mc3510c_chip_info },
+	{ .compatible = "mcube,mc3416", &mc3416_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, mc3230_of_match);
@@ -257,5 +310,5 @@ static struct i2c_driver mc3230_driver = {
 module_i2c_driver(mc3230_driver);
 
 MODULE_AUTHOR("Hans de Goede <hdegoede@redhat.com>");
-MODULE_DESCRIPTION("mCube MC3230 3-Axis Accelerometer driver");
+MODULE_DESCRIPTION("mCube MC3230/MC3416 3-Axis Accelerometer driver");
 MODULE_LICENSE("GPL v2");
