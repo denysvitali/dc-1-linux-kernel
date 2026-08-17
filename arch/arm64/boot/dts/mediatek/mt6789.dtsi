@@ -759,6 +759,18 @@
 			};
 		};
 
+		/*
+		 * On-die sensor: everything it needs is on this SoC (its own
+		 * clock and reset out of infracfg_ao, calibration out of the
+		 * efuse), so there is nothing board-specific to wait for and it
+		 * is enabled here rather than per board, as on the other LVTS
+		 * SoCs upstream.
+		 *
+		 * The zones below are sensors only -- no trips and no
+		 * cooling-maps -- so this gives readable temperatures and no
+		 * throttling.  Adding trip points is a separate step and needs
+		 * the readings to be sanity-checked against a known load first.
+		 */
 		lvts_ap: thermal-sensor@1100b000 {
 			compatible = "mediatek,mt6789-lvts";
 			reg = <0 0x1100b000 0 0x1000>;
@@ -770,7 +782,6 @@
 			nvmem-cell-names = "lvts-calib-data-1", "lvts-calib-data-2";
 
 			#thermal-sensor-cells = <1>;
-			status = "disabled";
 		};
 
 		thermal_zones: thermal-zones {
