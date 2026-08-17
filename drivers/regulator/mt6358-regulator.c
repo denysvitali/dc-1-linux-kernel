@@ -751,9 +751,17 @@ static int mt6358_regulator_probe(struct platform_device *pdev)
 		config.regmap = mt6397->regmap;
 		fallback_node = NULL;
 
-		/* Only the two DC-1 GPU rails need the shipped-DT fallback. */
+		/*
+		 * DC-1 shipped DT uses hardware-style child names (e.g.
+		 * "buck_vgpu", "ldo_vibr") rather than the logical names the
+		 * MT6366 regulator descriptors use for of_match ("vgpu",
+		 * "vibr").  The standard of_match lookup therefore can't set
+		 * rdev->dev.of_node.  Use the regulator-name fallback for the
+		 * rails whose of_node consumers actually need via DT phandle.
+		 */
 		if (mt6397->chip_id == MT6366_CHIP_ID &&
-		    (i == MT6366_ID_VGPU || i == MT6366_ID_VSRAM_GPU)) {
+		    (i == MT6366_ID_VGPU || i == MT6366_ID_VSRAM_GPU ||
+		     i == MT6366_ID_VIBR)) {
 			fallback_node = mt6358_find_regulator_name_fallback(
 						&pdev->dev, &mt6358_info[i].desc);
 			if (fallback_node) {
