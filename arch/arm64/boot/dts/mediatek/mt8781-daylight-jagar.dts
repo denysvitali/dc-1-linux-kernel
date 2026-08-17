@@ -745,6 +745,14 @@
  * carries the ilitek touchscreen @0x41, and i2c5 additionally carries the
  * MT6375 PMU @0x34.
  *
+ * One bus is NOT on the stock AP chain and is declared below anyway:
+ *   i2c6 @1101a000  mCube MC3416 accelerometer @0x4c
+ * Stock disables that controller and gives its pins to the SCP; see the
+ * comment on &i2c6 for why the AP can have them instead.  The second SCP
+ * bus (GPIO132/133, function 1 = SCL1/SDA1 = i2c1 @11e01000) carries an
+ * ambient-light/proximity part at 0x49 by the same trick, but no mainline
+ * driver claims it, so it stays undeclared.
+ *
  * Declared below: the devices that have a driver in this tree and a real
  * binding, including both richtek,rt4539 frontlights -- amber @i2c2 0x3c with
  * enable GPIO99 and white @i2c5 0x3c with enable GPIO98, driven by
@@ -1041,6 +1049,64 @@
 	 * compatible the factory uses is vendor-only, and P7.2 owns choosing
 	 * how to represent the charger/Type-C/ADC blocks.
 	 */
+};
+
+/*
+ * Sensor bus.  This one is NOT on the factory AP chain at all: stock leaves
+ * i2c6 "disabled" and wires GPIO142/143 to function 2 (SCP_SCL1/SCP_SDA1),
+ * i.e. the sensor co-processor owns the bus and the sensors are enumerated
+ * inside scp_a.img rather than in any device tree.  That is why this tree
+ * carried "sensors are unreachable from the AP" for so long.
+ *
+ * It is wrong.  GPIO142/143 are dual-function: function 1 on the same two
+ * pins is SCL6/SDA6, the AP's own i2c6 controller (mt6789 pin table,
+ * drivers/pinctrl/mediatek/pinctrl-mtk-mt6789.h).  Re-muxing them to
+ * function 1 and scanning finds one device at 0x4c -- the mCube
+ * accelerometer -- which answers normally and reports a clean 1.000 g
+ * gravity vector.  [measured, 2026-08-16, by bit-banging the two pins
+ * through /dev/gpiochip0 before this node existed]
+ *
+ * Taking the bus away from the SCP is safe here because nothing on this tree
+ * drives the SCP: no mainline driver binds "mediatek,mt6789-tinysys-scp", so
+ * the node above is declarative only.  The proof is the accelerometer's own
+ * state -- it was found in STANDBY (MODE 0x07 = 0), which is its power-on
+ * state, so no SCP firmware had ever initialised it.  If an mt6789 sensorhub
+ * driver is ever written, it and this node cannot both own these pins.
+ *
+ * The stock chain configures no i2c6 pinctrl state (the bus is disabled), so
+ * the bias here matches what the other buses use rather than being
+ * transcribed.  400 kHz is the conservative choice, not a measured one.
+ */
+&i2c6 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c6_pins>;
+	clock-frequency = <400000>;
+
+	/*
+	 * mCube MC3416, 7-bit address 0x4c.  Identified by its ID registers
+	 * (0x18 = 0xa0, 0x3b = 0x22) and by the shape of its output: the 8-bit
+	 * registers the MC3230 uses at 0x00-0x02 are not axis data on this
+	 * part, while the 16-bit little-endian pairs at 0x0d/0x0f/0x11 hold a
+	 * stationary vector of magnitude 16384 +- 1%, i.e. exactly 1 g at the
+	 * part's power-on +-2g range.  drivers/iio/accel/mc3230.c gained a
+	 * "mcube,mc3416" entry for the wider samples.
+	 *
+	 * There is no interrupt line: stock routes the sensor IRQs to the SCP,
+	 * not the AP, so the driver polls.  That is enough for orientation.
+	 */
+	accelerometer@4c {
+		compatible = "mcube,mc3416";
+		reg = <0x4c>;
+
+		/*
+		 * MOUNT-MATRIX-PLACEHOLDER
+		 */
+		mount-matrix = "1", "0", "0",
+			       "0", "1", "0",
+			       "0", "0", "1";
+	};
 };
 
 &i2c7 {
@@ -1666,6 +1732,23 @@
 		pins-bus {
 			pinmux = <PINMUX_GPIO146__FUNC_SCL8>,
 				 <PINMUX_GPIO147__FUNC_SDA8>;
+			bias-pull-up;
+			input-enable;
+		};
+	};
+
+	/*
+	 * The sensor bus.  Not transcribed from stock -- stock muxes these two
+	 * pins to function 2 (SCP_SCL1/SCP_SDA1) and disables i2c6 -- but not
+	 * inferred either: function 1 on GPIO142/143 is SCL6/SDA6, and the
+	 * accelerometer was read over exactly this mux before the node existed.
+	 * The bootloader already leaves both pins biased up with input enabled,
+	 * which is what is restated here.  [measured]
+	 */
+	i2c6_pins: i2c6-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO142__FUNC_SCL6>,
+				 <PINMUX_GPIO143__FUNC_SDA6>;
 			bias-pull-up;
 			input-enable;
 		};
