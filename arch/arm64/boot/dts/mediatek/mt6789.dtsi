@@ -1651,6 +1651,21 @@
 			#dma-cells = <1>;
 		};
 
+		/*
+		 * SoC AUXADC.  The mainline driver's mt6765 variant calibrates
+		 * arithmetically (mt_auxadc_get_cali_data), so the stock node's
+		 * nvmem cell and mediatek,cali-* properties have no consumer here
+		 * and are deliberately omitted; so is the interrupt, which the
+		 * driver never requests.
+		 */
+		auxadc: adc@11001000 {
+			compatible = "mediatek,mt6765-auxadc";
+			reg = <0 0x11001000 0 0x1000>;
+			clocks = <&infracfg_ao CLK_IFRAO_AUXADC>;
+			clock-names = "main";
+			#io-channel-cells = <1>;
+		};
+
 		uart0: serial@11002000 {
 			compatible = "mediatek,mt6789-uart",
 			             "mediatek,mt6577-uart";
