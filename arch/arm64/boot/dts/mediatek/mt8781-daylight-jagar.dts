@@ -656,21 +656,70 @@
  *                 enable GPIOs 39 and 38 respectively
  *   TE          = EINT on GPIO83
  *
- * XXX UNKNOWN: the display timings.  They are NOT in any device tree on this
- * device -- they live inside panel-sharp-nt36523n-vdo-120hz.ko (extracted at
- * extracted/vendor_boot_a/vr/).  Until those are reverse-engineered a real
- * panel node cannot be written, so this file intentionally ships none.
- * When they are: drivers/gpu/drm/panel/panel-novatek-nt36523.c is the driver to
- * extend -- it already carries lenovo,j606f-boe-nt36523w and
- * xiaomi,elish-{boe,csot}-nt36523, i.e. it already handles tablet-class
- * NT36523 panels; jagar just needs a new entry (single DSI link, 1200x1600).
- * XXX Also beware: the stock LK DT contains a *stale* scalar property
+ * The timings are no longer unknown.  They were recovered from the unstripped
+ * vendor module panel-sharp-nt36523n-vdo-120hz.ko together with the init
+ * sequence, and both now live in the driver as the
+ * "sharp,nt36523n,vdo,120hz" entry of
+ * drivers/gpu/drm/panel/panel-novatek-nt36523.c (60 Hz non-DSC mode; the
+ * 120 Hz mode needs DSC, which is not wired up).  That is the same compatible
+ * the stock DSI child node carries, so the driver already binds this panel on
+ * the stock tree -- confirmed on hardware 2026-08-17: with the stock DT,
+ * /sys/bus/mipi-dsi/devices/14013000.dsi.0 is bound to panel-novatek-nt36523
+ * and DSI-1 reports "connected".
+ *
+ * Nor does enabling dsi0 still black the screen.  The older warning here was
+ * that mtk_drm binding would reprogram the OVL and RDMA that LK is scanning
+ * our framebuffer out of.  That is what the staged probe gates now exist to
+ * prevent: the panel driver holds at jagar_probe_stage=0 and mtk_cmdq_mailbox
+ * at jagar_mt6789_probe_stage=0, and dc1-display-gate raises them (to 3 and 4)
+ * only once userspace is ready to be the first DRM master.  The stock tree has
+ * dsi0 "okay" and works exactly this way today.
+ *
+ * So describe the panel.  Board wiring, measured, and cross-checked against
+ * the stock panel1@0 node read back from /proc/device-tree:
+ *   reset-gpios = <&pio 85 GPIO_ACTIVE_HIGH>   (stock: pin 0x55, flags 0)
+ *   vddi-supply = mt6366 vrf18 (1.8 V)
+ *   vpos/vneg   = TPS65132 outp ("LCD_AVDD") / outn ("LCD_AVEE") at i2c2 0x3e
+ *   TE          = EINT on GPIO83
+ * The stock node's remaining properties (islcmfound, sample-id1..3, tps65132ax)
+ * are vendor probe hints, not hardware description, and are deliberately not
+ * carried over; the driver selects the production init table internally.
+ *
+ * No "rotation" property, deliberately.  The panel's scanout is 180 degrees
+ * from the glass, but the accelerometer's mount-matrix already carries that
+ * 180 on top of the chip's physical mounting, exactly as the stock tree leaves
+ * it.  Adding rotation = <180> here would make DRM advertise a panel
+ * orientation the compositor also compensates for, and the screen would rotate
+ * the wrong way round.  If it is ever added, take the 180 back out of the
+ * mount-matrix in the same change.
+ *
+ * XXX Beware: the stock LK DT contains a *stale* scalar property
  *   atag,videolfb-lcmname = "nt36672e_fhdp_dsi_vdo_60hz_jdi_dphy_drv"
  * which contradicts every other source.  It is a leftover default from the
  * reference design; do not trust it.
  */
 &dsi0 {
-	status = "disabled";
+	status = "okay";
+
+	panel@0 {
+		compatible = "sharp,nt36523n,vdo,120hz";
+		reg = <0>;
+
+		vddi-supply = <&mt6366_vrf18_reg>;
+		vpos-supply = <&reg_panel_avdd>;
+		vneg-supply = <&reg_panel_avee>;
+		reset-gpios = <&pio 85 GPIO_ACTIVE_HIGH>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&dsi0_out>;
+			};
+		};
+	};
+};
+
+&dsi0_out {
+	remote-endpoint = <&panel_in>;
 };
 
 /*

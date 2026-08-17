@@ -1245,6 +1245,16 @@
 		dsi0: dsi@14013000 {
 			compatible = "mediatek,mt6789-dsi";
 			reg = <0 0x14013000 0 0x1000>;
+			/*
+			 * A DSI host addresses its children by virtual channel,
+			 * so it needs its own cell sizes; without them a
+			 * "panel@0" child inherits /soc's <2>/<1> and dtc
+			 * rejects its reg. Every upstream MediaTek SoC dtsi
+			 * declares these on the DSI host for the same reason,
+			 * and the stock jagar tree carries them too.
+			 */
+			#address-cells = <1>;
+			#size-cells = <0>;
 			interrupts = <GIC_SPI 301 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>;
 			power-domains = <&spm MT6789_POWER_DOMAIN_DISP>;
 			clocks = <&mmsys CLK_MM_DSI0>,
