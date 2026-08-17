@@ -48,6 +48,26 @@
 		power-domain@MT6789_POWER_DOMAIN_AUDIO {
 			reg = <MT6789_POWER_DOMAIN_AUDIO>;
 			mediatek,infracfg = <&infracfg_ao_clk>;
+			/*
+			 * The SPM will not ack PWR_ON (bit 22 of PWR_STATUS)
+			 * unless the infracfg audio bus clocks are running.
+			 * scpsys_ctl_pwrseq_on() sets PWR_ON and immediately
+			 * polls -- before the AFE driver's runtime_resume has
+			 * had a chance to enable any clocks. On the first boot
+			 * these clocks happen to be in their reset-enabled
+			 * state from LK, so the poll succeeds. After the first
+			 * suspend, mt6789_afe_disable_clock() has gated them,
+			 * and bit 22 never goes high, causing a 1-second
+			 * timeout (-ETIMEDOUT) and a stuck PM error state.
+			 *
+			 * Listing them here lets the generic power-domain
+			 * driver enable them before the PWR_ON sequence and
+			 * disable them after power-off, reference-counted
+			 * alongside the AFE driver's own enable/disable calls.
+			 */
+			clocks = <&infracfg_ao_clk CLK_IFRAO_AUDIO>,
+				 <&infracfg_ao_clk CLK_IFRAO_AUDIO_26M_BCLK>;
+			clock-names = "aud_infra_clk", "aud_infra_26m_clk";
 			#power-domain-cells = <0>;
 		};
 	};
