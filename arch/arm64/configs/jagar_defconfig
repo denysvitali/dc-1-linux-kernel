@@ -48,7 +48,10 @@ CONFIG_MEMCG=y
 CONFIG_NAMESPACES=y
 CONFIG_USER_NS=y
 # CONFIG_CACHESTAT_SYSCALL is not set
-# CONFIG_KALLSYMS is not set
+# Symbols in backtraces. Without this the freezer's "task refusing to freeze"
+# dumps print raw addresses, which cannot be resolved after the fact on a
+# kernel built in CI, so a suspend failure gives nothing to work with.
+CONFIG_KALLSYMS=y
 CONFIG_ARCH_MEDIATEK=y
 # CONFIG_AMPERE_ERRATUM_AC03_CPU_38 is not set
 # CONFIG_AMPERE_ERRATUM_AC04_CPU_23 is not set
@@ -339,8 +342,30 @@ CONFIG_DEBUG_FS=y
 # --- Audio (MT6789 AFE + MT6366/MT6358 codec + RT9101 ext amp) ---
 CONFIG_SOUND=y
 CONFIG_SND=y
+# Without dynamic minors ALSA hands out static device minor numbers,
+# SNDRV_MINOR(card, type + dev) = (card << 5) | (type + dev), which gives each
+# card a 32-minor window with PCM playback at 16-23 -- a hard ceiling of eight
+# PCM devices per card. This card has thirty: the machine driver declares 30
+# front-end (.dynamic) links plus 16 back-end (.no_pcm) ones, which is the 46
+# DAIs the AFE reports. The ninth front-end lands on minor 24, which is already
+# SNDRV_MINOR_PCM_CAPTURE for device 0, so snd_register_device() returns -EBUSY
+# and snd_card_register() fails the whole card with "ASoC: failed to register
+# soundcard -16" -- observed on hardware 2026-08-17, after the power-domain,
+# clock, component-registration and VIBR of_node fixes had got the machine
+# driver all the way to card registration. Nothing in the audio path is wrong
+# at that point; the card is simply larger than static minors can express.
+CONFIG_SND_DYNAMIC_MINORS=y
 CONFIG_SND_SOC=y
 CONFIG_SND_SOC_MEDIATEK=y
 CONFIG_SND_SOC_MT6789=y
 CONFIG_SND_SOC_MT6789_MT6366=y
 CONFIG_COMMON_CLK_MT6789_AUDIOSYS=y
+
+# --- Suspend debugging ---
+# PM_DEBUG is what provides /sys/power/pm_test, which runs the suspend
+# machinery up to a chosen stage and returns instead of actually going down.
+# Without it the only way to exercise the freezer is a real `echo mem`, and a
+# freezer that fails leaves the panel dark with no safe way back -- so the
+# s2idle work had no dry run available at all. PM_SLEEP_DEBUG (def_bool y) then
+# comes along with it and prints which tasks refused to freeze.
+CONFIG_PM_DEBUG=y
