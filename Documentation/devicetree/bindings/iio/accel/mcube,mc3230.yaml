@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/iio/accel/mcube,mc3230.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: mCube MC3230 and compatible 3-axis accelerometers
+
+maintainers:
+  - Hans de Goede <hdegoede@redhat.com>
+
+description:
+  The MC3230 and MC3510C report each axis as a signed 8-bit value; the MC3416
+  reports 16-bit little-endian samples instead.  All three answer on the same
+  fixed 7-bit I2C address, 0x4c.
+
+properties:
+  compatible:
+    enum:
+      - mcube,mc3230
+      - mcube,mc3416
+      - mcube,mc3510c
+
+  reg:
+    maxItems: 1
+
+  mount-matrix:
+    description: an optional 3x3 mounting rotation matrix.
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        accelerometer@4c {
+            compatible = "mcube,mc3230";
+            reg = <0x4c>;
+            mount-matrix = "0", "1", "0",
+                           "1", "0", "0",
+                           "0", "0", "1";
+        };
+    };
+...
