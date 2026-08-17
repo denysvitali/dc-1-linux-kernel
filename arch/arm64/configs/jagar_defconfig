@@ -29,6 +29,15 @@ CONFIG_ADVISE_SYSCALLS=y
 CONFIG_MEMBARRIER=y
 CONFIG_RSEQ=y
 CONFIG_CGROUPS=y
+# CGROUPS on its own ships an empty cgroup.controllers: no controller is
+# compiled in, so systemd can account and limit nothing per unit and
+# systemd-oomd is permanently ConditionPathExists-skipped. PSI is oomd's input
+# (/proc/pressure/* plus per-cgroup {cpu,memory,io}.pressure) and MEMCG is the
+# controller it acts on; neither is useful without the other. MEMCG also
+# selects VM_EVENT_COUNTERS, which is why the "is not set" line for it is gone
+# below -- kconfig would have overridden it silently.
+CONFIG_PSI=y
+CONFIG_MEMCG=y
 # Namespaces are a systemd prerequisite, and CONFIG_EXPERT above turns them
 # off by default: NAMESPACES is "default !EXPERT" (init/Kconfig:1403), and
 # USER_NS is "default n" even under it (:1439). Without them systemd's
@@ -117,7 +126,6 @@ CONFIG_SLUB_TINY=y
 CONFIG_CMA=y
 # CONFIG_ZONE_DMA is not set
 # CONFIG_ZONE_DMA32 is not set
-# CONFIG_VM_EVENT_COUNTERS is not set
 # CONFIG_SECRETMEM is not set
 CONFIG_NET=y
 CONFIG_PACKET=y
@@ -163,6 +171,17 @@ CONFIG_FW_LOADER_COMPRESS_ZSTD=y
 # CONFIG_ARM_SMCCC_SOC_ID is not set
 CONFIG_SCSI=y
 CONFIG_BLK_DEV_SD=y
+# The only swap device this board gets: there is no swap partition on
+# userdata, so without zram the system runs with zero swap and an OOM arrives
+# as a hard kill. postmarketos-zram-swap.service runs "modprobe -q zram
+# num_devices=1" and then "zramctl -f -a <algo>", so a module is what it
+# expects. The algorithm is not negotiable at runtime: /usr/bin/zramstart
+# defaults to zstd (deviceinfo_zram_swap_algo overrides it) and zramctl fails
+# outright if that backend was not compiled in -- lzo-rle, the kconfig default,
+# would not do. SWAP itself is already "default y" so it needs no line here.
+CONFIG_ZRAM=m
+CONFIG_ZRAM_BACKEND_ZSTD=y
+CONFIG_ZRAM_DEF_COMP_ZSTD=y
 CONFIG_NETDEVICES=y
 CONFIG_MT7921S=y
 CONFIG_SERIAL_8250=y
