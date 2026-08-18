@@ -264,6 +264,19 @@ CONFIG_COMMON_CLK_MEDIATEK_FHCTL=y
 CONFIG_COMMON_CLK_MT6789_IMP_IIC_WRAP=y
 CONFIG_COMMON_CLK_MT6789_MFGCFG=y
 CONFIG_COMMON_CLK_MT6789_MMSYS=y
+# The SCPSYS power-domain nodes take clocks from every multimedia subsys.
+# of_clk_get() on a node whose clock provider was never registered returns
+# -EPROBE_DEFER forever, and scpsys_probe() aborts on the first failing
+# child -- so one missing subsys clock driver costs the *whole* MT6789
+# power-domain provider, and with it the DISP domain.  mdpsys is the one the
+# DISP domain itself needs (CLK_MDP_SMI0, "disp-0"); imgsys/ipesys, vdecsys,
+# vencsys and camsys are needed by its ISP/IPE/VDEC/VENC/CAM subdomains,
+# which scpsys_add_subdomain() walks in the same probe.
+CONFIG_COMMON_CLK_MT6789_MDPSYS=y
+CONFIG_COMMON_CLK_MT6789_IMGSYS=y
+CONFIG_COMMON_CLK_MT6789_VDECSYS=y
+CONFIG_COMMON_CLK_MT6789_VENCSYS=y
+CONFIG_COMMON_CLK_MT6789_CAMSYS=y
 # CONFIG_COMMON_CLK_MT6795 is not set
 # CONFIG_COMMON_CLK_MT6797 is not set
 # CONFIG_COMMON_CLK_MT7622 is not set

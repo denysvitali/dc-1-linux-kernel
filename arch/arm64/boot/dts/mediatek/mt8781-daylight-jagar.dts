@@ -2065,6 +2065,29 @@
  */
 
 /*
+ * MFG0/MFG1 domain supplies.  These are NOT optional decoration: the MT6789
+ * SCPSYS data marks both domains MTK_SCPD_DOMAIN_SUPPLY, and
+ * scpsys_add_one_domain() turns a missing "domain-supply" into -ENODEV.
+ * scpsys_probe() aborts on the first failing child, so without these two
+ * properties mtk-power-controller never calls of_genpd_add_provider_onecell()
+ * and *no* MT6789 power domain exists at all -- every consumer of
+ * power-domains = <&spm ...> (the whole DISP/SMI/DSI cluster) then defers
+ * until the deferred-probe timeout and dies with -ETIMEDOUT.
+ *
+ * Ownership matches emerald and the jagar GPU probe DT: MFG0 takes vgpu,
+ * MFG1 takes vsram_gpu.  Both rails are already regulator-always-on (they
+ * are coupled), and both domains are MTK_SCPD_KEEP_DEFAULT_OFF, so this
+ * only satisfies the binding; it powers nothing on by itself.
+ */
+&mfg0 {
+	domain-supply = <&mt6366_vgpu_reg>;
+};
+
+&mfg1 {
+	domain-supply = <&mt6366_vsram_gpu_reg>;
+};
+
+/*
  * ---------------------------------------------------------------------------
  * EMI stubs — required by LK, inert to Linux
  * ---------------------------------------------------------------------------
