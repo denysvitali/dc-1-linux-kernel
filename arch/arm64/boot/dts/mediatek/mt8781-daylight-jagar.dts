@@ -91,8 +91,12 @@
 		 *
 		 * console=ttyS0 was LAST, and the last console= becomes /dev/console --
 		 * i.e. /dev/console was the headerless UART. console=tty0 is not a
-		 * fallback either: this defconfig has neither DRM_SIMPLEDRM nor
-		 * FB_SIMPLE, so the simple-framebuffer node has no driver at all.
+		 * fallback either: DRM_SIMPLEDRM is =y, but it cannot give early
+		 * output here -- the simple-framebuffer platform device waits on the
+		 * scpsys DISP domain and modular topckgen/mmsys clocks (see the
+		 * framebuffer node), so it never probes in time. That is why
+		 * arch/arm64/kernel/jagar_fbcon.c exists: it renders printk straight
+		 * into LK's scanout and is enabled by 0.002s.
 		 *
 		 * What actually works with no console= token whatsoever:
 		 * pstore_register_console() sets CON_PRINTBUFFER|CON_ENABLED|CON_ANYTIME
