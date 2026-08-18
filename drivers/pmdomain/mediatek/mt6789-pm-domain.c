@@ -219,6 +219,24 @@ static int __init mt6789_pm_domain_init(void)
 	if (!of_machine_is_compatible("mediatek,MT6789"))
 		return 0;
 
+	/*
+	 * If the tree carries the generic power-controller binding, the real
+	 * scpsys driver owns every domain, including DISP.  Registering the
+	 * legacy always-on domain first makes scpsys's provider registration
+	 * fail wholesale: both name their domain "disp", and the genpd core
+	 * device_add()s each domain on the provider bus, so the duplicate
+	 * name comes back as -EEXIST -- taking all domains down with it,
+	 * which is strictly worse than the deferral this handoff exists to
+	 * paper over.  Measured on hardware 2026-08-18.
+	 */
+	node = of_find_compatible_node(NULL, NULL,
+				       "mediatek,mt6789-power-controller");
+	if (node) {
+		of_node_put(node);
+		pr_info("MT6789: generic power-controller present; leaving DISP to scpsys\n");
+		return 0;
+	}
+
 	node = of_find_compatible_node(NULL, NULL, "mediatek,mt6789-scpsys");
 	if (!node) {
 		pr_warn("MT6789: cannot find legacy power-domain node\n");
