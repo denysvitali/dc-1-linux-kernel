@@ -1049,6 +1049,13 @@
 	 * left in a peripheral function, that assumption is what to revisit.
 	 */
 	backlight_amber: backlight@3c {
+		/*
+		 * Both required by rt4539_read_required_u32(); without them the
+		 * driver returns -EINVAL and neither frontlight channel probes.
+		 * Values read back from the stock tree, same hardware.
+		 */
+		screen-off-backlight-off-safety-delay-us = <25000>;
+		screen-off-backlight-off-extra-latency-us = <6000>;
 		compatible = "richtek,rt4539";
 		reg = <0x3c>;
 
@@ -1220,6 +1227,13 @@
 	};
 
 	backlight_white: backlight@3c {
+		/*
+		 * Both required by rt4539_read_required_u32(); without them the
+		 * driver returns -EINVAL and neither frontlight channel probes.
+		 * Values read back from the stock tree, same hardware.
+		 */
+		screen-off-backlight-off-safety-delay-us = <25000>;
+		screen-off-backlight-off-extra-latency-us = <6000>;
 		compatible = "richtek,rt4539";
 		reg = <0x3c>;
 
