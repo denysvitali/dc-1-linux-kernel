@@ -1507,6 +1507,15 @@
 				regulator-allowed-modes = <MT6397_BUCK_MODE_AUTO
 							   MT6397_BUCK_MODE_FORCE_PWM>;
 
+				/*
+				 * Coupling requires always-on: the regulator core
+				 * refuses to couple a rail that can be disabled
+				 * ("Coupling of a non always-on regulator is
+				 * unimplemented", -ENOTSUPP), which failed the whole
+				 * mt6358-regulator probe and with it every supply on
+				 * this PMIC.
+				 */
+				regulator-always-on;
 				regulator-coupled-with = <&mt6366_vsram_gpu_reg>;
 				regulator-coupled-max-spread = <100000>;
 			};
@@ -1651,6 +1660,15 @@
 				regulator-ramp-delay = <6250>;
 				regulator-enable-ramp-delay = <240>;
 
+				/*
+				 * Coupling requires always-on: the regulator core
+				 * refuses to couple a rail that can be disabled
+				 * ("Coupling of a non always-on regulator is
+				 * unimplemented", -ENOTSUPP), which failed the whole
+				 * mt6358-regulator probe and with it every supply on
+				 * this PMIC.
+				 */
+				regulator-always-on;
 				regulator-coupled-with = <&mt6366_vgpu_reg>;
 				regulator-coupled-max-spread = <100000>;
 			};
