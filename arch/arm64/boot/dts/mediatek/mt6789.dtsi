@@ -1579,7 +1579,9 @@
 		};
 
 		pwrap: pmic-wrapper@10026000 {
-			compatible = "mediatek,mt6789-pwrap", "syscon";
+			compatible = "mediatek,mt6789-pwrap",
+			             "mediatek,mt8195-pwrap",
+			             "syscon";
 			reg = <0 0x10026000 0 0x1000>;
 			reg-names = "pwrap";
 			interrupts = <GIC_SPI 252 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>;
