@@ -1418,11 +1418,21 @@
 		reg = <0x4c>;
 
 		/*
-		 * MOUNT-MATRIX-PLACEHOLDER
+		 * Calibrated on hardware 2026-08-19. The chip is mounted
+		 * flipped 180 degrees about X relative to the glass (face-up
+		 * reads z=-1g, top-edge-up reads y=-1g), and the matrix also
+		 * carries the panel's 180-degree scanout offset (see the
+		 * panel node: no rotation property, by design), so what
+		 * userspace sees is oriented to the SCANOUT, not the glass:
+		 * holding the device naturally reads y=-1g ("bottom-up"),
+		 * which makes the compositor apply the 180-degree transform
+		 * that puts the image right way up on the glass. If the panel
+		 * ever gains rotation = <180>, take the extra 180 back out of
+		 * this matrix in the same change.
 		 */
-		mount-matrix = "1", "0", "0",
+		mount-matrix = "-1", "0", "0",
 			       "0", "1", "0",
-			       "0", "0", "1";
+			       "0", "0", "-1";
 	};
 };
 
