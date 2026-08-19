@@ -24,6 +24,7 @@
 
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/mt65xx.h>
 #include <dt-bindings/regulator/mediatek,mt6397-regulator.h>
 #include <dt-bindings/pinctrl/mediatek,mt6789-pinfunc.h>
 
@@ -534,6 +535,40 @@
 	};
 
 	/*
+	 * MT7902 Wi-Fi power, transcribed from the factory dtbo (the signed
+	 * overlay LK merges into the stock tree): WLAN-3V3 is a GPIO152-gated
+	 * 3.3 V rail (2 ms ramp, 200 ms mandatory off time).  What the factory
+	 * tree wires as "vqmmc" is not an IO rail at all but the chip's
+	 * reset/power-enable on GPIO89 with a 200 ms settle, dressed as a fixed
+	 * 1.8 V regulator so the MMC core sequences it; kept in exactly that
+	 * shape here so power-up ordering matches the stock kernel, where this
+	 * chip is proven to enumerate (mt7921s bound and scanned on the stock
+	 * tree, 2026-08-15).
+	 */
+	reg_wlan_3v3: regulator-wlan-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "wlan-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		startup-delay-us = <2000>;
+		off-on-delay-us = <200000>;
+		gpio = <&pio 152 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	reg_wlan_rst: regulator-wlan-rst {
+		compatible = "regulator-fixed";
+		regulator-name = "wlan-rst";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wlan_rst_pins>;
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		startup-delay-us = <200000>;
+		gpio = <&pio 89 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	/*
 	 * ---------------------------------------------------------------------
 	 * Board NTC thermistors
 	 * ---------------------------------------------------------------------
@@ -773,11 +808,42 @@
 
 /*
  * MSDC1 = MT7902 Wi-Fi over SDIO (stock cmdline: wlan_mt7902_sdio_mt6789.*).
- * Left disabled: there is no mainline MT7902 driver, and probing an SDIO bus
- * whose power sequencing we have not reproduced buys nothing.
- * Measured for later: WLAN-3V3 on GPIO152, WLAN-RST on GPIO89,
- * host wake EINT on GPIO21.
+ * The earlier note here -- "there is no mainline MT7902 driver" -- was wrong:
+ * mainline mt7921s drives this chip and did so on this device over the stock
+ * tree (wlan0 up, scan returned networks, 2026-08-15).  The stock tree only
+ * carries this host because the signed dtbo enables it; a dtbswap boot loses
+ * the dtbo, so the board file must describe it itself.  Everything below is
+ * transcribed from that dtbo: bus/caps/timing from its fragment@40
+ * (mediatek,mt8781-sd), pins from its mmc1@normal / mmc1@uhs states.
+ * The host-wake EINT on GPIO21 (vendor mediatek_wifi_ctrl) has no mainline
+ * consumer and is not described; DAT1 in-band wakeup covers SDIO IRQs.
  */
+&mmc1 {
+	status = "okay";
+
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc1_pins_default>;
+	pinctrl-1 = <&mmc1_pins_uhs>;
+
+	bus-width = <4>;
+	max-frequency = <200000000>;
+
+	cap-sd-highspeed;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+
+	no-mmc;
+	no-sd;
+	non-removable;
+	cap-sdio-irq;
+	keep-power-in-suspend;
+	wakeup-source;
+	post-power-on-delay-ms = <15>;
+
+	vmmc-supply = <&reg_wlan_3v3>;
+	vqmmc-supply = <&reg_wlan_rst>;
+};
 
 /*
  * ---------------------------------------------------------------------------
@@ -1838,6 +1904,58 @@
 				 <PINMUX_GPIO61__FUNC_MSDC0_DAT3>;
 			drive-strength = <3>;
 			input-enable;
+		};
+	};
+
+	/*
+	 * MSDC1 = MT7902 SDIO.  From the factory dtbo mmc1@normal / mmc1@uhs
+	 * states: drive level 2 default / 3 UHS, R1R0_01 pull-up on CMD/DAT,
+	 * R1R0_10 pull-down on CLK.
+	 */
+	mmc1_pins_default: mmc1-pins-default-state {
+		pins-cmd-dat {
+			pinmux = <PINMUX_GPIO72__FUNC_MSDC1_CMD>,
+				 <PINMUX_GPIO73__FUNC_MSDC1_DAT0>,
+				 <PINMUX_GPIO74__FUNC_MSDC1_DAT1>,
+				 <PINMUX_GPIO75__FUNC_MSDC1_DAT2>,
+				 <PINMUX_GPIO76__FUNC_MSDC1_DAT3>;
+			drive-strength = <2>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+			input-enable;
+		};
+
+		pins-clk {
+			pinmux = <PINMUX_GPIO71__FUNC_MSDC1_CLK>;
+			drive-strength = <2>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	mmc1_pins_uhs: mmc1-pins-uhs-state {
+		pins-cmd-dat {
+			pinmux = <PINMUX_GPIO72__FUNC_MSDC1_CMD>,
+				 <PINMUX_GPIO73__FUNC_MSDC1_DAT0>,
+				 <PINMUX_GPIO74__FUNC_MSDC1_DAT1>,
+				 <PINMUX_GPIO75__FUNC_MSDC1_DAT2>,
+				 <PINMUX_GPIO76__FUNC_MSDC1_DAT3>;
+			drive-strength = <3>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+			input-enable;
+		};
+
+		pins-clk {
+			pinmux = <PINMUX_GPIO71__FUNC_MSDC1_CLK>;
+			drive-strength = <3>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	/* WLAN reset line (GPIO89) in plain GPIO mode; the factory dtbo's
+	 * pins_reset state, minus its output-low -- the regulator core owns
+	 * the level. */
+	wlan_rst_pins: wlan-rst-pins {
+		pins-rst {
+			pinmux = <PINMUX_GPIO89__FUNC_GPIO89>;
 		};
 	};
 
