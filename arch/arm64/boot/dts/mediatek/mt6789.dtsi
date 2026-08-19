@@ -784,86 +784,6 @@
 			#thermal-sensor-cells = <1>;
 		};
 
-		thermal_zones: thermal-zones {
-			lvts-ts1-0-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS1_0>;
-			};
-
-			lvts-ts1-1-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS1_1>;
-			};
-
-			lvts-ts1-2-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS1_2>;
-			};
-
-			lvts-ts1-3-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS1_3>;
-			};
-
-			lvts-ts2-0-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS2_0>;
-			};
-
-			lvts-ts2-1-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS2_1>;
-			};
-
-			lvts-ts2-2-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS2_2>;
-			};
-
-			lvts-ts2-3-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS2_3>;
-			};
-
-			lvts-ts3-0-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS3_0>;
-			};
-
-			lvts-ts3-1-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS3_1>;
-			};
-
-			lvts-ts3-2-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS3_2>;
-			};
-
-			lvts-ts3-3-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS3_3>;
-			};
-
-			lvts-ts4-0-thermal {
-				polling-delay = <0>;
-				polling-delay-passive = <0>;
-				thermal-sensors = <&lvts_ap MT6789_TS4_0>;
-			};
-		};
-
 		mmsys: syscon@14000000 {
 			compatible = "mediatek,mt6789-mmsys", "syscon";
 			reg = <0 0x14000000 0 0x1000>;
@@ -1995,6 +1915,93 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "disabled";
+		};
+	};
+
+	/*
+	 * thermal-zones must be a child of the root node: the thermal core
+	 * looks the block up BY NAME (of_find_node_by_name), and a copy under
+	 * /soc is found first and shadows any board-level /thermal-zones --
+	 * measured on the DC-1, where the board NTC zones failed to register
+	 * with -ENODEV until this block moved here.
+	 */
+	thermal_zones: thermal-zones {
+		lvts-ts1-0-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS1_0>;
+		};
+
+		lvts-ts1-1-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS1_1>;
+		};
+
+		lvts-ts1-2-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS1_2>;
+		};
+
+		lvts-ts1-3-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS1_3>;
+		};
+
+		lvts-ts2-0-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS2_0>;
+		};
+
+		lvts-ts2-1-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS2_1>;
+		};
+
+		lvts-ts2-2-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS2_2>;
+		};
+
+		lvts-ts2-3-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS2_3>;
+		};
+
+		lvts-ts3-0-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS3_0>;
+		};
+
+		lvts-ts3-1-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS3_1>;
+		};
+
+		lvts-ts3-2-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS3_2>;
+		};
+
+		lvts-ts3-3-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS3_3>;
+		};
+
+		lvts-ts4-0-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&lvts_ap MT6789_TS4_0>;
 		};
 	};
 };
