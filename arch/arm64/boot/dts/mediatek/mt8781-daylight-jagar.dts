@@ -1783,11 +1783,36 @@
 				regulator-enable-ramp-delay = <60>;
 			};
 
+			/*
+			 * MSDC1 (Wi-Fi SDIO) pad rail A. The vendor msdc driver
+			 * drives this as vioa-supply, a concept mainline mtk-sd
+			 * does not have; with it off every MSDC1 pad reads low
+			 * (measured 2026-08-19: mux applied, card powered,
+			 * MSDC_PS all-zero, CMD5 -ETIMEDOUT) and the MT7902
+			 * never enumerates. Always-on is the minimal mainline
+			 * shape; the alternative is teaching mtk-sd optional
+			 * vioa/viob supplies.
+			 */
 			mt6366_vcn18_reg: vcn18 {
 				regulator-name = "vcn18";
 				regulator-min-microvolt = <1800000>;
 				regulator-max-microvolt = <1800000>;
 				regulator-enable-ramp-delay = <270>;
+				regulator-always-on;
+			};
+
+			/*
+			 * MSDC1 pad rail B (vendor viob-supply), same story as
+			 * vcn18 above. The LDO defaults to 3.0 V; the factory
+			 * dtbo pins it to exactly 1.8 V for the Wi-Fi pads
+			 * (its fragment@38), so mirror that here.
+			 */
+			mt6366_vmc_reg: vmc {
+				regulator-name = "vmc";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-enable-ramp-delay = <60>;
+				regulator-always-on;
 			};
 
 			mt6366_vcn28_reg: vcn28 {
