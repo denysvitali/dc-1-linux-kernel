@@ -750,12 +750,22 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 
+			/*
+			 * The vendor DT says <0x1b4 0x2c> + <0x2f8 0x8>, and it
+			 * is provably wrong: read from real fuses (2026-08-19),
+			 * the golden-temperature byte (0x3C = 60, the vendor
+			 * driver's own default) sits at 0x1a4, followed by
+			 * exactly thirteen 16-bit count_r values (~35000) and
+			 * four 24-bit per-controller count_rc values (~2750) —
+			 * the documented layout, 0x10 earlier than the vendor
+			 * cell and with CTRL3's count_rc at bytes 44-47 rather
+			 * than in the second block (whose words read 0x8000).
+			 * The vendor never noticed because LK pre-initializes
+			 * LVTS on this platform and its kernel inherits the
+			 * hardware state instead of parsing these cells.
+			 */
 			lvts_efuse_data1: lvts1-calib {
-				reg = <0x1b4 0x2c>;
-			};
-
-			lvts_efuse_data2: lvts2-calib {
-				reg = <0x2f8 0x8>;
+				reg = <0x1a4 0x30>;
 			};
 		};
 
@@ -778,8 +788,8 @@
 			clocks = <&infracfg_ao CLK_IFRAO_THERM>;
 			resets = <&infracfg_ao MT6789_INFRA_RST0_LVTS_AP_SWRST>;
 
-			nvmem-cells = <&lvts_efuse_data1 &lvts_efuse_data2>;
-			nvmem-cell-names = "lvts-calib-data-1", "lvts-calib-data-2";
+			nvmem-cells = <&lvts_efuse_data1>;
+			nvmem-cell-names = "lvts-calib-data-1";
 
 			#thermal-sensor-cells = <1>;
 		};

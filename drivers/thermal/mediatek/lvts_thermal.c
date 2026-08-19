@@ -17,6 +17,7 @@
 #include <linux/platform_device.h>
 #include <linux/reset.h>
 #include <linux/thermal.h>
+#include <linux/unaligned.h>
 #include <dt-bindings/thermal/mediatek,lvts-thermal.h>
 
 #include "../thermal_hwmon.h"
@@ -129,6 +130,14 @@ struct lvts_ctrl_data {
 	u8 valid_sensor_mask;
 	int offset;
 	enum lvts_msr_mode mode;
+	/*
+	 * Byte offset of this controller's 24-bit count_rc in the calibration
+	 * stream, or 0 when the platform's EDATA is the per-sensor value
+	 * alone. When set, EDATA = (count_rc * count_r) >> 14 -- the value the
+	 * vendor driver programs whenever its optional manual RC measurement
+	 * is skipped or out of tolerance (its own fallback path).
+	 */
+	int rc_offset;
 };
 
 #define VALID_SENSOR_MAP(s0, s1, s2, s3) \
@@ -168,7 +177,6 @@ struct lvts_data {
 	u8 hw_filter;
 	unsigned int def_calibration;
 	u16 msr_offset;
-	bool requires_manual_rck;
 };
 
 struct lvts_sensor {
@@ -869,6 +877,23 @@ static int lvts_calibration_init(struct device *dev, struct lvts_ctrl *lvts_ctrl
 			return ret;
 
 		if (gt) {
+			if (lvts_ctrl_data->rc_offset) {
+				u32 rc;
+
+				if (lvts_ctrl_data->rc_offset + 4 > calib_len)
+					return -EINVAL;
+				rc = get_unaligned_le32(efuse_calibration +
+							lvts_ctrl_data->rc_offset);
+				rc &= GENMASK(23, 0);
+				/* Fused count_rc ~2750; a zero fuse would zero
+				 * every reading, so refuse it loudly. */
+				if (!rc) {
+					dev_err(dev, "count_rc fuse at %d is zero\n",
+						lvts_ctrl_data->rc_offset);
+					return -ENODATA;
+				}
+				calib = ((u64)rc * calib) >> 14;
+			}
 			lvts_ctrl->calibration[i] = calib;
 			if (lvts_ctrl->lvts_data->msr_offset)
 				lvts_ctrl->calibration[i] += lvts_ctrl->lvts_data->msr_offset;
@@ -1490,15 +1515,6 @@ static int lvts_probe(struct platform_device *pdev)
 	if (!lvts_data)
 		return -ENODEV;
 
-	/*
-	 * MT6789 needs a per-sensor manual-RCK pass before EDATA is valid.
-	 * Keep the source-only platform description fail-closed until that
-	 * hardware takeover is implemented and separately accepted.
-	 */
-	if (lvts_data->requires_manual_rck)
-		return dev_err_probe(dev, -EOPNOTSUPP,
-				     "manual RCK is not implemented\n");
-
 	lvts_td->clk = devm_clk_get_enabled(dev, NULL);
 	if (IS_ERR(lvts_td->clk))
 		return dev_err_probe(dev, PTR_ERR(lvts_td->clk), "Failed to retrieve clock\n");
@@ -1568,6 +1584,7 @@ static const struct lvts_ctrl_data mt6789_lvts_data_ctrl[] = {
 		VALID_SENSOR_MAP(1, 1, 1, 1),
 		.offset = 0x000,
 		.mode = LVTS_MSR_FILTERED_MODE,
+		.rc_offset = 32,
 	},
 	{
 		.lvts_sensor = {
@@ -1579,6 +1596,7 @@ static const struct lvts_ctrl_data mt6789_lvts_data_ctrl[] = {
 		VALID_SENSOR_MAP(1, 1, 1, 1),
 		.offset = 0x100,
 		.mode = LVTS_MSR_FILTERED_MODE,
+		.rc_offset = 36,
 	},
 	{
 		.lvts_sensor = {
@@ -1590,6 +1608,7 @@ static const struct lvts_ctrl_data mt6789_lvts_data_ctrl[] = {
 		VALID_SENSOR_MAP(1, 1, 1, 1),
 		.offset = 0x200,
 		.mode = LVTS_MSR_FILTERED_MODE,
+		.rc_offset = 40,
 	},
 	{
 		.lvts_sensor = {
@@ -1598,6 +1617,7 @@ static const struct lvts_ctrl_data mt6789_lvts_data_ctrl[] = {
 		VALID_SENSOR_MAP(1, 0, 0, 0),
 		.offset = 0x300,
 		.mode = LVTS_MSR_FILTERED_MODE,
+		.rc_offset = 44,
 	},
 };
 
@@ -2114,8 +2134,16 @@ static const struct lvts_platform_ops lvts_platform_ops_mt8196 = {
 };
 
 static const u32 mt6789_init_cmds[] = {
+	/* device_enable_and_init_v5: stop counting, 20us window, LPDLY,
+	 * bandgap/V2F chop + enable, TS reserve, TS chop control */
 	0xC1030300, 0xC1030420, 0xC1030500, 0xC10307A6,
 	0xC1030CFC, 0xC1030A8C, 0xC103098D, 0xC10308F1,
+	/* Normal-access state the vendor's RCK routine leaves behind:
+	 * manual-RCK operation (RG_TSV2F_CTRL_6=0), sensor-no-RCK selected
+	 * (RG_TSV2F_CTRL_5=0x10), device single mode (RG_TSFM_CTRL_3=0xF8).
+	 * The RC measurement itself is skipped: EDATA is computed from the
+	 * fused per-controller count_rc instead (the vendor fallback). */
+	0xC1030E00, 0xC1030D10, 0xC10306F8,
 };
 
 static const struct lvts_data mt6789_lvts_data = {
@@ -2134,8 +2162,10 @@ static const struct lvts_data mt6789_lvts_data = {
 	.filter_interval = 1,
 	.sensor_interval = 1,
 	.hw_filter	= 0,
+	/* (default count_rc 2750 * default count_r 35000) >> 14, the vendor
+	 * defaults' product, for parts with an unfused golden temperature. */
+	.def_calibration = 5874,
 	.ops		= &lvts_platform_ops_mt6789,
-	.requires_manual_rck = true,
 };
 
 static const struct lvts_data mt7987_lvts_ap_data = {
