@@ -454,6 +454,13 @@
 		regulator-max-microvolt = <3300000>;
 		gpio = <&pio 154 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
+		/*
+		 * The ilitek driver does not manage its vdd-supply, so the rail
+		 * must already be up when the touchscreen probes; without these
+		 * the chip is unpowered and probe fails with -ENXIO.
+		 */
+		regulator-boot-on;
+		regulator-always-on;
 	};
 
 	reg_wacom_1v8: regulator-wacom-1v8 {
@@ -1216,7 +1223,13 @@
 
 		interrupt-parent = <&pio>;
 		interrupts = <12 IRQ_TYPE_EDGE_FALLING>;
-		reset-gpios = <&pio 40 GPIO_ACTIVE_HIGH>;
+		/*
+		 * RESX is active-low: the driver's assert/deassert sequence must
+		 * end with the pin physically high or the controller stays in
+		 * reset and NAKs everything (measured: ACTIVE_HIGH left the chip
+		 * dead; forcing the pin high brought it up, FW 07 01 00 08).
+		 */
+		reset-gpios = <&pio 40 GPIO_ACTIVE_LOW>;
 		vdd-supply = <&reg_vctp_3v3>;
 
 		pinctrl-names = "default";
