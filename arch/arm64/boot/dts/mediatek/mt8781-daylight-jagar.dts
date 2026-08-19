@@ -516,6 +516,22 @@
 	};
 
 	/*
+	 * Single fixed GPU operating point, hardware-proven: the runtime GPU
+	 * overlay ran the Mali at exactly 390 MHz / 850 mV on the stock tree
+	 * (rails were measured already sitting at 850 mV).  Deliberately not
+	 * the dtsi's DVFS table -- no calibrated thermal, no throttling, so no
+	 * frequency ladder yet.
+	 */
+	jagar_gpu_opp: opp-table-gpu-jagar {
+		compatible = "operating-points-v2";
+
+		opp-390000000 {
+			opp-hz = /bits/ 64 <390000000>;
+			opp-microvolt = <850000>;
+		};
+	};
+
+	/*
 	 * microSD card-slot level shifter.  Measured from the stock
 	 * /odm/regulator-vqmmc-sdcard node: regulator-gpio on GPIO157,
 	 * gpio high = 1.8 V, gpio low = 3.0 V.
@@ -937,11 +953,22 @@
 };
 
 /*
- * Mali-G57 stays disabled in the normal board DT.  The deliberately separate
- * mt8781-daylight-jagar-gpu-probe.dtb fixes both coupled rails and the OPP to
- * conservative values for a bounded first probe.  Do not deploy that DTB
- * before the Phase 5 boot-DT transition and calibrated-thermal gates pass.
+ * Mali-G57 via Panfrost.  The gate that used to keep this disabled -- "wait
+ * for the boot-DT transition" -- passed on 2026-08-19: this tree now boots on
+ * hardware via dtbswap, and without the node GNOME falls back to llvmpipe.
+ * The single OPP and the 850 mV rail level are the values the runtime GPU
+ * overlay ran with for days on the stock tree (both rails measured already
+ * enabled at 850 mV; the overlay pinned exactly that), NOT the dtsi's DVFS
+ * table: calibrated LVTS still does not exist (the driver fail-closes on
+ * manual RCK), so there is still no GPU thermal zone, and a fixed
+ * known-good operating point is the conservative choice until it does.
+ * MFG0/MFG1 domain supplies are set above; MFG2/MFG3 come from the .dtsi.
  */
+&gpu {
+	mali-supply = <&mt6366_vgpu_reg>;
+	operating-points-v2 = <&jagar_gpu_opp>;
+	status = "okay";
+};
 
 /*
  * ---------------------------------------------------------------------------
