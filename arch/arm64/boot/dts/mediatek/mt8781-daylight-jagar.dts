@@ -1418,20 +1418,23 @@
 		reg = <0x4c>;
 
 		/*
-		 * Calibrated on hardware 2026-08-19. The chip is mounted
-		 * flipped 180 degrees about X relative to the glass (face-up
-		 * reads z=-1g, top-edge-up reads y=-1g), and the matrix also
-		 * carries the panel's 180-degree scanout offset (see the
-		 * panel node: no rotation property, by design), so what
-		 * userspace sees is oriented to the SCANOUT, not the glass:
-		 * holding the device naturally reads y=-1g ("bottom-up"),
-		 * which makes the compositor apply the 180-degree transform
-		 * that puts the image right way up on the glass. If the panel
-		 * ever gains rotation = <180>, take the extra 180 back out of
-		 * this matrix in the same change.
+		 * Calibrated on hardware 2026-08-20, verified in all four
+		 * orientations plus face-up. The chip's axes are rotated 90
+		 * degrees in the glass plane AND flipped: face-up reads
+		 * z=-1g, and a landscape-left hold puts gravity on chip -y
+		 * (chip x never sees gravity in portrait). Two measured
+		 * poses pin two columns; the last follows from det=+1 (a
+		 * rigidly mounted chip cannot be a mirror). With this matrix
+		 * a natural portrait hold reports "bottom-up" to
+		 * iio-sensor-proxy, and the compositor's resulting
+		 * 180-degree transform is exactly what compensates the
+		 * panel's scanout being 180 degrees from the glass (the
+		 * panel node deliberately carries no rotation property). If
+		 * the panel ever gains rotation = <180>, compose an extra
+		 * 180-degree yaw into this matrix in the same change.
 		 */
-		mount-matrix = "-1", "0", "0",
-			       "0", "1", "0",
+		mount-matrix = "0", "-1", "0",
+			       "-1", "0", "0",
 			       "0", "0", "-1";
 	};
 };
