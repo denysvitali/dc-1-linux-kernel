@@ -1199,19 +1199,20 @@ static int mtk_hp_spk_enable(struct mt6358_priv *priv)
 	regmap_write(priv->regmap, MT6358_AUDDEC_ANA_CON9, 0x0201);
 	/* Switch LOL MUX to audio DAC */
 	regmap_write(priv->regmap, MT6358_AUDDEC_ANA_CON7, 0x011b);
-	/* The speakers are asymmetric off the codec: one hangs off the
-	 * line-out (LOL) buffer, the other off the headphone DAC output, so
-	 * the two HP muxes select different sources (the vendor MT6789 codec
-	 * driver does the same). On the DC-1 the board wires HPL to the right
-	 * speaker and HPR to the left -- the reverse of the codec's label -- so
-	 * route HPL from DAC-R and HPR from Line-out to un-swap the channels.
+	/* The speakers are asymmetric off the codec: the left hangs off the
+	 * line-out (LOL) buffer, the right off the headphone-right DAC output,
+	 * so the two HP muxes select different sources. This is the vendor
+	 * MT6789 routing and it is correct for this board -- HPL drives the
+	 * left speaker via the line-out buffer, HPR the right via DAC-R.
+	 * Routing HPL from DAC-R does not work (that mux position produces no
+	 * output on the HPL pin), so it must be HPL->Line-out / HPR->DAC-R.
 	 */
 	regmap_update_bits(priv->regmap, MT6358_AUDDEC_ANA_CON0,
 			   RG_AUDHPLMUXINPUTSEL_VAUDP15_MASK_SFT,
-			   0x2 << RG_AUDHPLMUXINPUTSEL_VAUDP15_SFT);
+			   0x1 << RG_AUDHPLMUXINPUTSEL_VAUDP15_SFT);
 	regmap_update_bits(priv->regmap, MT6358_AUDDEC_ANA_CON0,
 			   RG_AUDHPRMUXINPUTSEL_VAUDP15_MASK_SFT,
-			   0x1 << RG_AUDHPRMUXINPUTSEL_VAUDP15_SFT);
+			   0x2 << RG_AUDHPRMUXINPUTSEL_VAUDP15_SFT);
 
 	return 0;
 }
