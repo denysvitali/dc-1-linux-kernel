@@ -523,22 +523,6 @@
 	};
 
 	/*
-	 * Single fixed GPU operating point, hardware-proven: the runtime GPU
-	 * overlay ran the Mali at exactly 390 MHz / 850 mV on the stock tree
-	 * (rails were measured already sitting at 850 mV).  Deliberately not
-	 * the dtsi's DVFS table -- no calibrated thermal, no throttling, so no
-	 * frequency ladder yet.
-	 */
-	jagar_gpu_opp: opp-table-gpu-jagar {
-		compatible = "operating-points-v2";
-
-		opp-390000000 {
-			opp-hz = /bits/ 64 <390000000>;
-			opp-microvolt = <850000>;
-		};
-	};
-
-	/*
 	 * microSD card-slot level shifter.  Measured from the stock
 	 * /odm/regulator-vqmmc-sdcard node: regulator-gpio on GPIO157,
 	 * gpio high = 1.8 V, gpio low = 3.0 V.
@@ -960,20 +944,20 @@
 };
 
 /*
- * Mali-G57 via Panfrost.  The gate that used to keep this disabled -- "wait
- * for the boot-DT transition" -- passed on 2026-08-19: this tree now boots on
- * hardware via dtbswap, and without the node GNOME falls back to llvmpipe.
- * The single OPP and the 850 mV rail level are the values the runtime GPU
- * overlay ran with for days on the stock tree (both rails measured already
- * enabled at 850 mV; the overlay pinned exactly that), NOT the dtsi's DVFS
- * table: calibrated LVTS still does not exist (the driver fail-closes on
- * manual RCK), so there is still no GPU thermal zone, and a fixed
- * known-good operating point is the conservative choice until it does.
- * MFG0/MFG1 domain supplies are set above; MFG2/MFG3 come from the .dtsi.
+ * Mali-G57 via Panfrost, on the dtsi's full DVFS ladder.  The board used to
+ * pin a single 390 MHz / 850 mV OPP because no thermal throttle path existed;
+ * the mt6789.dtsi GPU zone (LVTS TS3_0, passive 85 C) plus DEVFREQ_THERMAL now
+ * provide one, so devfreq gets the whole table.  Every table voltage
+ * (675000..900000 uV) sits inside vgpu's 500000..900000 uV constraint, and the
+ * vgpu/vsram_gpu coupling (vsram min 750000, max spread 100000) holds at every
+ * point -- worst case 750000 - 675000 = 75000 uV at the 390 MHz floor.
+ * Known quirk left as-is: mfg_pll_sel lacks CLK_SET_RATE_NO_REPARENT, so low
+ * OPPs may reparent to mfg_ref_ck; add the flag only if on-device rates read
+ * wrong.  MFG0/MFG1 domain supplies are set above; MFG2/MFG3 come from the
+ * .dtsi.
  */
 &gpu {
 	mali-supply = <&mt6366_vgpu_reg>;
-	operating-points-v2 = <&jagar_gpu_opp>;
 	status = "okay";
 };
 
