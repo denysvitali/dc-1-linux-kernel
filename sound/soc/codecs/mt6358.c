@@ -1189,6 +1189,16 @@ static int mtk_hp_spk_enable(struct mt6358_priv *priv)
 
 	/* Enable AUD_CLK */
 	regmap_update_bits(priv->regmap, MT6358_AUDDEC_ANA_CON13, 0x1, 0x1);
+	/* The DC-1 board wires the codec's HPL pin to the right speaker and HPR
+	 * to the left -- the reverse of the codec's L/R labels -- so swap the
+	 * downlink L/R in the codec's digital AFE. Without this the left channel
+	 * plays out of the right speaker and vice versa. The bit is reset-safe
+	 * (the codec is an always-on PMIC child) but set it on every speaker
+	 * power-up for the same reason the muxes are set here.
+	 */
+	regmap_update_bits(priv->regmap, MT6358_AFE_UL_DL_CON0,
+			   AFE_DL_LR_SWAP_MASK_SFT,
+			   0x1 << AFE_DL_LR_SWAP_SFT);
 	/* Enable Audio DAC, both channels. The DC-1's right speaker hangs off
 	 * the DAC-R output, so DACR (bit 1) must power up too; the old 0x30f9
 	 * left it down and only the left line-out speaker sounded. The vendor
