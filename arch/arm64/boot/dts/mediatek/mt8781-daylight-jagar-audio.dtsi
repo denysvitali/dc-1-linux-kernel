@@ -26,14 +26,19 @@
 			apmixedsys = <&apmixedsys>;
 			infracfg = <&infracfg_ao>;
 			/*
-			 * Deliberately no "power-domains" here, for the same
-			 * reason the simple-framebuffer node omits it (see the
-			 * board file): the AUDIO genpd is handed off by LK and
-			 * pd_ignore_unused keeps it on, but a power-domains
-			 * property makes the AFE wait on the scpsys provider and
-			 * deferred-probe-timeout with -110 before mt6789-audio
-			 * ever probes. The AFE enables its own clocks.
+			 * The AUDIO power domain is genuinely OFF at handoff
+			 * (SPM PWR_STATUS bit 22 reads 0 -- unlike DISP, LK does
+			 * not leave it on), so the AFE must attach to the generic
+			 * scpsys provider to sequence it on. Without this the card
+			 * probes and the clocks enable, but the AFE's memif never
+			 * runs: hw_ptr stays 0, playback underruns, no sound. The
+			 * domain node lists the infracfg audio clocks so the SPM
+			 * acks PWR_ON before mt6789_afe_enable_clock() runs. (The
+			 * older worry -- power-domains deferring the probe to -110
+			 * -- was the legacy handoff provider not publishing AUDIO;
+			 * the real scpsys now provides every domain.)
 			 */
+			power-domains = <&spm MT6789_POWER_DOMAIN_AUDIO>;
 
 			clocks = <&afe CLK_AFE_AFE>,
 				 <&afe CLK_AFE_DAC>,
