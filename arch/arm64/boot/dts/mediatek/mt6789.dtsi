@@ -659,12 +659,22 @@
 			compatible = "mediatek,mt6779-keypad";
 			reg = <0 0x10010000 0 0x1000>;
 			/*
-			 * The KPD block pulses its IRQ line; every mainline
-			 * user of this IP (mt8183/mt8365/mt8516) senses it as
-			 * edge-falling.  Sensed as level-high the GIC drops
-			 * the pulse and no key event is ever delivered.
+			 * The KPD block pulses its IRQ line; sensed as
+			 * level-high the GIC drops the pulse and no key event
+			 * is ever delivered.  The mt8183/mt8365/mt8516 dtsis
+			 * say edge-falling, but only because their whole SoC
+			 * routes through the mediatek,mt6577-sysirq polarity
+			 * inverter, which turns that into edge-rising at the
+			 * GIC.  MT6789 has no sysirq block (neither does the
+			 * stock tree) and this node's parent is the GIC
+			 * itself, whose driver rejects edge-falling for SPIs
+			 * (gic_set_type: only level-high or edge-rising), so
+			 * edge-falling here makes probe fail outright.  The
+			 * stock tree programs the GIC directly with type 0x1:
+			 * edge-rising is both accepted and the line's real
+			 * polarity.
 			 */
-			interrupts = <GIC_SPI 106 IRQ_TYPE_EDGE_FALLING &ppi_cluster0>;
+			interrupts = <GIC_SPI 106 IRQ_TYPE_EDGE_RISING &ppi_cluster0>;
 			clocks = <&clk26m>;
 			clock-names = "kpd";
 			status = "disabled";
