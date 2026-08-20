@@ -1189,14 +1189,29 @@ static int mtk_hp_spk_enable(struct mt6358_priv *priv)
 
 	/* Enable AUD_CLK */
 	regmap_update_bits(priv->regmap, MT6358_AUDDEC_ANA_CON13, 0x1, 0x1);
-	/* Enable Audio DAC  */
-	regmap_write(priv->regmap, MT6358_AUDDEC_ANA_CON0, 0x30f9);
+	/* Enable Audio DAC, both channels. The DC-1's right speaker hangs off
+	 * the DAC-R output, so DACR (bit 1) must power up too; the old 0x30f9
+	 * left it down and only the left line-out speaker sounded. The vendor
+	 * MT6789 codec driver powers all four DAC bits here.
+	 */
+	regmap_write(priv->regmap, MT6358_AUDDEC_ANA_CON0, 0x30ff);
 	/* Enable low-noise mode of DAC */
 	regmap_write(priv->regmap, MT6358_AUDDEC_ANA_CON9, 0x0201);
 	/* Switch LOL MUX to audio DAC */
 	regmap_write(priv->regmap, MT6358_AUDDEC_ANA_CON7, 0x011b);
-	/* Switch HPL/R MUX to Line-out */
-	regmap_write(priv->regmap, MT6358_AUDDEC_ANA_CON0, 0x35f9);
+	/* Switch HPL MUX to Line-out, HPR MUX to DAC-R. The speakers are
+	 * asymmetric: the left hangs off the line-out buffer, the right off
+	 * the headphone-right DAC output, so the two HP muxes must select
+	 * different sources. The vendor MT6789 codec driver does exactly
+	 * this; feeding both from Line-out (the old single write) leaves
+	 * the right channel silent.
+	 */
+	regmap_update_bits(priv->regmap, MT6358_AUDDEC_ANA_CON0,
+			   RG_AUDHPLMUXINPUTSEL_VAUDP15_MASK_SFT,
+			   0x1 << RG_AUDHPLMUXINPUTSEL_VAUDP15_SFT);
+	regmap_update_bits(priv->regmap, MT6358_AUDDEC_ANA_CON0,
+			   RG_AUDHPRMUXINPUTSEL_VAUDP15_MASK_SFT,
+			   0x2 << RG_AUDHPRMUXINPUTSEL_VAUDP15_SFT);
 
 	return 0;
 }
