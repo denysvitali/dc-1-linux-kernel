@@ -950,7 +950,10 @@
  * provide one, so devfreq gets the whole table.  Every table voltage
  * (675000..900000 uV) sits inside vgpu's 500000..900000 uV constraint, and the
  * vgpu/vsram_gpu coupling (vsram min 750000, max spread 100000) holds at every
- * point -- worst case 750000 - 675000 = 75000 uV at the 390 MHz floor.
+ * point: mtk-regulator-coupler tracks vsram at vgpu + 100000 clamped to
+ * 750000..950000, i.e. 775000 at the 675000 floor and 950000 at the 900000
+ * top -- inside the vendor envelope (vsram >= 750000, 0 <= vsram-vgpu <=
+ * 200000) throughout.
  * Known quirk left as-is: mfg_pll_sel lacks CLK_SET_RATE_NO_REPARENT, so low
  * OPPs may reparent to mfg_ref_ck; add the flag only if on-device rates read
  * wrong.  MFG0/MFG1 domain supplies are set above; MFG2/MFG3 come from the
@@ -1625,14 +1628,14 @@
 							   MT6397_BUCK_MODE_FORCE_PWM>;
 
 				/*
-				 * Coupling requires always-on: the regulator core
-				 * refuses to couple a rail that can be disabled
-				 * ("Coupling of a non always-on regulator is
-				 * unimplemented", -ENOTSUPP), which failed the whole
-				 * mt6358-regulator probe and with it every supply on
-				 * this PMIC.
+				 * Balanced by mtk-regulator-coupler (registered
+				 * for mediatek,mt6789), like mt8186-corsola.  No
+				 * regulator-always-on: only the *generic* coupler
+				 * refuses non-always-on rails, and keeping the
+				 * flag would leave use_count non-zero, which the
+				 * MTK coupler answers with -EPERM when the mfg
+				 * domains enable the rail.
 				 */
-				regulator-always-on;
 				regulator-coupled-with = <&mt6366_vsram_gpu_reg>;
 				regulator-coupled-max-spread = <100000>;
 			};
@@ -1777,15 +1780,7 @@
 				regulator-ramp-delay = <6250>;
 				regulator-enable-ramp-delay = <240>;
 
-				/*
-				 * Coupling requires always-on: the regulator core
-				 * refuses to couple a rail that can be disabled
-				 * ("Coupling of a non always-on regulator is
-				 * unimplemented", -ENOTSUPP), which failed the whole
-				 * mt6358-regulator probe and with it every supply on
-				 * this PMIC.
-				 */
-				regulator-always-on;
+				/* See vgpu: MTK-coupler-balanced, must not be always-on */
 				regulator-coupled-with = <&mt6366_vgpu_reg>;
 				regulator-coupled-max-spread = <100000>;
 			};
@@ -2279,17 +2274,22 @@
  * power-domains = <&spm ...> (the whole DISP/SMI/DSI cluster) then defers
  * until the deferred-probe timeout and dies with -ETIMEDOUT.
  *
- * Ownership matches emerald and the jagar GPU probe DT: MFG0 takes vgpu,
- * MFG1 takes vsram_gpu.  Both rails are already regulator-always-on (they
- * are coupled), and both domains are MTK_SCPD_KEEP_DEFAULT_OFF, so this
- * only satisfies the binding; it powers nothing on by itself.
+ * Ownership follows mt8186-corsola (same MT6366 PMIC, same coupled pair,
+ * hardware-proven with mtk-regulator-coupler): parent MFG0 takes vsram_gpu,
+ * child MFG1 takes vgpu.  The order is load-bearing now that the rails are
+ * not always-on: genpd enables parent-first, and enabling vsram_gpu while
+ * its use_count is 0 balances it *uncoupled* down to its 750000 uV floor.
+ * That is only safe before vgpu's coupler-driven balance runs, i.e. with
+ * vsram on MFG0 and vgpu on MFG1.  The previous (emerald-style) inverted
+ * assignment would re-floor vsram_gpu *after* the coupler staged it,
+ * inverting the rails at power-on when vgpu resumes high.
  */
 &mfg0 {
-	domain-supply = <&mt6366_vgpu_reg>;
+	domain-supply = <&mt6366_vsram_gpu_reg>;
 };
 
 &mfg1 {
-	domain-supply = <&mt6366_vsram_gpu_reg>;
+	domain-supply = <&mt6366_vgpu_reg>;
 };
 
 /*
