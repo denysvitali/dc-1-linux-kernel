@@ -2028,6 +2028,28 @@
 		};
 	};
 
+	/*
+	 * Keypad matrix (volume-down), transcribed from the stock dtbo
+	 * kpddefault state: rows KPROW0/1 on GPIO68/69 (func 1) driven
+	 * output-low with bias off, columns KPCOL0/1 on GPIO66/67 (func 1)
+	 * as inputs with the R1R0_01 pull-up.
+	 */
+	keypad_pins: keypad-pins {
+		pins-rows {
+			pinmux = <PINMUX_GPIO68__FUNC_KPROW0>,
+				 <PINMUX_GPIO69__FUNC_KPROW1>;
+			output-low;
+			bias-disable;
+		};
+
+		pins-cols {
+			pinmux = <PINMUX_GPIO66__FUNC_KPCOL0>,
+				 <PINMUX_GPIO67__FUNC_KPCOL1>;
+			input-enable;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+		};
+	};
+
 	/* WLAN reset line (GPIO89) in plain GPIO mode; the factory dtbo's
 	 * pins_reset state, minus its output-low -- the regulator core owns
 	 * the level. */
@@ -2191,11 +2213,12 @@
 
 /*
  * Volume-down (and two auxiliary keys) sit on the MediaTek KPD matrix keypad,
- * not on the PMIC.  The stock dtbo already supplies the pinctrl (KPCOL0/1 on
- * GPIO66/67, KPROW0/1 on GPIO68/69) and status=okay via its &keypad fragment;
- * we add the matrix keymap here.  LK applies the stock dtbo on top of this
- * DTB, and its pinctrl encoding matches mainline's (same pinfunc header), so
- * no pinctrl node is re-declared.
+ * not on the PMIC.  The pinctrl is declared in &pio above, transcribed from
+ * the stock dtbo's kpddefault state.  (An earlier revision relied on "LK
+ * applies the stock dtbo on top of this DTB" for the pin setup -- refuted on
+ * hardware 2026-08-20: the live tree on a mainline-DT boot carries no keypad
+ * pinctrl.  The pins happened to be muxed to KPD anyway, presumably by LK for
+ * its own fastboot key handling, but we do not depend on that any more.)
  *
  * The stock hw-init-map has three live positions: KEY_VOLUMEDOWN at (0,0),
  * KEY_F11 at (0,1) and KEY_F12 at (1,1); (1,0) is unmapped.  KEY_F11/KEY_F12
@@ -2203,6 +2226,8 @@
  */
 &keypad {
 	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&keypad_pins>;
 	keypad,num-rows = <2>;
 	keypad,num-columns = <2>;
 	linux,keymap = <
