@@ -43,6 +43,18 @@ config TYPEC_TCPCI_MT6370
 	  USB Type-C. It works with Type-C Port Controller Manager
 	  to provide USB PD and USB Type-C functionalities.
 
+config TYPEC_TCPCI_MT6375
+	tristate "MediaTek MT6375 Type-C driver"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  MediaTek MT6375 is a multi-functional IC whose TCPCI bank
+	  provides USB Type-C and PD. Unlike the MT6370 it needs no
+	  MFD: the charger driver spawns the secondary-address client,
+	  and this driver works with Type-C Port Controller Manager to
+	  provide USB PD sink functionality. Say Y to enable USB-C PD
+	  sink charging on the Daylight DC-1.
+
 	  This driver can also be built as a module. The module
 	  will be called "tcpci_mt6370".
 

@@ -738,13 +738,15 @@ config CHARGER_MT6375
 	help
 	  Say Y here to report the autonomous MT6375 charger's status through
 	  the power-supply class and to manage its current limits. The
-	  platform has no Type-C/PD or BC1.2 driver, so the charger only knows
-	  the static configuration left by the bootloader; this driver raises
-	  both the input current limit and the fast-charge current target
-	  above those 500 mA defaults once VBUS is present, and exposes both
-	  as writable properties so userspace can override them. It does not
-	  control charging enable, the charger watchdog, interrupts, the
-	  constant-charge voltage, USB Type-C, or Power Delivery.
+	  platform has no Type-C/PD or BC1.2 driver in its bootloader device
+	  tree, so the charger only knows the static configuration left by
+	  the bootloader; this driver raises both the input current limit and
+	  the fast-charge current target above those 500 mA defaults once
+	  VBUS is present, exposes both as writable properties so userspace
+	  can override them, spawns the TCPCI bank's Type-C driver for PD,
+	  and applies negotiated PD contracts to the input stage. It does
+	  not control charging enable, the charger watchdog, interrupts, or
+	  the constant-charge voltage.
 
 	  If built as a module, it will be called mt6375-charger.
 

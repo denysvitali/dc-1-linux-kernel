@@ -23,16 +23,20 @@
  *   - exposes both as writable power_supply properties so userspace can
  *     override either value.
  *
- * It does not reset the charger, acknowledge interrupts, enable its
- * watchdog, or touch the Type-C/PD banks.  The constant-charge *voltage*
- * stays read-only: it is the cell-level protection, and the BQ78Z100 pack
- * monitor that would normally enforce it does not answer on this hardware.
+ * It does not reset the charger, acknowledge interrupts, or enable its
+ * watchdog.  Its probe spawns the TCPCI bank's Type-C driver
+ * (tcpci_mt6375.c) -- nothing else describes that address -- and hands it
+ * negotiated PD contracts through mt6375_charger_program_input().  The
+ * constant-charge *voltage* stays read-only: it is the cell-level
+ * protection, and the BQ78Z100 pack monitor that would normally enforce it
+ * does not answer on this hardware.
  */
 
 #include <linux/bitops.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
@@ -40,6 +44,7 @@
 
 #define MT6375_REG_DEV_INFO		0x00
 #define MT6375_REG_CHG_TOP1		0x20
+#define MT6375_REG_CHG_TOP2		0x21
 #define MT6375_REG_CHG_AICR		0x22
 #define MT6375_REG_CHG_MIVR		0x23
 #define MT6375_REG_CHG_VCHG		0x25
@@ -53,6 +58,19 @@
 #define MT6375_CHG_EN			BIT(0)
 #define MT6375_PWR_RDY			BIT(0)
 #define MT6375_WDT_EN			BIT(3)
+
+/* Secondary I2C address of the TCPCI bank behind this PMU. */
+#define MT6375_TCPC_I2C_ADDR		0x4e
+
+/* Mirrors the type in drivers/usb/typec/tcpm/tcpci_mt6375.c; both built in. */
+struct mt6375_tcpc_pdata {
+	struct i2c_client *client;
+};
+
+/* CHG_TOP2 bits 1:0: input over-voltage thresholds in mV. */
+static const unsigned int mt6375_vbus_ov_levels[] = { 5800, 6500, 11000, 14500 };
+
+int mt6375_charger_program_input(u32 mv, u32 ma);
 
 /* CHG_AICR: 25 mA steps starting at 100 mA; codes below 2 mean less. */
 #define MT6375_AICR_MIN_UA		100000
@@ -97,6 +115,8 @@ struct mt6375_charger {
 	struct delayed_work poll_work;
 	bool aicr_boosted;
 	bool ichg_boosted;
+	struct i2c_client *tcpc_client;
+	struct platform_device *tcpc_pdev;
 };
 
 static bool mt6375_readable_reg(struct device *dev, unsigned int reg)
@@ -245,6 +265,78 @@ static int mt6375_ichg_encode(int ua, unsigned int *code)
 	*code = value + MT6375_ICHG_MIN_CODE;
 	return 0;
 }
+
+/*
+ * The TCPC backend reports settled PD sink contracts through
+ * mt6375_charger_program_input(). There is one PMIC on this board, so a
+ * static bridge says exactly what it is.
+ */
+static struct {
+	struct regmap *regmap;
+	struct device *dev;
+} mt6375_chg_bridge;
+
+/**
+ * mt6375_charger_program_input - apply a PD sink contract to the input stage
+ * @mv: negotiated bus voltage, 0 for detach
+ * @ma: negotiated current, ignored when @mv is 0
+ *
+ * Raises the input over-voltage bucket above the contract voltage, sets MIVR
+ * (the input-voltage regulation floor) 800 mV under the contract so cable
+ * drop does not throttle prematurely but a collapse still protects, and
+ * points AICR at the contracted current. On detach the VBUS policy defaults
+ * are restored. Called from the TCPC driver's TCPM set_current_limit hook.
+ */
+int mt6375_charger_program_input(u32 mv, u32 ma)
+{
+	struct regmap *regmap = READ_ONCE(mt6375_chg_bridge.regmap);
+	unsigned int mivr_mv = 0, mivr_code, aicr_ua, aicr_code = 0, ov = 0;
+	int ret;
+
+	if (!regmap)
+		return -ENODEV;
+
+	if (!mv) {
+		mivr_code = DIV_ROUND_CLOSEST(4500 - 3900, 100);
+		ret = mt6375_aicr_encode(MT6375_AICR_BOOST_UA, &aicr_code);
+		if (ret)
+			return ret;
+	} else {
+		/* OVP bucket strictly above the contract, with margin. */
+		if (mv <= 5500)
+			ov = 0;			/* 5.8 V */
+		else if (mv <= 10500)
+			ov = 2;			/* 11 V */
+		else
+			ov = 3;			/* 14.5 V */
+
+		mivr_mv = round_down(clamp(mv - 800u, 3900u, 13400u), 100u);
+		mivr_code = (mivr_mv - 3900) / 100;
+
+		aicr_ua = clamp(ma, 100u, 3225u) * 1000;
+		ret = mt6375_aicr_encode(aicr_ua, &aicr_code);
+		if (ret)
+			return ret;
+
+		ret = regmap_update_bits(regmap, MT6375_REG_CHG_TOP2,
+					 GENMASK(1, 0), ov);
+		if (ret)
+			return ret;
+	}
+
+	ret = regmap_write(regmap, MT6375_REG_CHG_MIVR, mivr_code);
+	if (!ret)
+		ret = regmap_write(regmap, MT6375_REG_CHG_AICR, aicr_code);
+	if (!ret && mv)
+		dev_info(mt6375_chg_bridge.dev,
+			 "PD contract: %u mV %u mA (MIVR %u mV, OVP %u mV)\n",
+			 mv, ma, mivr_mv, mt6375_vbus_ov_levels[ov]);
+	else if (!ret)
+		dev_info(mt6375_chg_bridge.dev,
+			 "PD detach: input stage back to policy defaults\n");
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6375_charger_program_input);
 
 static int mt6375_get_property(struct power_supply *psy,
 			       enum power_supply_property property,
@@ -426,6 +518,11 @@ static void mt6375_remove(struct i2c_client *client)
 {
 	struct mt6375_charger *charger = i2c_get_clientdata(client);
 
+	WRITE_ONCE(mt6375_chg_bridge.regmap, NULL);
+	if (charger->tcpc_pdev)
+		platform_device_unregister(charger->tcpc_pdev);
+	if (charger->tcpc_client)
+		i2c_unregister_device(charger->tcpc_client);
 	cancel_delayed_work_sync(&charger->poll_work);
 }
 
@@ -477,6 +574,41 @@ static int mt6375_probe(struct i2c_client *client)
 				     "failed to register power supply\n");
 
 	i2c_set_clientdata(client, charger);
+
+	/*
+	 * Spawn the TCPCI bank. The bootloader device tree describes neither
+	 * this PMIC's children nor an interrupt line, so the Type-C driver is
+	 * instantiated here with a dummy client and polls its alerts.
+	 */
+	charger->tcpc_client = i2c_new_dummy_device(client->adapter,
+						    MT6375_TCPC_I2C_ADDR);
+	if (IS_ERR(charger->tcpc_client))
+		return dev_err_probe(&client->dev,
+				     PTR_ERR(charger->tcpc_client),
+				     "failed to claim the TCPCI bank\n");
+
+	{
+		struct mt6375_tcpc_pdata tcpc_pdata = {
+			.client = charger->tcpc_client,
+		};
+
+		charger->tcpc_pdev =
+			platform_device_register_data(&client->dev,
+						      "mt6375-tcpc",
+						      PLATFORM_DEVID_NONE,
+						      &tcpc_pdata,
+						      sizeof(tcpc_pdata));
+	}
+	if (IS_ERR(charger->tcpc_pdev)) {
+		ret = PTR_ERR(charger->tcpc_pdev);
+		i2c_unregister_device(charger->tcpc_client);
+		charger->tcpc_client = NULL;
+		return dev_err_probe(&client->dev, ret,
+				     "failed to spawn the TCPC device\n");
+	}
+
+	mt6375_chg_bridge.regmap = charger->regmap;
+	mt6375_chg_bridge.dev = &client->dev;
 
 	INIT_DELAYED_WORK(&charger->poll_work, mt6375_poll_work);
 	schedule_delayed_work(&charger->poll_work, 0);
