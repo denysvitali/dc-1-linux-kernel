@@ -737,14 +737,14 @@ config CHARGER_MT6375
 	select REGMAP_I2C
 	help
 	  Say Y here to report the autonomous MT6375 charger's status through
-	  the power-supply class and to manage its input current limit. The
+	  the power-supply class and to manage its current limits. The
 	  platform has no Type-C/PD or BC1.2 driver, so the charger only knows
 	  the static configuration left by the bootloader; this driver raises
-	  the input current limit above that 500 mA default once VBUS is
-	  present, and exposes the limit as a writable property so userspace
-	  can override it. It does not control charging enable, the charger
-	  watchdog, interrupts, constant-charge settings, USB Type-C, or Power
-	  Delivery.
+	  both the input current limit and the fast-charge current target
+	  above those 500 mA defaults once VBUS is present, and exposes both
+	  as writable properties so userspace can override them. It does not
+	  control charging enable, the charger watchdog, interrupts, the
+	  constant-charge voltage, USB Type-C, or Power Delivery.
 
 	  If built as a module, it will be called mt6375-charger.
 

@@ -10,21 +10,23 @@
  * charge under desktop load -- measured 2026-08-21, the pack discharged
  * ~250 mA while plugged in until the input limit was raised over i2c.
  *
- * The driver therefore does three things, and deliberately no more:
+ * The driver therefore does four things, and deliberately no more:
  *
  *   - reports the charger state machine and the programmed limits,
  *   - raises the input current limit from the 500 mA bootloader default to
  *     1.5 A once VBUS appears (USB-C sources advertise at least that much
  *     without PD, and the 4.5 V MIVR regulation folds the current back if
  *     the source sags, so a weaker port simply yields less),
- *   - exposes the input current limit (CHG_AICR) as a writable power_supply
- *     property so userspace can override either value.
+ *   - raises the fast-charge current target from the bootloader's 500 mA to
+ *     2 A at the same time -- a trickle by this pack's standards, still
+ *     bounded by whatever the input regulation can sustain,
+ *   - exposes both as writable power_supply properties so userspace can
+ *     override either value.
  *
  * It does not reset the charger, acknowledge interrupts, enable its
- * watchdog, or touch the Type-C/PD banks.  The constant-charge current and
- * voltage stay read-only: they are cell-level settings, and the BQ78Z100
- * pack monitor that would normally enforce them does not answer on this
- * hardware.
+ * watchdog, or touch the Type-C/PD banks.  The constant-charge *voltage*
+ * stays read-only: it is the cell-level protection, and the BQ78Z100 pack
+ * monitor that would normally enforce it does not answer on this hardware.
  */
 
 #include <linux/bitops.h>
@@ -62,6 +64,19 @@
 /* First level a USB-C source can be assumed to sustain without PD. */
 #define MT6375_AICR_BOOST_UA		1500000
 
+/*
+ * CHG_ICHG: 50 mA steps from 300 mA. The bootloader leaves 500 mA -- a
+ * trickle by this pack's standards; the vendor stack's own fast-phase value
+ * is 1.5 A, and on the DC-1's adapter a 2 A request measures ~1.8 A into the
+ * pack (0.23C) with the input-voltage regulation still idle.
+ */
+#define MT6375_ICHG_MIN_UA		300000
+#define MT6375_ICHG_STEP_UA		50000
+#define MT6375_ICHG_MIN_CODE		6
+#define MT6375_ICHG_MAX_CODE		63
+#define MT6375_ICHG_BOOT_CODE		10	/* 500 mA */
+#define MT6375_ICHG_BOOST_UA		2000000
+
 #define MT6375_POLL_INTERVAL		msecs_to_jiffies(10000)
 
 enum mt6375_charge_state {
@@ -81,6 +96,7 @@ struct mt6375_charger {
 	struct regmap *regmap;
 	struct delayed_work poll_work;
 	bool aicr_boosted;
+	bool ichg_boosted;
 };
 
 static bool mt6375_readable_reg(struct device *dev, unsigned int reg)
@@ -101,10 +117,10 @@ static bool mt6375_readable_reg(struct device *dev, unsigned int reg)
 	}
 }
 
-/* Only the input current limit is ours to write. */
+/* Input limit and fast-charge target are ours; the CV stays bootloader's. */
 static bool mt6375_writeable_reg(struct device *dev, unsigned int reg)
 {
-	return reg == MT6375_REG_CHG_AICR;
+	return reg == MT6375_REG_CHG_AICR || reg == MT6375_REG_CHG_ICHG;
 }
 
 static const struct regmap_config mt6375_regmap_config = {
@@ -215,6 +231,21 @@ static int mt6375_aicr_encode(int ua, unsigned int *code)
 	return 0;
 }
 
+static int mt6375_ichg_encode(int ua, unsigned int *code)
+{
+	unsigned int value;
+
+	if (ua < MT6375_ICHG_MIN_UA ||
+	    ua > (MT6375_ICHG_MAX_CODE - MT6375_ICHG_MIN_CODE) *
+			 MT6375_ICHG_STEP_UA +
+			 MT6375_ICHG_MIN_UA)
+		return -EINVAL;
+
+	value = DIV_ROUND_CLOSEST(ua - MT6375_ICHG_MIN_UA, MT6375_ICHG_STEP_UA);
+	*code = value + MT6375_ICHG_MIN_CODE;
+	return 0;
+}
+
 static int mt6375_get_property(struct power_supply *psy,
 			       enum power_supply_property property,
 			       union power_supply_propval *val)
@@ -264,6 +295,14 @@ static int mt6375_set_property(struct power_supply *psy,
 		if (!ret)
 			charger->aicr_boosted = true;
 		return ret;
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+		ret = mt6375_ichg_encode(val->intval, &code);
+		if (ret)
+			return ret;
+		ret = regmap_write(charger->regmap, MT6375_REG_CHG_ICHG, code);
+		if (!ret)
+			charger->ichg_boosted = true;
+		return ret;
 	default:
 		return -EINVAL;
 	}
@@ -272,7 +311,8 @@ static int mt6375_set_property(struct power_supply *psy,
 static int mt6375_property_is_writeable(struct power_supply *psy,
 					enum power_supply_property psp)
 {
-	return psp == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT;
+	return psp == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT ||
+	       psp == POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT;
 }
 
 static int mt6375_validate_limits(struct mt6375_charger *charger)
@@ -321,42 +361,65 @@ static void mt6375_poll_work(struct work_struct *work)
 	struct mt6375_charger *charger =
 		container_of(dw, struct mt6375_charger, poll_work);
 	struct device *dev = regmap_get_device(charger->regmap);
-	unsigned int stat0, aicr, boost;
+	unsigned int stat0;
+	bool pending = false;
 	int ret;
 
 	/*
-	 * One-shot latch: once the limit has been raised -- by us here or by
-	 * userspace through sysfs -- stop polling and leave it alone.
+	 * One-shot per register: each limit is raised at most once, and only
+	 * while it still holds the bootloader's value. Anything userspace wrote
+	 * through sysfs marks that register done and is never touched again.
 	 */
-	if (charger->aicr_boosted)
-		return;
-
 	ret = regmap_read(charger->regmap, MT6375_REG_CHG_STAT0, &stat0);
-	if (ret || !(stat0 & MT6375_PWR_RDY))
-		goto resched;
+	if (!ret && (stat0 & MT6375_PWR_RDY)) {
+		unsigned int val, code;
 
-	ret = regmap_read(charger->regmap, MT6375_REG_CHG_AICR, &aicr);
-	if (ret)
-		goto resched;
+		if (!charger->aicr_boosted) {
+			ret = regmap_read(charger->regmap, MT6375_REG_CHG_AICR,
+					  &val);
+			if (ret) {
+				pending = true;
+			} else if ((val & GENMASK(6, 0)) !=
+				   MT6375_AICR_BOOT_CODE) {
+				charger->aicr_boosted = true;
+			} else if (!mt6375_aicr_encode(MT6375_AICR_BOOST_UA,
+						       &code) &&
+				   !regmap_write(charger->regmap,
+						 MT6375_REG_CHG_AICR, code)) {
+				charger->aicr_boosted = true;
+				dev_info(dev, "raised input current limit to %d mA for VBUS\n",
+					 MT6375_AICR_BOOST_UA / 1000);
+			} else {
+				pending = true;
+			}
+		}
 
-	if ((aicr & GENMASK(6, 0)) != MT6375_AICR_BOOT_CODE)
-		goto resched;
+		if (!charger->ichg_boosted) {
+			ret = regmap_read(charger->regmap, MT6375_REG_CHG_ICHG,
+					  &val);
+			if (ret) {
+				pending = true;
+			} else if ((val & GENMASK(5, 0)) !=
+				   MT6375_ICHG_BOOT_CODE) {
+				charger->ichg_boosted = true;
+			} else if (!mt6375_ichg_encode(MT6375_ICHG_BOOST_UA,
+						       &code) &&
+				   !regmap_write(charger->regmap,
+						 MT6375_REG_CHG_ICHG, code)) {
+				charger->ichg_boosted = true;
+				dev_info(dev, "raised fast-charge target to %d mA for VBUS\n",
+					 MT6375_ICHG_BOOST_UA / 1000);
+			} else {
+				pending = true;
+			}
+		}
+	} else if (!charger->aicr_boosted || !charger->ichg_boosted) {
+		pending = true;
+	}
 
-	ret = mt6375_aicr_encode(MT6375_AICR_BOOST_UA, &boost);
-	if (ret)
-		return;
-
-	ret = regmap_write(charger->regmap, MT6375_REG_CHG_AICR, boost);
-	if (ret)
-		goto resched;
-
-	charger->aicr_boosted = true;
-	dev_info(dev, "raised input current limit to %d mA for VBUS\n",
-		 MT6375_AICR_BOOST_UA / 1000);
-	return;
-
-resched:
-	schedule_delayed_work(&charger->poll_work, MT6375_POLL_INTERVAL);
+	if (pending)
+		schedule_delayed_work(&charger->poll_work,
+				      MT6375_POLL_INTERVAL);
 }
 
 static void mt6375_remove(struct i2c_client *client)
@@ -418,7 +481,7 @@ static int mt6375_probe(struct i2c_client *client)
 	INIT_DELAYED_WORK(&charger->poll_work, mt6375_poll_work);
 	schedule_delayed_work(&charger->poll_work, 0);
 
-	dev_info(&client->dev, "charger telemetry and input limit policy, revision %u\n",
+	dev_info(&client->dev, "charger telemetry and current-limit policy, revision %u\n",
 		 (unsigned int)(id & GENMASK(3, 0)));
 	return 0;
 }
