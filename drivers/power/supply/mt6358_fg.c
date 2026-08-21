@@ -47,6 +47,7 @@
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/sysfs.h>
 #include <linux/workqueue.h>
 
 /* AUXADC: BATADC, request bit 0 of RQST0, 128 samples, 3/1 divider, 1800 mV */
@@ -74,24 +75,46 @@
 
 /*
  * Current LSB is 381.47 uA, expressed in nA to stay in integer arithmetic.
- *
  * The charge LSB is the vendor's documented fundamental "CHARGE_LSB =
  * 190.735 uAs, unit 2^0 LSB", in nA*s here. Note this is NOT the vendor's
  * UNIT_FGCAR (108507): that constant scales their 20-bit NCAR register, a
- * different accumulator from the 32-bit CAR pair read here, and using it makes
- * the charge drain about twice as fast as the measured current can account
- * for. Checked on a DC-1 over 40 s at 124 mA: the CAR advanced 26 238 counts
- * against a true 1379 uAh, i.e. 0.0526 uAh per count, which is this constant
- * to within 0.8%.
+ * different accumulator from the 32-bit CAR pair read here.
+ *
+ * Both LSBs are referenced to MediaTek's 10 mOhm reference sense element, and
+ * the vendor driver rescales every reading by DEFAULT_R_FG / r_fg_value (both
+ * in 0.1 mOhm units, r_fg_value = 10 x the shunt in milliohms), plus
+ * car_tune/1000 on charge. The DC-1's factory configuration is a 5 mOhm shunt
+ * with a 1.01 charge trim -- recorded both in the factory gauge DT node
+ * (R_FG_VALUE = <5>, CAR_TUNE_VALUE = <101>) and in the stock kernel's own
+ * boot log preserved in this unit's expdb partition ("r_fg=50 car_tune=1010
+ * DEFAULT_RFG=100 UNIT_FGCURRENT=381470"). An earlier version of this driver
+ * applied no correction and reported almost exactly half of physical truth on
+ * every current and coulomb count; its CAR-vs-current cross-check could not
+ * catch that because both sides shared the same missing factor.
  */
 #define UNIT_FGCURRENT_NA		381470
 #define UNIT_FGCAR_NAS			190735
 #define NAS_PER_UAH			3600000
+#define MT6358_REF_RFG_DECIOHM		100	/* 10 mOhm, 0.1 mOhm units */
+
+/*
+ * Board calibration, matching the factory values above. Built-in driver: set
+ * from the kernel cmdline as mt6358_fg.r_fg_milliohms=N. Runtime writes affect
+ * subsequent conversions only, never charge already integrated.
+ */
+static unsigned int r_fg_milliohms = 5;
+module_param_named(r_fg_milliohms, r_fg_milliohms, uint, 0444);
+MODULE_PARM_DESC(r_fg_milliohms, "battery sense shunt, milliohm (vendor reference 10)");
+
+static unsigned int car_tune_permille = 1010;
+module_param_named(car_tune_permille, car_tune_permille, uint, 0444);
+MODULE_PARM_DESC(car_tune_permille, "charge accumulator trim, permille");
 
 /*
  * Sign, established by measurement on a DC-1 rather than taken from the vendor
  * decode (which reads a positive register as charging): with no cable attached,
- * idle draws raw ~350 and eight spinning cores raw ~700, and the CAR
+ * idle draws raw ~350 and eight spinning cores raw ~700 (about 267 and 534 mA
+ * once the board's 5 mOhm shunt correction is applied), and the CAR
  * accumulator advances at a proportionally higher rate. So on this board a
  * positive register value is discharge, and the power-supply convention
  * (negative CURRENT_NOW = leaving the battery) is the negation of it.
@@ -108,11 +131,13 @@
 
 /*
  * Pack + path resistance, used only to undo IR drop when seeding from OCV.
- * Measured on a DC-1: 19 mV of sag for a 120 mA step (135 mA idle -> 255 mA
- * with eight cores busy) is ~158 mOhm. Rounded down slightly, since seeding
- * high is worse than seeding low.
+ * Measured on a DC-1: 19 mV of sag between idle and an eight-core busy spin.
+ * The step is really ~240 mA once the board's 5 mOhm shunt correction is
+ * applied (raw 350 -> 700 counts), giving ~79 mOhm; the earlier ~158 mOhm
+ * estimate had read that same step at half its true current. Rounded down
+ * slightly, since seeding high is worse than seeding low.
  */
-#define FG_PACK_RESISTANCE_MOHM		150
+#define FG_PACK_RESISTANCE_MOHM		75
 
 /*
  * Open-circuit voltage to state of charge, single-cell Li-ion, descending.
@@ -322,9 +347,12 @@ static int mt6358_fg_update(struct mt6358_fg *fg)
 
 	/*
 	 * FG_RAW_IS_DISCHARGE: the register counts up as the pack drains, and
-	 * CURRENT_NOW is negative while discharging, so negate.
+	 * CURRENT_NOW is negative while discharging, so negate. The LSB assumes
+	 * the reference shunt; rescale to the board's own (5 mOhm doubles).
 	 */
-	fg->current_ua = -div_s64((s64)raw * UNIT_FGCURRENT_NA, 1000);
+	fg->current_ua = -div_s64((s64)raw * UNIT_FGCURRENT_NA *
+				  MT6358_REF_RFG_DECIOHM,
+				  10 * r_fg_milliohms * 1000);
 
 	ret = mt6358_fg_voltage(fg, &uv);
 	if (ret)
@@ -348,6 +376,9 @@ static int mt6358_fg_update(struct mt6358_fg *fg)
 		s64 delta = abs((s64)car - (s64)fg->last_car);
 
 		delta = div_s64(delta * UNIT_FGCAR_NAS, NAS_PER_UAH);
+		delta = mult_frac(delta,
+				  MT6358_REF_RFG_DECIOHM * car_tune_permille,
+				  10 * r_fg_milliohms * 1000);
 		if (fg->current_ua < 0)
 			fg->charge_uah -= delta;
 		else
@@ -392,6 +423,33 @@ static void mt6358_fg_cancel_poll(void *data)
 {
 	cancel_delayed_work_sync(data);
 }
+
+/*
+ * Raw FGADC latch contents plus the calibration in force, for auditing the
+ * conversion chain without recompiling. The CAR rate per unit current is a
+ * fixed property of the LSB pair (190735 nAs / 381470 nA = 0.5 s), so raw
+ * values are what an independent referee -- the charger's own IBAT ADC, or a
+ * wall meter -- should be compared against.
+ */
+static ssize_t fgc_raw_show(struct device *dev, struct device_attribute *da,
+			    char *buf)
+{
+	struct mt6358_fg *fg = dev_get_drvdata(dev);
+	s16 raw;
+	s32 car;
+	int ret;
+
+	scoped_guard(mutex, &fg->lock) {
+		ret = mt6358_fg_read_latched(fg, &raw, &car);
+	}
+
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "cur_raw %d car_raw %d r_fg_milliohms %u car_tune_permille %u\n",
+			  raw, car, r_fg_milliohms, car_tune_permille);
+}
+static DEVICE_ATTR_RO(fgc_raw);
 
 /* --------------------------------------------------------- power supply */
 
@@ -585,6 +643,7 @@ static int mt6358_fg_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	fg->dev = dev;
+	dev_set_drvdata(dev, fg);
 
 	/*
 	 * Same two cases as mt6359-auxadc: under SPMI the regmap belongs to the
@@ -624,9 +683,14 @@ static int mt6358_fg_probe(struct platform_device *pdev)
 		return ret;
 	schedule_delayed_work(&fg->poll, msecs_to_jiffies(FG_POLL_INTERVAL_MS));
 
-	dev_info(dev, "coulomb counter: %d uA, %lld uAh of %u uAh (%d%%)\n",
+	ret = device_create_file(dev, &dev_attr_fgc_raw);
+	if (ret)
+		return ret;
+
+	dev_info(dev,
+		 "coulomb counter: %d uA, %lld uAh of %u uAh (%d%%), r_fg=%u mOhm car_tune=%u permille\n",
 		 fg->current_ua, fg->charge_uah, fg->charge_full_design_uah,
-		 mt6358_fg_capacity(fg));
+		 mt6358_fg_capacity(fg), r_fg_milliohms, car_tune_permille);
 	return 0;
 }
 
