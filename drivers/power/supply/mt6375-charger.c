@@ -1,12 +1,30 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Read-only charger telemetry for the MediaTek MT6375 PMU I2C bank.
+ * MediaTek MT6375 PMU charger: telemetry plus minimal input-current policy.
  *
  * MT6375 is a multi-address device.  The PMU bank is exposed at 0x34 and the
- * charger registers occupy offsets 0x20..0xe1 in that bank.  This deliberately
- * small driver reports the configuration left by the bootloader without
- * changing it.  In particular, it does not reset the charger, acknowledge
- * interrupts, enable its watchdog, or touch the Type-C/PD banks.
+ * charger registers occupy offsets 0x20..0xe1 in that bank.  Nothing binds
+ * this platform's Type-C/PD banks, so there is no port negotiation: the
+ * bootloader leaves a static configuration (a 500 mA input current limit
+ * here) and the kernel inherits it.  At 500 mA the DC-1 cannot even hold
+ * charge under desktop load -- measured 2026-08-21, the pack discharged
+ * ~250 mA while plugged in until the input limit was raised over i2c.
+ *
+ * The driver therefore does three things, and deliberately no more:
+ *
+ *   - reports the charger state machine and the programmed limits,
+ *   - raises the input current limit from the 500 mA bootloader default to
+ *     1.5 A once VBUS appears (USB-C sources advertise at least that much
+ *     without PD, and the 4.5 V MIVR regulation folds the current back if
+ *     the source sags, so a weaker port simply yields less),
+ *   - exposes the input current limit (CHG_AICR) as a writable power_supply
+ *     property so userspace can override either value.
+ *
+ * It does not reset the charger, acknowledge interrupts, enable its
+ * watchdog, or touch the Type-C/PD banks.  The constant-charge current and
+ * voltage stay read-only: they are cell-level settings, and the BQ78Z100
+ * pack monitor that would normally enforce them does not answer on this
+ * hardware.
  */
 
 #include <linux/bitops.h>
@@ -16,6 +34,7 @@
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 
 #define MT6375_REG_DEV_INFO		0x00
 #define MT6375_REG_CHG_TOP1		0x20
@@ -33,6 +52,18 @@
 #define MT6375_PWR_RDY			BIT(0)
 #define MT6375_WDT_EN			BIT(3)
 
+/* CHG_AICR: 25 mA steps starting at 100 mA; codes below 2 mean less. */
+#define MT6375_AICR_MIN_UA		100000
+#define MT6375_AICR_STEP_UA		25000
+#define MT6375_AICR_MIN_CODE		2
+#define MT6375_AICR_MAX_CODE		127
+/* What the bootloader leaves; used to detect "nobody tuned this yet". */
+#define MT6375_AICR_BOOT_CODE		18	/* 500 mA */
+/* First level a USB-C source can be assumed to sustain without PD. */
+#define MT6375_AICR_BOOST_UA		1500000
+
+#define MT6375_POLL_INTERVAL		msecs_to_jiffies(10000)
+
 enum mt6375_charge_state {
 	MT6375_CHG_SLEEP,
 	MT6375_CHG_VBUS_READY,
@@ -48,6 +79,8 @@ enum mt6375_charge_state {
 
 struct mt6375_charger {
 	struct regmap *regmap;
+	struct delayed_work poll_work;
+	bool aicr_boosted;
 };
 
 static bool mt6375_readable_reg(struct device *dev, unsigned int reg)
@@ -68,9 +101,10 @@ static bool mt6375_readable_reg(struct device *dev, unsigned int reg)
 	}
 }
 
+/* Only the input current limit is ours to write. */
 static bool mt6375_writeable_reg(struct device *dev, unsigned int reg)
 {
-	return false;
+	return reg == MT6375_REG_CHG_AICR;
 }
 
 static const struct regmap_config mt6375_regmap_config = {
@@ -166,6 +200,21 @@ static int mt6375_read_linear(struct mt6375_charger *charger,
 	return 0;
 }
 
+static int mt6375_aicr_encode(int ua, unsigned int *code)
+{
+	unsigned int value;
+
+	if (ua < MT6375_AICR_MIN_UA ||
+	    ua > (MT6375_AICR_MAX_CODE - MT6375_AICR_MIN_CODE) *
+			 MT6375_AICR_STEP_UA +
+			 MT6375_AICR_MIN_UA)
+		return -EINVAL;
+
+	value = DIV_ROUND_CLOSEST(ua - MT6375_AICR_MIN_UA, MT6375_AICR_STEP_UA);
+	*code = value + MT6375_AICR_MIN_CODE;
+	return 0;
+}
+
 static int mt6375_get_property(struct power_supply *psy,
 			       enum power_supply_property property,
 			       union power_supply_propval *val)
@@ -198,6 +247,34 @@ static int mt6375_get_property(struct power_supply *psy,
 	}
 }
 
+static int mt6375_set_property(struct power_supply *psy,
+			       enum power_supply_property property,
+			       const union power_supply_propval *val)
+{
+	struct mt6375_charger *charger = power_supply_get_drvdata(psy);
+	unsigned int code;
+	int ret;
+
+	switch (property) {
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+		ret = mt6375_aicr_encode(val->intval, &code);
+		if (ret)
+			return ret;
+		ret = regmap_write(charger->regmap, MT6375_REG_CHG_AICR, code);
+		if (!ret)
+			charger->aicr_boosted = true;
+		return ret;
+	default:
+		return -EINVAL;
+	}
+}
+
+static int mt6375_property_is_writeable(struct power_supply *psy,
+					enum power_supply_property psp)
+{
+	return psp == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT;
+}
+
 static int mt6375_validate_limits(struct mt6375_charger *charger)
 {
 	int value;
@@ -216,7 +293,7 @@ static int mt6375_validate_limits(struct mt6375_charger *charger)
 	if (ret)
 		return ret;
 	return mt6375_read_linear(charger, MT6375_REG_CHG_VCHG,
-				  GENMASK(6, 0), 3900, 10, 0, 81, &value);
+				   GENMASK(6, 0), 3900, 10, 0, 81, &value);
 }
 
 static const enum power_supply_property mt6375_properties[] = {
@@ -234,7 +311,60 @@ static const struct power_supply_desc mt6375_power_supply_desc = {
 	.properties = mt6375_properties,
 	.num_properties = ARRAY_SIZE(mt6375_properties),
 	.get_property = mt6375_get_property,
+	.set_property = mt6375_set_property,
+	.property_is_writeable = mt6375_property_is_writeable,
 };
+
+static void mt6375_poll_work(struct work_struct *work)
+{
+	struct delayed_work *dw = to_delayed_work(work);
+	struct mt6375_charger *charger =
+		container_of(dw, struct mt6375_charger, poll_work);
+	struct device *dev = regmap_get_device(charger->regmap);
+	unsigned int stat0, aicr, boost;
+	int ret;
+
+	/*
+	 * One-shot latch: once the limit has been raised -- by us here or by
+	 * userspace through sysfs -- stop polling and leave it alone.
+	 */
+	if (charger->aicr_boosted)
+		return;
+
+	ret = regmap_read(charger->regmap, MT6375_REG_CHG_STAT0, &stat0);
+	if (ret || !(stat0 & MT6375_PWR_RDY))
+		goto resched;
+
+	ret = regmap_read(charger->regmap, MT6375_REG_CHG_AICR, &aicr);
+	if (ret)
+		goto resched;
+
+	if ((aicr & GENMASK(6, 0)) != MT6375_AICR_BOOT_CODE)
+		goto resched;
+
+	ret = mt6375_aicr_encode(MT6375_AICR_BOOST_UA, &boost);
+	if (ret)
+		return;
+
+	ret = regmap_write(charger->regmap, MT6375_REG_CHG_AICR, boost);
+	if (ret)
+		goto resched;
+
+	charger->aicr_boosted = true;
+	dev_info(dev, "raised input current limit to %d mA for VBUS\n",
+		 MT6375_AICR_BOOST_UA / 1000);
+	return;
+
+resched:
+	schedule_delayed_work(&charger->poll_work, MT6375_POLL_INTERVAL);
+}
+
+static void mt6375_remove(struct i2c_client *client)
+{
+	struct mt6375_charger *charger = i2c_get_clientdata(client);
+
+	cancel_delayed_work_sync(&charger->poll_work);
+}
 
 static int mt6375_probe(struct i2c_client *client)
 {
@@ -251,7 +381,7 @@ static int mt6375_probe(struct i2c_client *client)
 	charger->regmap = devm_regmap_init_i2c(client, &mt6375_regmap_config);
 	if (IS_ERR(charger->regmap))
 		return dev_err_probe(&client->dev, PTR_ERR(charger->regmap),
-				     "failed to initialize read-only regmap\n");
+				     "failed to initialize regmap\n");
 
 	ret = regmap_read(charger->regmap, MT6375_REG_DEV_INFO, &id);
 	if (ret)
@@ -284,7 +414,11 @@ static int mt6375_probe(struct i2c_client *client)
 				     "failed to register power supply\n");
 
 	i2c_set_clientdata(client, charger);
-	dev_info(&client->dev, "read-only charger telemetry, revision %u\n",
+
+	INIT_DELAYED_WORK(&charger->poll_work, mt6375_poll_work);
+	schedule_delayed_work(&charger->poll_work, 0);
+
+	dev_info(&client->dev, "charger telemetry and input limit policy, revision %u\n",
 		 (unsigned int)(id & GENMASK(3, 0)));
 	return 0;
 }
@@ -297,12 +431,13 @@ MODULE_DEVICE_TABLE(of, mt6375_of_match);
 
 static struct i2c_driver mt6375_driver = {
 	.driver = {
-		.name = "mt6375-charger-readonly",
+		.name = "mt6375-charger",
 		.of_match_table = mt6375_of_match,
 	},
 	.probe = mt6375_probe,
+	.remove = mt6375_remove,
 };
 module_i2c_driver(mt6375_driver);
 
-MODULE_DESCRIPTION("Read-only MediaTek MT6375 charger telemetry driver");
+MODULE_DESCRIPTION("MediaTek MT6375 charger telemetry and input-limit policy");
 MODULE_LICENSE("GPL");

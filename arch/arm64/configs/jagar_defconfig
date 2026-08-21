@@ -221,7 +221,7 @@ CONFIG_GPIO_SYSFS=y
 CONFIG_SYSCON_REBOOT_MODE=y
 CONFIG_MFD_SYSCON=y
 CONFIG_BATTERY_BQ27XXX=y
-CONFIG_CHARGER_MT6375_READONLY=y
+CONFIG_CHARGER_MT6375=y
 # Real battery telemetry while the BQ78Z100 NAKs at i2c-7 0x55: the PMIC's
 # FGADC measures pack current and integrates it in hardware. Bails out on its
 # own if the pack gauge ever reports present=1.
