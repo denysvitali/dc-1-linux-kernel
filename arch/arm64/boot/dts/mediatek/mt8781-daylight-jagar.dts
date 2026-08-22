@@ -1306,6 +1306,14 @@
 		 * writing.  8191 leaves headroom without clamping.
 		 */
 		touchscreen-max-pressure = <8191>;
+		/*
+		 * Active area of the panel (sharp_nt36523n descriptor: 160 x
+		 * 213 mm).  With the firmware envelope this yields exactly 100
+		 * units/mm on both axes, which libinput needs to accept the
+		 * pen.
+		 */
+		touchscreen-x-mm = <160>;
+		touchscreen-y-mm = <213>;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&wacom_pins>;

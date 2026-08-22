@@ -16,6 +16,7 @@
 #include <linux/slab.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
+#include <linux/property.h>
 #include <linux/regulator/consumer.h>
 #include <linux/unaligned.h>
 
@@ -181,6 +182,7 @@ static int wacom_i2c_probe(struct i2c_client *client)
 	struct gpio_desc *reset;
 	struct wacom_features features = { 0 };
 	unsigned int retries;
+	unsigned int val;
 	int error;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
@@ -270,6 +272,23 @@ static int wacom_i2c_probe(struct i2c_client *client)
 		dev_err(dev, "No X/Y limits from firmware or DT\n");
 		return -EINVAL;
 	}
+
+	/*
+	 * libinput refuses pen devices whose ABS resolution is zero, and the
+	 * feature report carries no physical geometry: take it from the board
+	 * like wacom_w9000 does.  Compute from the final maxima so a
+	 * firmware-reported envelope is divided, not the DT fallback.
+	 */
+	error = device_property_read_u32(dev, "touchscreen-x-mm", &val);
+	if (!error && val)
+		input_abs_set_res(input,
+				  wac_i2c->prop.swap_x_y ? ABS_Y : ABS_X,
+				  input_abs_get_max(input, ABS_X) / val);
+	error = device_property_read_u32(dev, "touchscreen-y-mm", &val);
+	if (!error && val)
+		input_abs_set_res(input,
+				  wac_i2c->prop.swap_x_y ? ABS_X : ABS_Y,
+				  input_abs_get_max(input, ABS_Y) / val);
 
 	input_set_drvdata(input, wac_i2c);
 
