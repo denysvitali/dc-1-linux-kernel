@@ -123,7 +123,7 @@ static const struct property_entry mt6375_tcpc_connector_props[] = {
 	PROPERTY_ENTRY_STRING("try-power-role", "sink"),
 	PROPERTY_ENTRY_STRING("data-role", "device"),
 	PROPERTY_ENTRY_U32_ARRAY("sink-pdos", mt6375_tcpc_sink_pdos),
-	PROPERTY_ENTRY_U32("op-sink-mw", 10000),
+	PROPERTY_ENTRY_U32("op-sink-microwatt", 10000000),
 	{ }
 };
 
