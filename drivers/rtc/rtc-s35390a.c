@@ -489,9 +489,22 @@ static irqreturn_t s35390a_irq(int irq, void *dev_id)
 	u8 status1;
 	int err;
 
+	/*
+	 * The INT2 flag is read-only in hardware and auto-clears on read, but
+	 * clearing it does NOT release the INT2 pin: while INT2AE stays set
+	 * and the alarm condition stands (an armed alarm whose time already
+	 * passed re-satisfies immediately), the pin keeps asserting.  Reading
+	 * STATUS1 alone therefore turns every alarm into an endless
+	 * level-triggered storm.  Per the datasheet the acknowledge is "read
+	 * the flag, then set INT2AE to 0"; userspace re-arms through
+	 * set_alarm().  Do both inside one critical section while IRQF_ONESHOT
+	 * still masks the line, so the pin is released before it can retrigger.
+	 */
 	mutex_lock(&s35390a->lock);
 	err = s35390a_get_reg(s35390a, S35390A_CMD_STATUS1, &status1,
 			      sizeof(status1));
+	if (err == 0)
+		err = s35390a_alarm_irq_enable_locked(s35390a, false);
 	mutex_unlock(&s35390a->lock);
 	if (err < 0) {
 		dev_err_ratelimited(&s35390a->client[0]->dev,
@@ -500,8 +513,16 @@ static irqreturn_t s35390a_irq(int irq, void *dev_id)
 	}
 
 	events = s35390a_status1_alarm_events(status1);
-	if (!events)
-		return IRQ_NONE;
+	if (!events) {
+		/*
+		 * Line asserted with no latched event: nothing to report, but
+		 * the disarm above is what releases it.  Report HANDLED so a
+		 * stuck or noisy line does not feed the spurious-IRQ counter.
+		 */
+		dev_warn_ratelimited(&s35390a->client[0]->dev,
+				     "alarm IRQ with INT2 flag clear; disarmed INT2\n");
+		return IRQ_HANDLED;
+	}
 
 	rtc_update_irq(s35390a->rtc, 1, events);
 
