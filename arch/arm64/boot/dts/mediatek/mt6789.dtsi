@@ -1972,6 +1972,12 @@
 					type = "passive";
 				};
 
+				ts1_0_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
+				};
+
 				trip-crit {
 					temperature = <113500>;
 					hysteresis = <2000>;
@@ -2003,6 +2009,12 @@
 					temperature = <85000>;
 					hysteresis = <2000>;
 					type = "passive";
+				};
+
+				ts1_1_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
 				};
 
 				trip-crit {
@@ -2038,6 +2050,12 @@
 					type = "passive";
 				};
 
+				ts1_2_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
+				};
+
 				trip-crit {
 					temperature = <113500>;
 					hysteresis = <2000>;
@@ -2069,6 +2087,12 @@
 					temperature = <85000>;
 					hysteresis = <2000>;
 					type = "passive";
+				};
+
+				ts1_3_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
 				};
 
 				trip-crit {
@@ -2104,6 +2128,12 @@
 					type = "passive";
 				};
 
+				ts2_0_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
+				};
+
 				trip-crit {
 					temperature = <113500>;
 					hysteresis = <2000>;
@@ -2131,6 +2161,12 @@
 					temperature = <85000>;
 					hysteresis = <2000>;
 					type = "passive";
+				};
+
+				ts2_1_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
 				};
 
 				trip-crit {
@@ -2162,6 +2198,12 @@
 					type = "passive";
 				};
 
+				ts2_2_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
+				};
+
 				trip-crit {
 					temperature = <113500>;
 					hysteresis = <2000>;
@@ -2189,6 +2231,12 @@
 					temperature = <85000>;
 					hysteresis = <2000>;
 					type = "passive";
+				};
+
+				ts2_3_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
 				};
 
 				trip-crit {
@@ -2220,6 +2268,12 @@
 					type = "passive";
 				};
 
+				ts3_0_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
+				};
+
 				trip-crit {
 					temperature = <113500>;
 					hysteresis = <2000>;
@@ -2242,6 +2296,12 @@
 			thermal-sensors = <&lvts_ap MT6789_TS3_1>;
 
 			trips {
+				ts3_1_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
+				};
+
 				trip-crit {
 					temperature = <113500>;
 					hysteresis = <2000>;
@@ -2256,6 +2316,12 @@
 			thermal-sensors = <&lvts_ap MT6789_TS3_2>;
 
 			trips {
+				ts3_2_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
+				};
+
 				trip-crit {
 					temperature = <113500>;
 					hysteresis = <2000>;
@@ -2270,6 +2336,12 @@
 			thermal-sensors = <&lvts_ap MT6789_TS3_3>;
 
 			trips {
+				ts3_3_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
+				};
+
 				trip-crit {
 					temperature = <113500>;
 					hysteresis = <2000>;
@@ -2284,6 +2356,12 @@
 			thermal-sensors = <&lvts_ap MT6789_TS4_0>;
 
 			trips {
+				ts4_0_hot: trip-hot {
+					temperature = <105000>;
+					hysteresis = <8000>;
+					type = "hot";
+				};
+
 				trip-crit {
 					temperature = <113500>;
 					hysteresis = <2000>;

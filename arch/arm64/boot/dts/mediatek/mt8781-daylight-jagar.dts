@@ -688,19 +688,50 @@
 
 	thermal-zones {
 		/*
-		 * polling-delay 0 on both, matching stock: these are read on
-		 * demand and carry no trips, so nothing throttles off them.
+		 * generic-adc-thermal registers a polled zone with no IRQ
+		 * path, so polling-delay must be nonzero for any trip to
+		 * ever be evaluated.  Poll both every 2 s: hot 85 C raises a
+		 * userspace notification, critical 110 C powers the device
+		 * off.  Stock leaves these zones unpolled and tripless.
 		 */
 		ap_ntc {
-			polling-delay = <0>;
-			polling-delay-passive = <0>;
+			polling-delay = <2000>;
+			polling-delay-passive = <2000>;
 			thermal-sensors = <&thermal_ntc1>;
+
+			trips {
+				ap_ntc_hot: trip-hot {
+					temperature = <85000>;
+					hysteresis = <5000>;
+					type = "hot";
+				};
+
+				ap_ntc_crit: trip-crit {
+					temperature = <110000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
 		};
 
 		ltepa_ntc {
-			polling-delay = <0>;
-			polling-delay-passive = <0>;
+			polling-delay = <2000>;
+			polling-delay-passive = <2000>;
 			thermal-sensors = <&thermal_ntc2>;
+
+			trips {
+				ltepa_ntc_hot: trip-hot {
+					temperature = <85000>;
+					hysteresis = <5000>;
+					type = "hot";
+				};
+
+				ltepa_ntc_crit: trip-crit {
+					temperature = <110000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
 		};
 	};
 
