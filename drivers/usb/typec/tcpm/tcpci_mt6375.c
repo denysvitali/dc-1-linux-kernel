@@ -31,8 +31,9 @@
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/string.h>
-#include <linux/workqueue.h>
+#include <linux/usb/pd.h>
 #include <linux/usb/tcpci.h>
+#include <linux/workqueue.h>
 
 /*
  * Vendor registers behind the standard TCPCI map; offsets and values from
@@ -112,9 +113,9 @@ static const struct reg_sequence mt6375_tcpc_init_regs[] = {
  * input-voltage steering the policy does not implement.
  */
 static const u32 mt6375_tcpc_sink_pdos[] = {
-	0x0684b000,	/* Fixed 5 V, 3 A */
-	0x0b84b000,	/* Fixed 9 V, 3 A */
-	0x0f04b000,	/* Fixed 12 V, 3 A */
+	PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM),
+	PDO_FIXED(9000, 3000, 0),
+	PDO_FIXED(12000, 3000, 0),
 };
 
 static const struct property_entry mt6375_tcpc_connector_props[] = {
