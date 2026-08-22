@@ -257,10 +257,15 @@ jobs:
             echo "::error::MT6789 live GPU overlay loader missing from modules installation"
             exit 1
           }
+          # The GPU graduated from probe-only to the shipped board DT
+          # (981870b931bb1) once the mainline-DT boot chain was proven on
+          # hardware; without the node GNOME renders on llvmpipe. The
+          # assertion now guards against silently LOSING the node from the
+          # shipped DTB rather than against gaining it.
           normal_status=$(fdtget -t s "$dtb" /soc/gpu@13000000 status)
           probe_status=$(fdtget -t s "$probe_dtb" /soc/gpu@13000000 status)
-          [ "$normal_status" = disabled ] || {
-            echo "::error::normal jagar DTB unexpectedly enables the GPU"
+          [ "$normal_status" = okay ] || {
+            echo "::error::normal jagar DTB does not enable the GPU"
             exit 1
           }
           [ "$probe_status" = okay ] || {
