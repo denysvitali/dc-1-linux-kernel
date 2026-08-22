@@ -139,6 +139,26 @@ initialize:
 			return -EIO;
 	}
 
+	/*
+	 * The INT-pin output modes are battery-backed: a configuration left
+	 * by whatever ran before us -- an armed alarm, a per-minute edge,
+	 * a user-frequency output -- survives into this boot with the INT
+	 * pin asserting while we know nothing about why.  A level-triggered
+	 * alarm IRQ then storms at handler rate from probe onward (measured
+	 * at ~2 kHz / 50% duty on hardware).  The RESET above only runs on
+	 * POC/BLD, so it does not cover this; clear the modes explicitly.
+	 *
+	 * Linux owns both INT pins from here on -- userspace re-arms
+	 * anything it wants through the RTC core.  Write all-zero rather
+	 * than only the mode bits this driver models: parts in the field
+	 * differ in which STATUS2 bit gates which output, and zero disables
+	 * every one of them (plus TEST, which the datasheet says must be 0).
+	 */
+	buf = S35390A_INT2_MODE_NOINTR;
+	ret = s35390a_set_reg(s35390a, S35390A_CMD_STATUS2, &buf, 1);
+	if (ret < 0)
+		return ret;
+
 	return 1;
 }
 
