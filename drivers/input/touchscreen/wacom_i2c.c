@@ -7,13 +7,24 @@
  */
 
 #include <linux/bits.h>
+#include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/input.h>
+#include <linux/input/touchscreen.h>
 #include <linux/i2c.h>
 #include <linux/slab.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
+#include <linux/regulator/consumer.h>
 #include <linux/unaligned.h>
+
+/* Time to wait between feature query attempts */
+#define WACOM_QUERY_RETRY_MS	100
+#define WACOM_QUERY_RETRIES	10
+
+/* Pressure limit assumed when neither firmware nor DT provides one */
+#define WACOM_DEFAULT_PRESSURE_MAX	1023
 
 /* Bitmasks (for data[3]) */
 #define WACOM_TIP_SWITCH	BIT(0)
@@ -52,6 +63,7 @@ struct wacom_i2c {
 	u8 data[WACOM_QUERY_SIZE];
 	bool prox;
 	int tool;
+	struct touchscreen_properties prop;
 };
 
 static int wacom_query_device(struct i2c_client *client,
@@ -135,8 +147,7 @@ static irqreturn_t wacom_i2c_irq(int irq, void *dev_id)
 	input_report_key(input, wac_i2c->tool, wac_i2c->prox);
 	input_report_key(input, BTN_STYLUS, f1);
 	input_report_key(input, BTN_STYLUS2, f2);
-	input_report_abs(input, ABS_X, x);
-	input_report_abs(input, ABS_Y, y);
+	touchscreen_report_pos(input, &wac_i2c->prop, x, y, false);
 	input_report_abs(input, ABS_PRESSURE, pressure);
 	input_sync(input);
 
@@ -167,7 +178,9 @@ static int wacom_i2c_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	struct wacom_i2c *wac_i2c;
 	struct input_dev *input;
+	struct gpio_desc *reset;
 	struct wacom_features features = { 0 };
+	unsigned int retries;
 	int error;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
@@ -175,9 +188,36 @@ static int wacom_i2c_probe(struct i2c_client *client)
 		return -EIO;
 	}
 
-	error = wacom_query_device(client, &features);
-	if (error)
-		return error;
+	/* Hold the controller in reset while its supply settles. */
+	reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(reset))
+		return dev_err_probe(dev, PTR_ERR(reset),
+				     "Failed to request reset GPIO\n");
+
+	error = devm_regulator_get_enable_optional(dev, "vdd");
+	if (error && error != -ENODEV)
+		return dev_err_probe(dev, error,
+				     "Failed to enable vdd supply\n");
+
+	usleep_range(10000, 20000);
+	gpiod_set_value_cansleep(reset, 0);
+
+	/*
+	 * Some firmwares take a while after reset release before they answer
+	 * the feature query, and some do not implement it at all. Poll for a
+	 * while, then fall back to the limits described in the device tree.
+	 */
+	for (retries = 0; retries < WACOM_QUERY_RETRIES; retries++) {
+		error = wacom_query_device(client, &features);
+		if (!error && features.x_max && features.y_max)
+			break;
+		msleep(WACOM_QUERY_RETRY_MS);
+	}
+
+	if (error || !features.x_max || !features.y_max)
+		dev_warn(dev,
+			 "Feature query failed (%d), using DT limits\n",
+			 error);
 
 	wac_i2c = devm_kzalloc(dev, sizeof(*wac_i2c), GFP_KERNEL);
 	if (!wac_i2c)
@@ -206,10 +246,30 @@ static int wacom_i2c_probe(struct i2c_client *client)
 	__set_bit(BTN_STYLUS2, input->keybit);
 	__set_bit(BTN_TOUCH, input->keybit);
 
+	if (!features.pressure_max)
+		features.pressure_max = WACOM_DEFAULT_PRESSURE_MAX;
+
 	input_set_abs_params(input, ABS_X, 0, features.x_max, 0, 0);
 	input_set_abs_params(input, ABS_Y, 0, features.y_max, 0, 0);
 	input_set_abs_params(input, ABS_PRESSURE,
 			     0, features.pressure_max, 0, 0);
+
+	touchscreen_parse_properties(input, false, &wac_i2c->prop);
+
+	/*
+	 * Where the feature report carried real axis limits those are the
+	 * part's own geometry and outrank the board's fallback numbers.
+	 */
+	if (features.x_max)
+		input_abs_set_max(input, ABS_X, features.x_max);
+	if (features.y_max)
+		input_abs_set_max(input, ABS_Y, features.y_max);
+
+	if (!input_abs_get_max(input, ABS_X) ||
+	    !input_abs_get_max(input, ABS_Y)) {
+		dev_err(dev, "No X/Y limits from firmware or DT\n");
+		return -EINVAL;
+	}
 
 	input_set_drvdata(input, wac_i2c);
 
@@ -220,7 +280,7 @@ static int wacom_i2c_probe(struct i2c_client *client)
 		return error;
 	}
 
-	/* Disable the IRQ, we'll enable it in wac_i2c_open() */
+	/* Disable the IRQ, we'll enable it in wacom_i2c_open() */
 	disable_irq(client->irq);
 
 	error = input_register_device(wac_i2c->input);
@@ -258,10 +318,17 @@ static const struct i2c_device_id wacom_i2c_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, wacom_i2c_id);
 
+static const struct of_device_id wacom_i2c_of_match[] = {
+	{ .compatible = "wacom,wacom-i2c" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, wacom_i2c_of_match);
+
 static struct i2c_driver wacom_i2c_driver = {
 	.driver	= {
 		.name	= "wacom_i2c",
 		.pm	= pm_sleep_ptr(&wacom_i2c_pm),
+		.of_match_table = wacom_i2c_of_match,
 	},
 
 	.probe		= wacom_i2c_probe,
