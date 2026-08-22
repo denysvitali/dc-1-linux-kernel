@@ -474,11 +474,11 @@
 
 	/*
 	 * The digitiser's second rail.  The factory names it vddl-supply on
-	 * the device node, but wacom,w9007a-lt03.yaml is
-	 * unevaluatedProperties: false and has no vddl-supply, so it cannot be
-	 * referenced from there.  regulator-always-on is what keeps it up
-	 * instead; without it nothing would ever enable this rail and the pen
-	 * would never answer.  startup-delay-us is the factory's.
+	 * the device node; the wacom,wacom-i2c schema only carries vdd-supply,
+	 * so it cannot be referenced from the device node.  regulator-always-on
+	 * is what keeps it up instead; without it nothing would ever enable
+	 * this rail and the pen would never answer.  startup-delay-us is the
+	 * factory's.
 	 */
 	reg_wacom_3v3: regulator-wacom-3v3 {
 		compatible = "regulator-fixed";
@@ -1077,12 +1077,15 @@
  * and the merged factory chain.  Three claims that stood in this comment
  * before are RETRACTED, each refuted by re-reading this tree:
  *
- *   emr,wacom_i2c   "no mainline driver" was WRONG.  drivers/input/
- *                   touchscreen/wacom_w9000.c (upstream, "Input: Add support
- *                   for Wacom W9000-series penabled touchscreens") binds
- *                   wacom,w9002 / w9007a-lt03 / w9007a-v1 and has a schema at
- *                   Documentation/devicetree/bindings/input/touchscreen/
- *                   wacom,w9007a-lt03.yaml.  Declared on i2c9 below.
+ *   emr,wacom_i2c   "no mainline driver" was WRONG twice over.  There are
+ *                   TWO Wacom touchscreen drivers upstream: wacom_w9000.c
+ *                   ("W9000-series penabled touchscreens", binds
+ *                   wacom,w9002 / w9007a-lt03 / w9007a-v1) and the older
+ *                   wacom_i2c.c (EMR over I2C, register/19-byte-frame
+ *                   protocol).  Hardware bring-up showed this part streams
+ *                   wacom_i2c.c frames and ignores the w9000 handshake, so
+ *                   it is declared on i2c9 below as wacom,wacom-i2c with an
+ *                   of_match_table added to wacom_i2c.c for the purpose.
  *   tps65132        the "only consumer would be the panel node we cannot write
  *                   yet" no longer blocks it: the regulators are declared
  *                   standalone with regulator-boot-on, exactly as the factory
@@ -1269,37 +1272,40 @@
 	clock-frequency = <400000>;
 
 	/*
-	 * The pen digitiser.  The old claim in this file that "emr,wacom_i2c"
-	 * has no mainline driver is retracted: drivers/input/touchscreen/
-	 * wacom_w9000.c binds wacom,w9002 / wacom,w9007a-lt03 /
-	 * wacom,w9007a-v1 with a schema at Documentation/devicetree/bindings/
-	 * input/touchscreen/wacom,w9007a-lt03.yaml.
+	 * The pen digitiser.  Live bring-up on hardware (2026-08-22) settled
+	 * which mainline driver this part speaks: it ACKs every read and
+	 * streams plain 19-byte frames whose layout matches
+	 * drivers/input/touchscreen/wacom_i2c.c exactly -- flags in data[3]
+	 * (tip/barrel/eraser/proximity bits), X at [4:5], Y at [6:7],
+	 * pressure at [8:9], little-endian.  The Wacom-authored driver was
+	 * chosen over wacom_w9000.c, whose CMD_QUERY 0x2a handshake this
+	 * firmware ignores completely; wacom_i2c.c gained an of_match_table,
+	 * optional reset/vdd handling and a non-fatal feature query for this.
 	 *
-	 * WHICH of the three variants this panel is has NOT been established.
-	 * The factory compatible "emr,wacom_i2c" does not say, and the parts
-	 * differ in firmware behaviour rather than in the DT.  w9007a-lt03 is
-	 * the starting point because it is the variant the binding is named
-	 * for; if the pen enumerates but reports nonsense, try wacom,w9007a-v1
-	 * and then wacom,w9002 before suspecting anything else.
-	 * [unverified -- no hardware has seen this node]
-	 *
-	 * The schema is unevaluatedProperties: false and allows vdd-supply but
-	 * NOT vddl-supply, so only one of the part's two rails can be named
-	 * here.  vdd-supply takes the 1V8 rail, which is what the factory's
-	 * vdd-supply points at; the 3V3 rail the factory calls vddl is
-	 * declared regulator-always-on instead, since nothing else can turn it
-	 * on.  post-power-on-delay-ms = 110 in the factory node likewise has
-	 * no schema counterpart and is dropped -- the 3 ms startup delay on
-	 * the 3V3 regulator is the only sequencing left.
+	 * The feature query (report 3) IS answered once the reset line is
+	 * released properly: the part reports X 16008 / Y 21344 and a
+	 * firmware version byte, bracketing a passive capture envelope of
+	 * X 815..16008 / Y 14833..20868.  The driver takes the firmware's
+	 * word over the size fallbacks below whenever the query answers;
+	 * they exist for firmwares that never answer it.
 	 */
 	digitizer@9 {
-		compatible = "wacom,w9007a-lt03";
+		compatible = "wacom,wacom-i2c";
 		reg = <0x09>;
 
 		interrupt-parent = <&pio>;
 		interrupts = <9 IRQ_TYPE_LEVEL_LOW>;
 		reset-gpios = <&pio 88 GPIO_ACTIVE_LOW>;
 		vdd-supply = <&reg_wacom_1v8>;
+
+		touchscreen-size-x = <16320>;
+		touchscreen-size-y = <21120>;
+		/*
+		 * The firmware feature report answers 0 for the pressure
+		 * maximum, but a live capture saw up to 2849 during ordinary
+		 * writing.  8191 leaves headroom without clamping.
+		 */
+		touchscreen-max-pressure = <8191>;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&wacom_pins>;
@@ -2109,16 +2115,21 @@
 	};
 
 	/*
-	 * Digitiser reset and interrupt, transcribed from the stock
+	 * Digitiser interrupt and reset, transcribed from the stock
 	 * wacom_default state (pins_reset: pin 88 func 0, output-low;
 	 * pins_irq: pin 9 func 0, input-enable, bias-disable).  The bias is
 	 * deliberately left disabled to match stock -- this line is externally
 	 * biased.
+	 *
+	 * pins_reset deliberately drops the stock output-low: that level
+	 * belongs to whoever owns reset-gpios, and baking a permanent low into
+	 * the pinctrl default held the part in reset for its whole life while
+	 * the gpiod consumer's own levels lost the arbitration.  The subnode
+	 * stays for the GPIO mux alone; wacom_i2c.c drives the line itself.
 	 */
 	wacom_pins: wacom-pins {
 		pins-reset {
 			pinmux = <PINMUX_GPIO88__FUNC_GPIO88>;
-			output-low;
 		};
 
 		pins-irq {
