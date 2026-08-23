@@ -64,9 +64,28 @@ struct wacom_i2c {
 	u8 data[WACOM_QUERY_SIZE];
 	bool prox;
 	bool no_barrel_switch2;
+	bool have_window;
+	u32 x_min, x_max, y_min, y_max;
+	u32 x_full, y_full;
 	int tool;
 	struct touchscreen_properties prop;
 };
+
+/*
+ * Map a raw coordinate from the sensor's full envelope onto the reported
+ * range, squeezing everything outside [lo, hi] onto the edges.  Used for
+ * panels whose sensor keeps reporting past the visible glass.
+ */
+static u32 wacom_i2c_remap(unsigned int v, u32 lo, u32 hi, u32 full)
+{
+	if (hi <= lo)
+		return v;
+	if (v <= lo)
+		return 0;
+	if (v >= hi)
+		return full;
+	return ((u64)(v - lo) * full) / (hi - lo);
+}
 
 static int wacom_query_device(struct i2c_client *client,
 			      struct wacom_features *features)
@@ -148,7 +167,14 @@ static irqreturn_t wacom_i2c_irq(int irq, void *dev_id)
 	input_report_key(input, BTN_TOUCH, tsw || ers);
 	input_report_key(input, wac_i2c->tool, wac_i2c->prox);
 	input_report_key(input, BTN_STYLUS, f1);
-	input_report_key(input, BTN_STYLUS2, f2);
+	if (!wac_i2c->no_barrel_switch2)
+		input_report_key(input, BTN_STYLUS2, f2);
+	if (wac_i2c->have_window) {
+		x = wacom_i2c_remap(x, wac_i2c->x_min, wac_i2c->x_max,
+				    wac_i2c->x_full);
+		y = wacom_i2c_remap(y, wac_i2c->y_min, wac_i2c->y_max,
+				    wac_i2c->y_full);
+	}
 	touchscreen_report_pos(input, &wac_i2c->prop, x, y, false);
 	input_report_abs(input, ABS_PRESSURE, pressure);
 	input_sync(input);
@@ -293,6 +319,49 @@ static int wacom_i2c_probe(struct i2c_client *client)
 		input_abs_set_res(input,
 				  wac_i2c->prop.swap_x_y ? ABS_X : ABS_Y,
 				  input_abs_get_max(input, ABS_Y) / val);
+
+	/*
+	 * Optional visible-area window, in hardware coordinates (i.e. as the
+	 * frames report them, before any touchscreen-inverted-* mapping).
+	 * Some panels report past the visible glass on every side; remapping
+	 * here gives every userspace stack the visible area exactly, which
+	 * calibration matrices do not reliably achieve for tablet devices.
+	 */
+	error = device_property_read_u32(dev, "wacom,visible-x-min", &val);
+	if (!error) {
+		wac_i2c->x_min = val;
+		wac_i2c->have_window = true;
+	}
+	error = device_property_read_u32(dev, "wacom,visible-x-max", &val);
+	if (!error)
+		wac_i2c->x_max = val;
+	else
+		wac_i2c->have_window = false;
+	error = device_property_read_u32(dev, "wacom,visible-y-min", &val);
+	if (!error)
+		wac_i2c->y_min = val;
+	else
+		wac_i2c->have_window = false;
+	error = device_property_read_u32(dev, "wacom,visible-y-max", &val);
+	if (!error)
+		wac_i2c->y_max = val;
+	else
+		wac_i2c->have_window = false;
+
+	wac_i2c->x_full = input_abs_get_max(input, ABS_X);
+	wac_i2c->y_full = input_abs_get_max(input, ABS_Y);
+
+	if (wac_i2c->have_window &&
+	    (wac_i2c->x_min >= wac_i2c->x_max ||
+	     wac_i2c->y_min >= wac_i2c->y_max)) {
+		dev_warn(dev, "Invalid visible window, ignoring\n");
+		wac_i2c->have_window = false;
+	}
+	if (wac_i2c->have_window)
+		dev_dbg(dev, "visible window x %u..%u y %u..%u of %u/%u\n",
+			wac_i2c->x_min, wac_i2c->x_max,
+			wac_i2c->y_min, wac_i2c->y_max,
+			wac_i2c->x_full, wac_i2c->y_full);
 
 	input_set_drvdata(input, wac_i2c);
 

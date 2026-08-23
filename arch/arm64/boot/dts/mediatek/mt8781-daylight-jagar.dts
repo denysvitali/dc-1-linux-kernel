@@ -1326,6 +1326,24 @@
 		touchscreen-inverted-x;
 		touchscreen-inverted-y;
 		/*
+		 * Measured on hardware 2026-08-23 by five-target
+		 * correspondence taps (libinput debug-events capture,
+		 * outlier-rejected least squares; max residual ~2 mm of
+		 * hand-placement scatter): the sensor reports ~1.5-2 mm past
+		 * the visible glass on every side.  Values here are the
+		 * fitted visible envelope converted into hardware frame
+		 * coordinates (pre-inversion), where the glass-visible range
+		 * is x 0..15707 / y 312..21344 of the full 16008x21344
+		 * sensor.  The driver remaps this window onto the full
+		 * reported range so every userspace stack gets exactly the
+		 * visible area; a LIBINPUT_CALIBRATION_MATRIX was tried first
+		 * but is not applied to tablet-class devices downstream.
+		 */
+		wacom,visible-x-min = <0>;
+		wacom,visible-x-max = <15707>;
+		wacom,visible-y-min = <312>;
+		wacom,visible-y-max = <21344>;
+		/*
 		 * Measured on hardware 2026-08-23: this firmware holds
 		 * data[3] bit 4 set on every in-proximity frame and never
 		 * toggles it, while the real barrel switch (bit 1) works.

@@ -46,6 +46,30 @@ properties:
       frame.  When present the driver neither reports BTN_STYLUS2 nor
       advertises the capability.
 
+  wacom,visible-x-min:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: See wacom,visible-y-max.
+
+  wacom,visible-x-max:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: See wacom,visible-y-max.
+
+  wacom,visible-y-min:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: See wacom,visible-y-max.
+
+  wacom,visible-y-max:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: |
+      Visible-area window in hardware frame coordinates (before any
+      touchscreen-inverted-* mapping is applied).  Some panels keep
+      reporting a millimetre or two past the visible glass on every
+      side; when all four values are given the driver remaps the window
+      onto the full reported axis range so userspace receives exactly
+      the visible area.  Coordinates outside the window clamp to the
+      edges.  All four properties are required for the remap to apply;
+      otherwise it is ignored.
+
 required:
   - compatible
   - reg
