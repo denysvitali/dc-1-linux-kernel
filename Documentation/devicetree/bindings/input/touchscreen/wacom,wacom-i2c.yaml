@@ -38,6 +38,14 @@ properties:
   reset-gpios:
     maxItems: 1
 
+  wacom,no-barrel-switch2:
+    type: boolean
+    description:
+      The second barrel switch (data[3] bit 4) is not usable on this
+      board: the firmware holds the bit set for every in-proximity
+      frame.  When present the driver neither reports BTN_STYLUS2 nor
+      advertises the capability.
+
 required:
   - compatible
   - reg

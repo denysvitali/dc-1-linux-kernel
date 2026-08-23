@@ -1314,6 +1314,22 @@
 		 */
 		touchscreen-x-mm = <160>;
 		touchscreen-y-mm = <213>;
+		/*
+		 * Measured on hardware 2026-08-23: the part reports in raw
+		 * panel-scanout space -- like the scanout itself, 180 degrees
+		 * from the glass, which the display side already compensates.
+		 * Flip both axes so pen coordinates land where things render.
+		 */
+		touchscreen-inverted-x;
+		touchscreen-inverted-y;
+		/*
+		 * Measured on hardware 2026-08-23: this firmware holds
+		 * data[3] bit 4 set on every in-proximity frame and never
+		 * toggles it, while the real barrel switch (bit 1) works.
+		 * Reporting it as BTN_STYLUS2 made every stroke look like a
+		 * held second button to userspace (right-drag: no ink).
+		 */
+		wacom,no-barrel-switch2;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&wacom_pins>;

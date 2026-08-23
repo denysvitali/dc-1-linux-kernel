@@ -63,6 +63,7 @@ struct wacom_i2c {
 	struct input_dev *input;
 	u8 data[WACOM_QUERY_SIZE];
 	bool prox;
+	bool no_barrel_switch2;
 	int tool;
 	struct touchscreen_properties prop;
 };
@@ -225,6 +226,8 @@ static int wacom_i2c_probe(struct i2c_client *client)
 	if (!wac_i2c)
 		return -ENOMEM;
 
+	wac_i2c->no_barrel_switch2 =
+		device_property_read_bool(dev, "wacom,no-barrel-switch2");
 	wac_i2c->client = client;
 
 	input = devm_input_allocate_device(dev);
@@ -245,7 +248,8 @@ static int wacom_i2c_probe(struct i2c_client *client)
 	__set_bit(BTN_TOOL_PEN, input->keybit);
 	__set_bit(BTN_TOOL_RUBBER, input->keybit);
 	__set_bit(BTN_STYLUS, input->keybit);
-	__set_bit(BTN_STYLUS2, input->keybit);
+	if (!wac_i2c->no_barrel_switch2)
+		__set_bit(BTN_STYLUS2, input->keybit);
 	__set_bit(BTN_TOUCH, input->keybit);
 
 	if (!features.pressure_max)
