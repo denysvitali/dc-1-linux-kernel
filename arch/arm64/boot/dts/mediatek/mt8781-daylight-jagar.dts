@@ -1302,10 +1302,13 @@
 		touchscreen-size-y = <21120>;
 		/*
 		 * The firmware feature report answers 0 for the pressure
-		 * maximum, but a live capture saw up to 2849 during ordinary
-		 * writing.  8191 leaves headroom without clamping.
+		 * maximum.  Corner-tap capture on hardware 2026-08-23 pinned
+		 * repeatedly at exactly 4095 and never above: the part is
+		 * 12-bit and saturates there.  The 8191 declared earlier made
+		 * libinput normalise every full-pressure stroke to ~0.5, which
+		 * reads as a uselessly light pen.
 		 */
-		touchscreen-max-pressure = <8191>;
+		touchscreen-max-pressure = <4095>;
 		/*
 		 * Active area of the panel (sharp_nt36523n descriptor: 160 x
 		 * 213 mm).  With the firmware envelope this yields exactly 100
