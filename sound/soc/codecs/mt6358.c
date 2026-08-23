@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
+#include <linux/minmax.h>
 #include <linux/sched.h>
 #include <linux/mfd/mt6397/core.h>
 #include <linux/regulator/consumer.h>
@@ -316,6 +317,69 @@ static void headset_volume_ramp(struct mt6358_priv *priv, int from, int to)
 	}
 }
 
+/*
+ * The playback PGA registers are volatile: every DAPM power-down sequence
+ * ramps ZCD_CON1/CON2/CON3 down to -40 dB and leaves them muted, so once a
+ * stream stops the raw register no longer describes the gain userspace asked
+ * for. Reading the register back therefore reports a mute that no user chose,
+ * and anything that snapshots mixer state while the path is idle (alsactl
+ * store on shutdown, for one) persists it -- the next restore then pushes that
+ * value in as a real request and the speakers come up ~18 dB down.
+ *
+ * The requested gain survives in priv->ana_gain[], which is what the next
+ * power-up ramps back to, so report that instead of the register.
+ */
+static int mt6358_get_volsw(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct mt6358_priv *priv = snd_soc_component_get_drvdata(component);
+	struct soc_mixer_control *mc =
+			(struct soc_mixer_control *)kcontrol->private_value;
+	int max = mc->max;
+	int lgain, rgain, ret;
+	bool stereo = true;
+
+	ret = snd_soc_get_volsw(kcontrol, ucontrol);
+	if (ret < 0)
+		return ret;
+
+	switch (mc->reg) {
+	case MT6358_ZCD_CON2:
+		lgain = priv->ana_gain[AUDIO_ANALOG_VOLUME_HPOUTL];
+		rgain = priv->ana_gain[AUDIO_ANALOG_VOLUME_HPOUTR];
+		break;
+	case MT6358_ZCD_CON1:
+		lgain = priv->ana_gain[AUDIO_ANALOG_VOLUME_LINEOUTL];
+		rgain = priv->ana_gain[AUDIO_ANALOG_VOLUME_LINEOUTR];
+		break;
+	case MT6358_ZCD_CON3:
+		lgain = priv->ana_gain[AUDIO_ANALOG_VOLUME_HSOUTL];
+		rgain = lgain;
+		stereo = false;
+		break;
+	default:
+		return ret;
+	}
+
+	/*
+	 * These three controls are declared inverted, so a shadow index of 0
+	 * (+8 dB, the reset gain) presents as max. Clamp either way: the shadow
+	 * can hold the -40 dB mute index, which is outside the range the
+	 * control exposes.
+	 */
+	if (mc->invert) {
+		lgain = max - lgain;
+		rgain = max - rgain;
+	}
+
+	ucontrol->value.integer.value[0] = clamp(lgain, 0, max);
+	if (stereo)
+		ucontrol->value.integer.value[1] = clamp(rgain, 0, max);
+
+	return ret;
+}
+
 static int mt6358_put_volsw(struct snd_kcontrol *kcontrol,
 			    struct snd_ctl_elem_value *ucontrol)
 {
@@ -511,13 +575,13 @@ static const struct snd_kcontrol_new mt6358_snd_controls[] = {
 	/* dl pga gain */
 	SOC_DOUBLE_EXT_TLV("Headphone Volume",
 			   MT6358_ZCD_CON2, 0, 7, 0x12, 1,
-			   snd_soc_get_volsw, mt6358_put_volsw, playback_tlv),
+			   mt6358_get_volsw, mt6358_put_volsw, playback_tlv),
 	SOC_DOUBLE_EXT_TLV("Lineout Volume",
 			   MT6358_ZCD_CON1, 0, 7, 0x12, 1,
-			   snd_soc_get_volsw, mt6358_put_volsw, playback_tlv),
+			   mt6358_get_volsw, mt6358_put_volsw, playback_tlv),
 	SOC_SINGLE_EXT_TLV("Handset Volume",
 			   MT6358_ZCD_CON3, 0, 0x12, 1,
-			   snd_soc_get_volsw, mt6358_put_volsw, playback_tlv),
+			   mt6358_get_volsw, mt6358_put_volsw, playback_tlv),
 	/* ul pga gain */
 	SOC_DOUBLE_R_EXT_TLV("PGA Volume",
 			     MT6358_AUDENC_ANA_CON0, MT6358_AUDENC_ANA_CON1,
