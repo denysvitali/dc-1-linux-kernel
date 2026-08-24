@@ -64,6 +64,21 @@ void mtk_ccorr_config(struct device *dev, unsigned int w,
 		      DISP_CCORR_SIZE);
 	mtk_ddp_write(cmdq_pkt, CCORR_ENGINE_EN, &ccorr->cmdq_reg, ccorr->regs,
 		      DISP_CCORR_CFG);
+
+	if (of_device_is_compatible(dev->of_node,
+				    "mediatek,mt6789-disp-ccorr")) {
+		/* Y = 0.2126 R + 0.7152 G + 0.0722 B; each row sums to 2048. */
+		mtk_ddp_write(cmdq_pkt, 0x01b305b9, &ccorr->cmdq_reg,
+			      ccorr->regs, DISP_CCORR_COEF_0);
+		mtk_ddp_write(cmdq_pkt, 0x009401b3, &ccorr->cmdq_reg,
+			      ccorr->regs, DISP_CCORR_COEF_1);
+		mtk_ddp_write(cmdq_pkt, 0x05b90094, &ccorr->cmdq_reg,
+			      ccorr->regs, DISP_CCORR_COEF_2);
+		mtk_ddp_write(cmdq_pkt, 0x01b305b9, &ccorr->cmdq_reg,
+			      ccorr->regs, DISP_CCORR_COEF_3);
+		mtk_ddp_write(cmdq_pkt, 0x00940000, &ccorr->cmdq_reg,
+			      ccorr->regs, DISP_CCORR_COEF_4);
+	}
 }
 
 void mtk_ccorr_start(struct device *dev)
@@ -178,6 +193,8 @@ static const struct mtk_disp_ccorr_data mt8192_ccorr_driver_data = {
 };
 
 static const struct of_device_id mtk_disp_ccorr_driver_dt_match[] = {
+	{ .compatible = "mediatek,mt6789-disp-ccorr",
+	  .data = &mt8192_ccorr_driver_data},
 	{ .compatible = "mediatek,mt8183-disp-ccorr",
 	  .data = &mt8183_ccorr_driver_data},
 	{ .compatible = "mediatek,mt8192-disp-ccorr",

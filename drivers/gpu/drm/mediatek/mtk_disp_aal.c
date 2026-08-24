@@ -76,6 +76,10 @@ void mtk_aal_config(struct device *dev, unsigned int w,
 
 	mtk_ddp_write(cmdq_pkt, sz, &aal->cmdq_reg, aal->regs, DISP_AAL_SIZE);
 	mtk_ddp_write(cmdq_pkt, sz, &aal->cmdq_reg, aal->regs, DISP_AAL_OUTPUT_SIZE);
+	if (of_device_is_compatible(dev->of_node,
+				    "mediatek,mt6789-disp-aal"))
+		mtk_ddp_write(cmdq_pkt, AAL_RELAY_MODE, &aal->cmdq_reg,
+			      aal->regs, DISP_AAL_CFG);
 }
 
 /**

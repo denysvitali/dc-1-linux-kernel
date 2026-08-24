@@ -141,9 +141,16 @@ static unsigned int mt8167_mtk_ddp_main[] = {
  * the path -- so it is deliberately omitted here.
  */
 static const unsigned int mt6789_mtk_ddp_main[] = {
-	/* Match the vendor DRM_BYPASS_PQ path for deterministic bring-up. */
+	/* Production MP path: preserve grayscale CCORR and feed DSC from DITHER. */
 	DDP_COMPONENT_OVL0,
 	DDP_COMPONENT_RDMA0,
+	DDP_COMPONENT_COLOR0,
+	DDP_COMPONENT_CCORR,
+	DDP_COMPONENT_AAL0,
+	DDP_COMPONENT_GAMMA,
+	DDP_COMPONENT_POSTMASK0,
+	DDP_COMPONENT_DITHER0,
+	DDP_COMPONENT_DSC0,
 	DDP_COMPONENT_DSI0
 };
 
@@ -743,6 +750,20 @@ static const struct component_master_ops mtk_drm_ops = {
 };
 
 static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
+	{ .compatible = "mediatek,mt6789-disp-aal",
+	  .data = (void *)MTK_DISP_AAL},
+	{ .compatible = "mediatek,mt6789-disp-ccorr",
+	  .data = (void *)MTK_DISP_CCORR },
+	{ .compatible = "mediatek,mt6789-disp-color",
+	  .data = (void *)MTK_DISP_COLOR },
+	{ .compatible = "mediatek,mt6789-disp-dither",
+	  .data = (void *)MTK_DISP_DITHER },
+	{ .compatible = "mediatek,mt6789-disp-dsc",
+	  .data = (void *)MTK_DISP_DSC },
+	{ .compatible = "mediatek,mt6789-disp-gamma",
+	  .data = (void *)MTK_DISP_GAMMA },
+	{ .compatible = "mediatek,mt6789-disp-postmask",
+	  .data = (void *)MTK_DISP_POSTMASK },
 	{ .compatible = "mediatek,mt8167-disp-aal",
 	  .data = (void *)MTK_DISP_AAL},
 	{ .compatible = "mediatek,mt8173-disp-aal",

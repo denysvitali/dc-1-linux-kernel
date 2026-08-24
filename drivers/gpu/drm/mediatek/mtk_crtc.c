@@ -522,19 +522,20 @@ static int mtk_crtc_ddp_hw_init_handoff(struct mtk_crtc *mtk_crtc,
 	int ret;
 	int i;
 
-	if (mtk_crtc->ddp_comp_nr != 3) {
-		drm_err(dev,
-			"invalid MT6789 handoff topology: %u components, expected 3\n",
-			mtk_crtc->ddp_comp_nr);
-		return -EINVAL;
-	}
-	if (ovl->id != DDP_COMPONENT_OVL0 ||
+	if (mtk_crtc->ddp_comp_nr != 10 ||
+	    ovl->id != DDP_COMPONENT_OVL0 ||
 	    mtk_crtc->ddp_comp[1]->id != DDP_COMPONENT_RDMA0 ||
-	    mtk_crtc->ddp_comp[2]->id != DDP_COMPONENT_DSI0) {
+	    mtk_crtc->ddp_comp[2]->id != DDP_COMPONENT_COLOR0 ||
+	    mtk_crtc->ddp_comp[3]->id != DDP_COMPONENT_CCORR ||
+	    mtk_crtc->ddp_comp[4]->id != DDP_COMPONENT_AAL0 ||
+	    mtk_crtc->ddp_comp[5]->id != DDP_COMPONENT_GAMMA ||
+	    mtk_crtc->ddp_comp[6]->id != DDP_COMPONENT_POSTMASK0 ||
+	    mtk_crtc->ddp_comp[7]->id != DDP_COMPONENT_DITHER0 ||
+	    mtk_crtc->ddp_comp[8]->id != DDP_COMPONENT_DSC0 ||
+	    mtk_crtc->ddp_comp[9]->id != DDP_COMPONENT_DSI0) {
 		drm_err(dev,
-			"invalid MT6789 handoff path: %u,%u,%u\n",
-			ovl->id, mtk_crtc->ddp_comp[1]->id,
-			mtk_crtc->ddp_comp[2]->id);
+			"invalid MT6789 DSC handoff topology (%u components)\n",
+			mtk_crtc->ddp_comp_nr);
 		return -EINVAL;
 	}
 
@@ -1543,12 +1544,19 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 
 	priv = priv->all_drm_private[priv_data_index];
 	if (priv->data->quiesce_mutex_first &&
-	    (path_len != 3 || conn_routes || num_conn_routes ||
+	    (path_len != 10 || conn_routes || num_conn_routes ||
 	     path[0] != DDP_COMPONENT_OVL0 ||
 	     path[1] != DDP_COMPONENT_RDMA0 ||
-	     path[2] != DDP_COMPONENT_DSI0)) {
+	     path[2] != DDP_COMPONENT_COLOR0 ||
+	     path[3] != DDP_COMPONENT_CCORR ||
+	     path[4] != DDP_COMPONENT_AAL0 ||
+	     path[5] != DDP_COMPONENT_GAMMA ||
+	     path[6] != DDP_COMPONENT_POSTMASK0 ||
+	     path[7] != DDP_COMPONENT_DITHER0 ||
+	     path[8] != DDP_COMPONENT_DSC0 ||
+	     path[9] != DDP_COMPONENT_DSI0)) {
 		dev_err(dev,
-			"refusing invalid checked-handoff topology (length=%u, routes=%u)\n",
+			"refusing invalid checked DSC handoff topology (length=%u, routes=%u)\n",
 			path_len, num_conn_routes);
 		return -EINVAL;
 	}

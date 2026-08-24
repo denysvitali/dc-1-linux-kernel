@@ -19,6 +19,7 @@
 #include <video/mipi_display.h>
 #include <video/videomode.h>
 
+#include <drm/display/drm_dsc.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
@@ -94,12 +95,13 @@
 #define HSTX_CKLP_EN			BIT(16)
 
 #define DSI_PSCTRL		0x1c
-#define DSI_PS_WC			GENMASK(13, 0)
-#define DSI_PS_SEL			GENMASK(17, 16)
+#define DSI_PS_WC			GENMASK(14, 0)
+#define DSI_PS_SEL			GENMASK(19, 16)
 #define PACKED_PS_16BIT_RGB565		0
 #define PACKED_PS_18BIT_RGB666		1
 #define LOOSELY_PS_24BIT_RGB666		2
 #define PACKED_PS_24BIT_RGB888		3
+#define PACKED_PS_24BIT_DSC		5
 
 #define DSI_VSA_NL		0x20
 #define DSI_VBP_NL		0x24
@@ -254,6 +256,7 @@ struct mtk_dsi {
 
 	unsigned long mode_flags;
 	enum mipi_dsi_pixel_format format;
+	const struct drm_dsc_config *dsc;
 	unsigned int lanes;
 	struct videomode vm;
 	struct mtk_phy_timing phy_timing;
@@ -516,35 +519,43 @@ static void mtk_dsi_rxtx_control(struct mtk_dsi *dsi)
 	writel(regval, dsi->regs + DSI_TXRX_CTRL);
 }
 
+static u32 mtk_dsi_ps_word_count(struct mtk_dsi *dsi)
+{
+	if (dsi->dsc)
+		return dsi->dsc->slice_chunk_size * dsi->dsc->slice_count;
+
+	return dsi->vm.hactive *
+		(dsi->format == MIPI_DSI_FMT_RGB565 ? 2 : 3);
+}
+
 static void mtk_dsi_ps_control(struct mtk_dsi *dsi, bool config_vact)
 {
-	u32 dsi_buf_bpp, ps_val, ps_wc, vact_nl;
-
-	if (dsi->format == MIPI_DSI_FMT_RGB565)
-		dsi_buf_bpp = 2;
-	else
-		dsi_buf_bpp = 3;
+	u32 ps_val, ps_wc, vact_nl;
 
 	/* Word count */
-	ps_wc = FIELD_PREP(DSI_PS_WC, dsi->vm.hactive * dsi_buf_bpp);
+	ps_wc = FIELD_PREP(DSI_PS_WC, mtk_dsi_ps_word_count(dsi));
 	ps_val = ps_wc;
 
 	/* Pixel Stream type */
-	switch (dsi->format) {
-	default:
-		fallthrough;
-	case MIPI_DSI_FMT_RGB888:
-		ps_val |= FIELD_PREP(DSI_PS_SEL, PACKED_PS_24BIT_RGB888);
-		break;
-	case MIPI_DSI_FMT_RGB666:
-		ps_val |= FIELD_PREP(DSI_PS_SEL, LOOSELY_PS_24BIT_RGB666);
-		break;
-	case MIPI_DSI_FMT_RGB666_PACKED:
-		ps_val |= FIELD_PREP(DSI_PS_SEL, PACKED_PS_18BIT_RGB666);
-		break;
-	case MIPI_DSI_FMT_RGB565:
-		ps_val |= FIELD_PREP(DSI_PS_SEL, PACKED_PS_16BIT_RGB565);
-		break;
+	if (dsi->dsc) {
+		ps_val |= FIELD_PREP(DSI_PS_SEL, PACKED_PS_24BIT_DSC);
+	} else {
+		switch (dsi->format) {
+		default:
+			fallthrough;
+		case MIPI_DSI_FMT_RGB888:
+			ps_val |= FIELD_PREP(DSI_PS_SEL, PACKED_PS_24BIT_RGB888);
+			break;
+		case MIPI_DSI_FMT_RGB666:
+			ps_val |= FIELD_PREP(DSI_PS_SEL, LOOSELY_PS_24BIT_RGB666);
+			break;
+		case MIPI_DSI_FMT_RGB666_PACKED:
+			ps_val |= FIELD_PREP(DSI_PS_SEL, PACKED_PS_18BIT_RGB666);
+			break;
+		case MIPI_DSI_FMT_RGB565:
+			ps_val |= FIELD_PREP(DSI_PS_SEL, PACKED_PS_16BIT_RGB565);
+			break;
+		}
 	}
 
 	if (config_vact) {
@@ -725,10 +736,15 @@ static void mtk_dsi_config_vdo_timing(struct mtk_dsi *dsi)
 	writel(vm->vfront_porch, dsi->regs + DSI_VFP_NL);
 	writel(vm->vactive, dsi->regs + DSI_VACT_NL);
 
-	if (dsi->driver_data->has_size_ctl)
+	if (dsi->driver_data->has_size_ctl) {
+		u32 width = vm->hactive;
+
+		if (dsi->dsc)
+			width = DIV_ROUND_UP(mtk_dsi_ps_word_count(dsi), 3);
 		writel(FIELD_PREP(DSI_HEIGHT, vm->vactive) |
-			FIELD_PREP(DSI_WIDTH, vm->hactive),
+			FIELD_PREP(DSI_WIDTH, width),
 			dsi->regs + DSI_SIZE_CON);
+	}
 
 	if (dsi->driver_data->use_mt6789_timings)
 		mtk_dsi_config_vdo_timing_mt6789(dsi);
@@ -1593,7 +1609,8 @@ mtk_dsi_bridge_mode_valid(struct drm_bridge *bridge,
 	struct mtk_dsi *dsi = bridge_to_dsi(bridge);
 	int bpp;
 
-	bpp = mipi_dsi_pixel_format_to_bpp(dsi->format);
+	bpp = dsi->dsc ? dsi->dsc->bits_per_pixel >> 4 :
+		mipi_dsi_pixel_format_to_bpp(dsi->format);
 	if (bpp < 0)
 		return MODE_ERROR;
 
@@ -1734,6 +1751,7 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
 	dsi->lanes = device->lanes;
 	dsi->format = device->format;
 	dsi->mode_flags = device->mode_flags;
+	dsi->dsc = device->dsc;
 	if (device->hs_rate > U32_MAX)
 		return -EINVAL;
 	dsi->hs_rate = device->hs_rate;
