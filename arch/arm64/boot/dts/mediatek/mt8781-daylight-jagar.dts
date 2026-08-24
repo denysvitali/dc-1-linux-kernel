@@ -1298,6 +1298,11 @@
 		reset-gpios = <&pio 88 GPIO_ACTIVE_LOW>;
 		vdd-supply = <&reg_wacom_1v8>;
 
+		/*
+		 * Fallback envelope, used only if the firmware feature query
+		 * fails; when the query answers (16008x21344) those maxima
+		 * outrank these.
+		 */
 		touchscreen-size-x = <16320>;
 		touchscreen-size-y = <21120>;
 		/*
@@ -1329,20 +1334,25 @@
 		 * Measured on hardware 2026-08-23 by five-target
 		 * correspondence taps (libinput debug-events capture,
 		 * outlier-rejected least squares; max residual ~2 mm of
-		 * hand-placement scatter): the sensor reports ~1.5-2 mm past
-		 * the visible glass on every side.  Values here are the
-		 * fitted visible envelope converted into hardware frame
-		 * coordinates (pre-inversion), where the glass-visible range
-		 * is x 0..15707 / y 312..21344 of the full 16008x21344
-		 * sensor.  The driver remaps this window onto the full
-		 * reported range so every userspace stack gets exactly the
-		 * visible area; a LIBINPUT_CALIBRATION_MATRIX was tried first
-		 * but is not applied to tablet-class devices downstream.
+		 * hand-placement scatter): the sensor reports past the
+		 * visible glass.  The fit back-solved the inversion with the
+		 * declared 16008x21344 maxima, but at capture time the driver
+		 * was inverting around the stale DT-fallback maxima
+		 * 16319x21119 (prop.max_* was latched before the firmware
+		 * override; fixed in wacom_i2c.c alongside this change), so
+		 * the values it recorded -- x 0..15707 / y 312..21344 -- sit
+		 * in a frame offset by (-311, +225) from true hardware
+		 * coordinates.  Values here are that fit shifted back into
+		 * true pre-inversion hardware frame.  The driver remaps this
+		 * window onto the full reported range so every userspace
+		 * stack gets exactly the visible area; a
+		 * LIBINPUT_CALIBRATION_MATRIX was tried first but is not
+		 * applied to tablet-class devices downstream.
 		 */
-		wacom,visible-x-min = <0>;
-		wacom,visible-x-max = <15707>;
-		wacom,visible-y-min = <312>;
-		wacom,visible-y-max = <21344>;
+		wacom,visible-x-min = <311>;
+		wacom,visible-x-max = <16018>;
+		wacom,visible-y-min = <87>;
+		wacom,visible-y-max = <21119>;
 		/*
 		 * Measured on hardware 2026-08-23: this firmware holds
 		 * data[3] bit 4 set on every in-proximity frame and never

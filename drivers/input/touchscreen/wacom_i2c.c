@@ -297,6 +297,17 @@ static int wacom_i2c_probe(struct i2c_client *client)
 	if (features.y_max)
 		input_abs_set_max(input, ABS_Y, features.y_max);
 
+	/*
+	 * touchscreen_parse_properties() latched prop.max_x/max_y before the
+	 * override above, and touchscreen_report_pos() reflects inverted axes
+	 * around prop values.  Refresh them so inversion happens around the
+	 * range actually reported; otherwise every touchscreen-inverted-*
+	 * coordinate is shifted by the firmware/DT difference and can leave
+	 * the declared range entirely.
+	 */
+	wac_i2c->prop.max_x = input_abs_get_max(input, ABS_X);
+	wac_i2c->prop.max_y = input_abs_get_max(input, ABS_Y);
+
 	if (!input_abs_get_max(input, ABS_X) ||
 	    !input_abs_get_max(input, ABS_Y)) {
 		dev_err(dev, "No X/Y limits from firmware or DT\n");
