@@ -20,6 +20,7 @@
 #define MIPITX_D0_SW_CTL_EN	0x0244
 #define MIPITX_CK_SW_CTL_EN	0x0344
 #define MIPITX_D1_SW_CTL_EN	0x0444
+#define MIPITX_D3_SW_CTL_EN	0x0544
 
 #define AD_DSI_PLL_SDM_PWR_ON	BIT(0)
 #define AD_DSI_PLL_SDM_ISO_EN	BIT(1)
@@ -80,12 +81,23 @@ static int mtk_mipi_tx_pll_prepare(struct clk_hw *hw)
 	usleep_range(500, 600);
 	writel(0x3fff0080, base + MIPITX_LANE_CON);
 
-	mtk_phy_set_bits(base + MIPITX_D0_SW_CTL_EN, DSI_SW_CTL_EN);
-	mtk_phy_set_bits(base + MIPITX_D1_SW_CTL_EN, DSI_SW_CTL_EN);
-	mtk_phy_set_bits(base + MIPITX_D2_SW_CTL_EN, DSI_SW_CTL_EN);
-	/* The factory MT6789 data maps its D3 selector to the D2 register. */
-	mtk_phy_set_bits(base + MIPITX_D2_SW_CTL_EN, DSI_SW_CTL_EN);
-	mtk_phy_set_bits(base + MIPITX_CK_SW_CTL_EN, DSI_SW_CTL_EN);
+	/*
+	 * DSI_SW_CTL_EN parks a lane under software control, disconnecting its
+	 * pad from the DSI controller; it must be CLEAR for the controller to
+	 * drive the link.  LK leaves all five gates clear, and boot only ever
+	 * exercised the early-return path above, so setting them here went
+	 * unnoticed: on the first real cold start (any DPMS-off/on cycle) the
+	 * lanes went dead, the panel's init sequence was transmitted into the
+	 * void, and the panel stayed in sleep with the backlight lit -- a
+	 * uniformly white normally-white LCD.  Measured on jagar 2026-08-24:
+	 * with the gates set, DCS reads time out (-110); clearing them makes
+	 * the panel ACK immediately with dsi_err_count 0.
+	 */
+	mtk_phy_clear_bits(base + MIPITX_D0_SW_CTL_EN, DSI_SW_CTL_EN);
+	mtk_phy_clear_bits(base + MIPITX_D1_SW_CTL_EN, DSI_SW_CTL_EN);
+	mtk_phy_clear_bits(base + MIPITX_D2_SW_CTL_EN, DSI_SW_CTL_EN);
+	mtk_phy_clear_bits(base + MIPITX_D3_SW_CTL_EN, DSI_SW_CTL_EN);
+	mtk_phy_clear_bits(base + MIPITX_CK_SW_CTL_EN, DSI_SW_CTL_EN);
 
 	mtk_phy_set_bits(base + MIPITX_PLL_PWR, AD_DSI_PLL_SDM_PWR_ON);
 	usleep_range(30, 100);
@@ -110,6 +122,13 @@ static void mtk_mipi_tx_pll_unprepare(struct clk_hw *hw)
 	void __iomem *base = mipi_tx->regs;
 
 	dev_dbg(mipi_tx->dev, "unprepare\n");
+
+	/* Park each lane under software control before dropping the PLL. */
+	mtk_phy_set_bits(base + MIPITX_D0_SW_CTL_EN, DSI_SW_CTL_EN);
+	mtk_phy_set_bits(base + MIPITX_D1_SW_CTL_EN, DSI_SW_CTL_EN);
+	mtk_phy_set_bits(base + MIPITX_D2_SW_CTL_EN, DSI_SW_CTL_EN);
+	mtk_phy_set_bits(base + MIPITX_D3_SW_CTL_EN, DSI_SW_CTL_EN);
+	mtk_phy_set_bits(base + MIPITX_CK_SW_CTL_EN, DSI_SW_CTL_EN);
 
 	mtk_phy_clear_bits(base + MIPITX_PLL_CON1, RG_DSI_PLL_EN);
 	mtk_phy_clear_bits(base + MIPITX_SW_CTRL_CON4,
