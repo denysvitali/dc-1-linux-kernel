@@ -28,6 +28,16 @@ CONFIG_MEMFD_CREATE=y
 CONFIG_ADVISE_SYSCALLS=y
 CONFIG_MEMBARRIER=y
 CONFIG_RSEQ=y
+# gnome-shell-mobile boosts the focused app's tasks with
+# sched_setattr(SCHED_FLAG_UTIL_CLAMP_MIN) so schedutil raises the CPU
+# frequency the moment input lands, instead of a reactive ramp several
+# frames later. Without UCLAMP_TASK the kernel rejects that call and the
+# shell logs "Couldn't set min utilization clamping ... sched_setattr
+# failed" for every focused window (measured on device 2026-08-25).
+# Per-task clamping alone is enough for that path; the cgroup-level
+# UCLAMP_TASK_GROUP is deliberately left out because it depends on
+# CGROUP_SCHED, and no cpu controller is compiled in (see CGROUPS below).
+CONFIG_UCLAMP_TASK=y
 CONFIG_CGROUPS=y
 # CGROUPS on its own ships an empty cgroup.controllers: no controller is
 # compiled in, so systemd can account and limit nothing per unit and
