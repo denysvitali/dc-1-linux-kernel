@@ -143,6 +143,7 @@ static irqreturn_t wacom_i2c_irq(int irq, void *dev_id)
 	u8 *data = wac_i2c->data;
 	unsigned int x, y, pressure;
 	unsigned char tsw, f1, f2, ers;
+	int tool;
 	int error;
 
 	error = i2c_master_recv(wac_i2c->client,
@@ -158,9 +159,27 @@ static irqreturn_t wacom_i2c_irq(int irq, void *dev_id)
 	y = le16_to_cpup((__le16 *)&data[6]);
 	pressure = le16_to_cpup((__le16 *)&data[8]);
 
+	/*
+	 * The tool identity can change while the pen stays in proximity
+	 * (flipping to the eraser end mid-stroke).  Evaluate the eraser/invert
+	 * flags on every frame instead of latching them on proximity entry,
+	 * and when the tool changes release the old one before pressing the
+	 * new so userspace never sees two tools at once.
+	 */
+	tool = (data[3] & (WACOM_ERASER | WACOM_INVERT)) ?
+	       BTN_TOOL_RUBBER : BTN_TOOL_PEN;
+
 	if (!wac_i2c->prox)
-		wac_i2c->tool = (data[3] & (WACOM_ERASER | WACOM_INVERT)) ?
-			BTN_TOOL_RUBBER : BTN_TOOL_PEN;
+		wac_i2c->tool = tool;
+
+	if (wac_i2c->prox && wac_i2c->tool != tool) {
+		input_report_key(input, BTN_TOUCH, 0);
+		input_report_key(input, wac_i2c->tool, 0);
+		input_report_abs(input, ABS_PRESSURE, 0);
+		input_sync(input);
+
+		wac_i2c->tool = tool;
+	}
 
 	wac_i2c->prox = data[3] & WACOM_IN_PROXIMITY;
 
