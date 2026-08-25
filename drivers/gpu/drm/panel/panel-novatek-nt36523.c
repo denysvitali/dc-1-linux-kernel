@@ -1280,17 +1280,37 @@ static int sharp_nt36523n_production_init_sequence(struct panel_info *pinfo)
 	return dsi_ctx.accum_err;
 }
 
+/*
+ * Which init table fits is a property of the panel silicon, which userspace
+ * cannot see -- but userspace does know whether this boot wants the
+ * production path at all, because the display gate wrote
+ * jagar_production_sequence=Y before probing us. Y therefore selects the
+ * production table by itself: its DCS bytes are the vendor module's own
+ * init_pre_ts_60hz_no_dsc, so a pre-TS panel tolerates them, while an
+ * MP-family panel keeps its MTP default of DSC ON unless they run, and then
+ * garbles the first uncompressed commit into the full-screen comb. A DT
+ * sample-id1, when present, can still veto Y for a known non-MP panel
+ * revision; absent it stays absent, which used to strand every MP panel on
+ * the wrong table.
+ */
 static int sharp_nt36523n_init_sequence(struct panel_info *pinfo)
 {
+	struct device *dev = pinfo->panel.dev;
 	u32 sample_id1;
 
-	if (sharp_nt36523n_production_sequence &&
-	    !of_property_read_u32(pinfo->panel.dev->of_node, "sample-id1",
-				  &sample_id1) &&
-	    (sample_id1 & 0xf0) == 0x30)
-		return sharp_nt36523n_production_init_sequence(pinfo);
+	if (!sharp_nt36523n_production_sequence)
+		return sharp_nt36523n_pre_ts_init_sequence(pinfo);
 
-	return sharp_nt36523n_pre_ts_init_sequence(pinfo);
+	if (!of_property_read_u32(pinfo->panel.dev->of_node, "sample-id1",
+				  &sample_id1) &&
+	    (sample_id1 & 0xf0) != 0x30) {
+		dev_warn(dev,
+			 "sample-id1 0x%02x is not MP-family; using pre-TS table despite jagar_production_sequence\n",
+			 sample_id1);
+		return sharp_nt36523n_pre_ts_init_sequence(pinfo);
+	}
+
+	return sharp_nt36523n_production_init_sequence(pinfo);
 }
 
 static const struct drm_display_mode sharp_nt36523n_modes[] = {
