@@ -217,6 +217,10 @@ void mtk_gamma_config(struct device *dev, unsigned int w,
 	sz |= FIELD_PREP(DISP_GAMMA_SIZE_VSIZE, h);
 
 	mtk_ddp_write(cmdq_pkt, sz, &gamma->cmdq_reg, gamma->regs, DISP_GAMMA_SIZE);
+	if (of_device_is_compatible(dev->of_node,
+				    "mediatek,mt6789-disp-gamma"))
+		mtk_ddp_write(cmdq_pkt, GAMMA_RELAY_MODE, &gamma->cmdq_reg,
+			      gamma->regs, DISP_GAMMA_CFG);
 	if (gamma->data && gamma->data->has_dither)
 		mtk_dither_set_common(gamma->regs, &gamma->cmdq_reg, bpc,
 				      DISP_GAMMA_CFG, GAMMA_DITHERING, cmdq_pkt);

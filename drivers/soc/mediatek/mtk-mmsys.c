@@ -363,11 +363,13 @@ int mtk_mmsys_ddp_handoff_validate(struct device *dev)
 	    (rdma_in & MT6789_DISP_RDMA0_FROM_MASK) ==
 		    MT6789_DISP_RDMA0_FROM_OVL0 &&
 	    (rdma_out & MT6789_DISP_RDMA0_RSZ0_MASK) ==
-		    MT6789_DISP_RDMA0_RSZ0_SOUT_TO_DSI0 &&
-	    !(dither_mout & MT6789_DISP_DITHER0_MOUT_MASK) &&
-	    !(dsc_mout & MT6789_DISP_DSC0_MOUT_MASK) &&
+		    MT6789_DISP_RDMA0_RSZ0_SOUT_TO_COLOR0 &&
+	    (dither_mout & MT6789_DISP_DITHER0_MOUT_MASK) ==
+		    MT6789_DISP_DITHER0_MOUT_TO_DSC0 &&
+	    (dsc_mout & MT6789_DISP_DSC0_MOUT_MASK) ==
+		    MT6789_DISP_DSC0_MOUT_TO_DSI0 &&
 	    (dsi_in & MT6789_DISP_DSI0_FROM_MASK) ==
-		    MT6789_DISP_DSI0_FROM_RDMA_RSZ0)
+		    MT6789_DISP_DSI0_FROM_DSC0)
 		return 0;
 
 	mtk_mmsys_ddp_handoff_dump(dev, "route-readback-failed");

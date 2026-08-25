@@ -15,6 +15,7 @@
 
 #include <video/mipi_display.h>
 
+#include <drm/display/drm_dsc.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_mipi_dsi.h>
@@ -33,6 +34,7 @@ struct panel_info {
 	struct backlight_device *backlight;
 	struct regulator *vddio;
 	struct regulator_bulk_data bias_supplies[2];
+	struct drm_dsc_config dsc;
 	bool jagar_bias_enabled;
 };
 
@@ -76,16 +78,13 @@ MODULE_PARM_DESC(jagar_production_sequence,
  * runtime (device/userspace/sway-test/panel-up.sh).
  */
 /*
- * The 850 MHz peripheral HS rate is the factory value, but the factory runs
- * this panel at 120 Hz while sharp_nt36523n_modes programs 60 Hz. 60 Hz needs
- * 128746 kHz * 24 bpp / 4 lanes = 772.5 Mbps/lane, so forcing 850 makes the
- * link and the packet timing disagree -- a candidate for the stable vertical
- * comb the panel shows for a uniform frame. 0 means "derive from the mode",
- * which is what mtk_dsi does when hs_rate is unset. Settable at runtime so a
- * rate can be tried without a flash cycle: write it before advancing
- * jagar_probe_stage.
+ * The production MP panel runs only in the vendor's DSC mode family.  Its
+ * default 60 Hz mode retains the 120 Hz active-line rate and lowers the frame
+ * rate with a 1716-line VFP.  The corresponding factory D-PHY rate is
+ * 672 Mbps/lane.  Keep this settable before jagar_probe_stage reaches 3 so a
+ * diagnostic image can still override it.
  */
-static unsigned long sharp_nt36523n_hs_rate;
+static unsigned long sharp_nt36523n_hs_rate = 672000000;
 module_param_named(jagar_hs_rate, sharp_nt36523n_hs_rate, ulong, 0644);
 MODULE_PARM_DESC(jagar_hs_rate,
 		 "DC-1 peripheral HS data rate in Hz (0 = derive from the mode)");
@@ -1252,26 +1251,19 @@ static int sharp_nt36523n_production_init_sequence(struct panel_info *pinfo)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
 
 	/*
-	 * Take the panel OUT of DSC.
-	 *
-	 * init_es3 -- the eight commands above, byte-for-byte what LK sends -- never
-	 * writes 0x90, so the panel keeps its MTP default. Every vendor mode for
-	 * MP-family samples is 120 Hz 3x DSC, so that default is DSC ON, and we then
-	 * transmit uncompressed RGB888: the panel latches 1200 bytes per line against
-	 * our 3600 and stretches the first third of each line to full width. That is
-	 * the stable full-screen comb, and it is why a saturated white frame still
-	 * looked clean (all-0xFF survives any decode).
-	 *
-	 * Values from init_pre_ts_60hz_no_dsc in the unstripped vendor module,
-	 * extracted/vendor_boot_a/vr/lib/modules/panel-sharp-nt36523n-vdo-120hz.ko.
-	 * 0x90 is latched at sleep-out, so this must precede 0x11.
+	 * Production MP panels leave DSC enabled in MTP.  The no-DSC tail below
+	 * exists only for the vendor's pre-TS sample.  Retain it as a fallback, but
+	 * never mix it into the production DSC path.
 	 */
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0x00);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x89, 0xa8, 0x00, 0x0c, 0xd2,
-				     0x00, 0x02, 0x25, 0x01, 0x14, 0x00, 0x07, 0x09,
-				     0x75, 0x08, 0x7a);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x92, 0x10, 0xf0);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xbb, 0x13);
+	if (!dsi->dsc) {
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0x00);
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x89, 0xa8, 0x00,
+					     0x0c, 0xd2, 0x00, 0x02, 0x25, 0x01,
+					     0x14, 0x00, 0x07, 0x09, 0x75, 0x08,
+					     0x7a);
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x92, 0x10, 0xf0);
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xbb, 0x13);
+	}
 
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x11);
 	mipi_dsi_msleep(&dsi_ctx, 122);
@@ -1315,15 +1307,16 @@ static int sharp_nt36523n_init_sequence(struct panel_info *pinfo)
 
 static const struct drm_display_mode sharp_nt36523n_modes[] = {
 	{
-		.clock = 128746,
+		/* Vendor MP default: 60 Hz by long VFP at the 120 Hz line rate. */
+		.clock = 261267,
 		.hdisplay = 1200,
 		.hsync_start = 1230,
 		.hsync_end = 1250,
 		.htotal = 1310,
 		.vdisplay = 1600,
-		.vsync_start = 1630,
-		.vsync_end = 1632,
-		.vtotal = 1638,
+		.vsync_start = 3316,
+		.vsync_end = 3318,
+		.vtotal = 3324,
 	},
 };
 
@@ -1743,6 +1736,41 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 
 	drm_panel_add(&pinfo->panel);
 
+	if (pinfo->desc->has_jagar_power_sequence) {
+		pinfo->dsc.dsc_version_major = 1;
+		pinfo->dsc.dsc_version_minor = 2;
+		pinfo->dsc.line_buf_depth = 9;
+		pinfo->dsc.bits_per_component = 8;
+		pinfo->dsc.bits_per_pixel = 8 << 4;
+		pinfo->dsc.convert_rgb = true;
+		pinfo->dsc.block_pred_enable = true;
+		pinfo->dsc.pic_width = 1200;
+		pinfo->dsc.pic_height = 1600;
+		pinfo->dsc.slice_count = 2;
+		pinfo->dsc.slice_width = 600;
+		pinfo->dsc.slice_height = 20;
+		/* Exact values decoded from the shipped MP panel parameters. */
+		pinfo->dsc.slice_chunk_size = 600;
+		pinfo->dsc.initial_xmit_delay = 512;
+		pinfo->dsc.initial_dec_delay = 581;
+		pinfo->dsc.first_line_bpg_offset = 13;
+		pinfo->dsc.initial_offset = 6144;
+		pinfo->dsc.final_offset = 4336;
+		pinfo->dsc.initial_scale_value = 32;
+		pinfo->dsc.scale_increment_interval = 492;
+		pinfo->dsc.scale_decrement_interval = 8;
+		pinfo->dsc.nfl_bpg_offset = 1402;
+		pinfo->dsc.slice_bpg_offset = 1172;
+		pinfo->dsc.rc_model_size = 8192;
+		pinfo->dsc.rc_edge_factor = 6;
+		pinfo->dsc.rc_quant_incr_limit0 = 11;
+		pinfo->dsc.rc_quant_incr_limit1 = 11;
+		pinfo->dsc.rc_tgt_offset_high = 3;
+		pinfo->dsc.rc_tgt_offset_low = 3;
+		pinfo->dsc.flatness_min_qp = 3;
+		pinfo->dsc.flatness_max_qp = 12;
+	}
+
 	for (i = 0; i < DSI_NUM_MIN + pinfo->desc->is_dual_dsi; i++) {
 		pinfo->dsi[i]->lanes = pinfo->desc->lanes;
 		pinfo->dsi[i]->hs_rate = pinfo->desc->has_jagar_power_sequence
@@ -1750,6 +1778,8 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 					 : pinfo->desc->hs_rate;
 		pinfo->dsi[i]->format = pinfo->desc->format;
 		pinfo->dsi[i]->mode_flags = pinfo->desc->mode_flags;
+		if (pinfo->desc->has_jagar_power_sequence)
+			pinfo->dsi[i]->dsc = &pinfo->dsc;
 
 		ret = devm_mipi_dsi_attach(dev, pinfo->dsi[i]);
 		if (ret < 0)

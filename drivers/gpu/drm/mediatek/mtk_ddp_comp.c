@@ -45,6 +45,23 @@
 #define DSC_DUAL_INOUT				BIT(2)
 #define DSC_BYPASS				BIT(4)
 #define DSC_UFOE_SEL				BIT(16)
+#define DISP_REG_DSC_SPR			0x0014
+#define DISP_REG_DSC_PIC_W			0x0018
+#define DISP_REG_DSC_PIC_H			0x001c
+#define DISP_REG_DSC_SLICE_W			0x0020
+#define DISP_REG_DSC_SLICE_H			0x0024
+#define DISP_REG_DSC_CHUNK_SIZE		0x0028
+#define DISP_REG_DSC_BUF_SIZE			0x002c
+#define DISP_REG_DSC_MODE			0x0030
+#define DISP_REG_DSC_CFG			0x0034
+#define DISP_REG_DSC_PAD			0x0038
+#define DISP_REG_DSC_ENC_WIDTH			0x003c
+#define DISP_REG_DSC_DBG_CON			0x0060
+#define DSC_CKSM_CAL_EN			BIT(9)
+#define DISP_REG_DSC_OBUF			0x0070
+#define DISP_REG_DSC_PPS(n)			(0x0080 + (n) * 4)
+#define DISP_REG_DSC_SHADOW			0x0200
+#define DSC_FORCE_COMMIT			BIT(0)
 
 #define DISP_REG_OD_EN				0x0000
 #define DISP_REG_OD_CFG				0x0020
@@ -194,22 +211,79 @@ static void mtk_dsc_config(struct device *dev, unsigned int w,
 			   unsigned int bpc, struct cmdq_pkt *cmdq_pkt)
 {
 	struct mtk_ddp_comp_dev *priv = dev_get_drvdata(dev);
+	static const u32 pps[] = {
+		0x000c8089, 0x02450200, 0x01ec0020, 0x000d0008,
+		0x0494057a, 0x10f01800, 0x20000c03, 0x330b0b06,
+		0x382a1c0e, 0x69625446, 0x7b797770, 0x00007e7d,
+		0x00800880, 0xf8c100a1, 0xe8e3f0e3, 0xe103e0e3,
+		0xd943e123, 0xd165d945, 0xd189d165, 0x0000d1ac,
+	};
+	u32 i;
 
-	/* dsc bypass mode */
-	mtk_ddp_write_mask(cmdq_pkt, DSC_BYPASS, &priv->cmdq_reg, priv->regs,
-			   DISP_REG_DSC_CON, DSC_BYPASS);
-	mtk_ddp_write_mask(cmdq_pkt, DSC_UFOE_SEL, &priv->cmdq_reg, priv->regs,
-			   DISP_REG_DSC_CON, DSC_UFOE_SEL);
-	mtk_ddp_write_mask(cmdq_pkt, DSC_DUAL_INOUT, &priv->cmdq_reg, priv->regs,
-			   DISP_REG_DSC_CON, DSC_DUAL_INOUT);
+	if (!of_device_is_compatible(dev->of_node,
+				     "mediatek,mt6789-disp-dsc")) {
+		/* Preserve the generic relay behavior for existing users. */
+		mtk_ddp_write_mask(cmdq_pkt, DSC_BYPASS, &priv->cmdq_reg,
+				   priv->regs, DISP_REG_DSC_CON, DSC_BYPASS);
+		mtk_ddp_write_mask(cmdq_pkt, DSC_UFOE_SEL, &priv->cmdq_reg,
+				   priv->regs, DISP_REG_DSC_CON, DSC_UFOE_SEL);
+		mtk_ddp_write_mask(cmdq_pkt, DSC_DUAL_INOUT, &priv->cmdq_reg,
+				   priv->regs, DISP_REG_DSC_CON, DSC_DUAL_INOUT);
+		return;
+	}
+
+	/* Exact shipped MP configuration: DSC 1.2, 8bpc/8bpp, 2x600x20. */
+	if (WARN_ON(w != 1200 || h != 1600 || bpc != 8))
+		return;
+
+	mtk_ddp_write(cmdq_pkt, 0, &priv->cmdq_reg, priv->regs,
+		      DISP_REG_DSC_SPR);
+	mtk_ddp_write(cmdq_pkt, 0x800002d9, &priv->cmdq_reg, priv->regs,
+		      DISP_REG_DSC_OBUF);
+	mtk_ddp_write(cmdq_pkt, 1200 << 16 | 600, &priv->cmdq_reg,
+		      priv->regs, DISP_REG_DSC_ENC_WIDTH);
+	mtk_ddp_write(cmdq_pkt, 0x00010080, &priv->cmdq_reg, priv->regs,
+		      DISP_REG_DSC_CON);
+	mtk_ddp_write(cmdq_pkt, 399 << 16 | 1200, &priv->cmdq_reg,
+		      priv->regs, DISP_REG_DSC_PIC_W);
+	mtk_ddp_write(cmdq_pkt, 1599 << 16 | 1599, &priv->cmdq_reg,
+		      priv->regs, DISP_REG_DSC_PIC_H);
+	mtk_ddp_write(cmdq_pkt, 199 << 16 | 600, &priv->cmdq_reg,
+		      priv->regs, DISP_REG_DSC_SLICE_W);
+	mtk_ddp_write(cmdq_pkt, 79 << 16 | 19, &priv->cmdq_reg,
+		      priv->regs, DISP_REG_DSC_SLICE_H);
+	mtk_ddp_write(cmdq_pkt, 600, &priv->cmdq_reg, priv->regs,
+		      DISP_REG_DSC_CHUNK_SIZE);
+	mtk_ddp_write(cmdq_pkt, 600 * 20, &priv->cmdq_reg, priv->regs,
+		      DISP_REG_DSC_BUF_SIZE);
+	mtk_ddp_write(cmdq_pkt, 0, &priv->cmdq_reg, priv->regs,
+		      DISP_REG_DSC_PAD);
+	mtk_ddp_write(cmdq_pkt, 0x101, &priv->cmdq_reg, priv->regs,
+		      DISP_REG_DSC_MODE);
+	mtk_ddp_write(cmdq_pkt, 0x22, &priv->cmdq_reg, priv->regs,
+		      DISP_REG_DSC_CFG);
+	mtk_ddp_write_mask(cmdq_pkt, DSC_CKSM_CAL_EN, &priv->cmdq_reg,
+			   priv->regs, DISP_REG_DSC_DBG_CON, DSC_CKSM_CAL_EN);
+	mtk_ddp_write_mask(cmdq_pkt, 0x40, &priv->cmdq_reg, priv->regs,
+			   DISP_REG_DSC_SHADOW, 0x60);
+	for (i = 0; i < ARRAY_SIZE(pps); i++)
+		mtk_ddp_write(cmdq_pkt, pps[i], &priv->cmdq_reg, priv->regs,
+			      DISP_REG_DSC_PPS(i));
 }
 
 static void mtk_dsc_start(struct device *dev)
 {
 	struct mtk_ddp_comp_dev *priv = dev_get_drvdata(dev);
 
+	if (of_device_is_compatible(dev->of_node,
+				    "mediatek,mt6789-disp-dsc"))
+		mtk_ddp_write_mask(NULL, DSC_FORCE_COMMIT, &priv->cmdq_reg,
+				   priv->regs, DISP_REG_DSC_SHADOW,
+				   DSC_FORCE_COMMIT);
+
 	/* write with mask to reserve the value set in mtk_dsc_config */
-	mtk_ddp_write_mask(NULL, DSC_EN, &priv->cmdq_reg, priv->regs, DISP_REG_DSC_CON, DSC_EN);
+	mtk_ddp_write_mask(NULL, DSC_EN, &priv->cmdq_reg, priv->regs,
+			   DISP_REG_DSC_CON, DSC_EN);
 }
 
 static void mtk_dsc_stop(struct device *dev)
