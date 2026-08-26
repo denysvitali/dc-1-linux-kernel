@@ -1318,6 +1318,18 @@ static const struct drm_display_mode sharp_nt36523n_modes[] = {
 		.vsync_end = 3318,
 		.vtotal = 3324,
 	},
+	{
+		/* Native vertical timing for the same production DSC family. */
+		.clock = 406993,
+		.hdisplay = 1200,
+		.hsync_start = 1230,
+		.hsync_end = 1250,
+		.htotal = 1310,
+		.vdisplay = 1600,
+		.vsync_start = 1602,
+		.vsync_end = 1604,
+		.vtotal = 1610,
+	},
 };
 
 static const struct panel_desc sharp_nt36523n_desc = {
