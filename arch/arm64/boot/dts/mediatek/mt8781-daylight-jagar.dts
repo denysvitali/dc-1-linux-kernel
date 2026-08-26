@@ -1065,8 +1065,11 @@
  * Stock disables that controller and gives its pins to the SCP; see the
  * comment on &i2c6 for why the AP can have them instead.  The second SCP
  * bus (GPIO132/133, function 1 = SCL1/SDA1 = i2c1 @11e01000) carries an
- * ambient-light/proximity part at 0x49 by the same trick, but no mainline
- * driver claims it, so it stays undeclared.
+ * ambient-light/proximity part at 0x49.  It is exposed on the AP I2C
+ * controller for identification and protocol bring-up, but deliberately has
+ * no device node: the MN29 family is known only at family level, its register
+ * protocol remains unidentified, and a guessed driver binding would be worse
+ * than no sensor.
  *
  * Declared below: the devices that have a driver in this tree and a real
  * binding, including both richtek,rt4539 frontlights -- amber @i2c2 0x3c with
@@ -1473,6 +1476,26 @@
  * the bias here matches what the other buses use rather than being
  * transcribed.  400 kHz is the conservative choice, not a measured one.
  */
+&i2c1 {
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c1_pins>;
+	clock-frequency = <400000>;
+
+	/*
+	 * Memsic MN29-family ALS/proximity part, 7-bit address 0x49.
+	 *
+	 * Identified by the stock tinysys sensorhub driver name (`mn29xxx`) and
+	 * by live bit-banged probing (exactly one ACKing address), not yet by a
+	 * register ID.  The earlier pre-SCP probe saw every write-data byte NAK
+	 * and constant reads, so this node intentionally exposes the controller
+	 * for controlled measurement while leaving the device unbound.  Do not
+	 * add a compatible until both an exact part identity and its documented
+	 * register protocol are established.
+	 */
+};
+
 &i2c6 {
 	status = "okay";
 
@@ -2142,6 +2165,22 @@
 		pins-bus {
 			pinmux = <PINMUX_GPIO130__FUNC_SCL0>,
 				 <PINMUX_GPIO131__FUNC_SDA0>;
+			bias-pull-up;
+			input-enable;
+		};
+	};
+
+	/*
+	 * Ambient-light/proximity bus, derived from the SoC pin table exactly
+	 * as i2c0 above: SCL1 = GPIO132 function 1, SDA1 = GPIO133 function 1.
+	 * Live probing has already ACKed the sensor at 0x49 over these pins;
+	 * bias follows the other AP-owned I2C buses rather than a factory state,
+	 * because stock assigns this pair to SCP_SCL0/SCP_SDA0 instead.
+	 */
+	i2c1_pins: i2c1-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO132__FUNC_SCL1>,
+				 <PINMUX_GPIO133__FUNC_SDA1>;
 			bias-pull-up;
 			input-enable;
 		};
