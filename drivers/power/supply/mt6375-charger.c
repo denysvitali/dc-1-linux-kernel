@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * MediaTek MT6375 PMU charger: telemetry plus minimal input-current policy.
+ * MediaTek MT6375 PMU charger: telemetry plus fast-charge policy.
  *
  * MT6375 is a multi-address device.  The PMU bank is exposed at 0x34 and the
  * charger registers occupy offsets 0x20..0xe1 in that bank.  Nothing binds
@@ -18,8 +18,8 @@
  *     without PD, and the 4.5 V MIVR regulation folds the current back if
  *     the source sags, so a weaker port simply yields less),
  *   - raises the fast-charge current target from the bootloader's 500 mA to
- *     2 A at the same time -- a trickle by this pack's standards, still
- *     bounded by whatever the input regulation can sustain,
+ *     3.15 A at the same time -- a measured ~0.4C rate for this pack that is
+ *     still bounded by whatever the input regulation can sustain,
  *   - exposes both as writable power_supply properties so userspace can
  *     override either value.
  *
@@ -84,16 +84,16 @@ int mt6375_charger_program_input(u32 mv, u32 ma);
 
 /*
  * CHG_ICHG: 50 mA steps from 300 mA. The bootloader leaves 500 mA -- a
- * trickle by this pack's standards; the vendor stack's own fast-phase value
- * is 1.5 A, and on the DC-1's adapter a 2 A request measures ~1.8 A into the
- * pack (0.23C) with the input-voltage regulation still idle.
+ * trickle by this pack's standards. The vendor stack's own fast-phase value
+ * is 1.5 A; on the DC-1's adapter, 3.15 A measured 2.93-2.95 A into the pack
+ * with the hottest thermal zone at 46 C under audit load.
  */
 #define MT6375_ICHG_MIN_UA		300000
 #define MT6375_ICHG_STEP_UA		50000
 #define MT6375_ICHG_MIN_CODE		6
 #define MT6375_ICHG_MAX_CODE		63
 #define MT6375_ICHG_BOOT_CODE		10	/* 500 mA */
-#define MT6375_ICHG_BOOST_UA		2000000
+#define MT6375_ICHG_BOOST_UA		3150000
 
 #define MT6375_POLL_INTERVAL		msecs_to_jiffies(10000)
 
