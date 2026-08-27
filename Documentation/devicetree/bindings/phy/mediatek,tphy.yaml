@@ -247,6 +247,15 @@ patternProperties:
           Specify the flag to enable BC1.2 if support it
         type: boolean
 
+      mediatek,force-vbus-valid:
+        description:
+          Force the USB2 UTMI VBUS and A-valid inputs while the PHY is in host
+          mode. This is needed when an external Type-C port controller verifies
+          VBUS but the PHY's VBUS comparator is not connected. The controller
+          must only select host mode after the external controller reports a
+          valid powered connection.
+        type: boolean
+
       mediatek,force-mode:
         description:
           The force mode is used to manually switch the shared phy mode between

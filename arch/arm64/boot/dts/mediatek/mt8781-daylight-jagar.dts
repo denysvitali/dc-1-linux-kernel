@@ -1021,6 +1021,11 @@
 	maximum-speed = "high-speed";
 };
 
+&u2port0 {
+	/* MT6375 TCPM validates VBUS while the USB PHY reports SessEnd. */
+	mediatek,force-vbus-valid;
+};
+
 &u2phy {
 	status = "okay";
 };

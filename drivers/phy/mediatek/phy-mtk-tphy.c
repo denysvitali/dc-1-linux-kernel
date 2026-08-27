@@ -112,11 +112,20 @@
 
 #define U3P_U2PHYDTM1		0x06C
 #define P2C_RG_UART_EN			BIT(16)
+#define P2C_FORCE_VBUSVALID		BIT(13)
+#define P2C_FORCE_SESSEND		BIT(12)
+#define P2C_FORCE_BVALID		BIT(11)
+#define P2C_FORCE_AVALID		BIT(10)
 #define P2C_FORCE_IDDIG		BIT(9)
 #define P2C_RG_VBUSVALID		BIT(5)
 #define P2C_RG_SESSEND			BIT(4)
+#define P2C_RG_BVALID			BIT(3)
 #define P2C_RG_AVALID			BIT(2)
 #define P2C_RG_IDDIG			BIT(1)
+#define P2C_FORCE_SESSION_VALID		(P2C_FORCE_VBUSVALID | \
+					 P2C_FORCE_SESSEND | \
+					 P2C_FORCE_BVALID | \
+					 P2C_FORCE_AVALID)
 
 #define U3P_U2PHYBC12C		0x080
 #define P2C_RG_CHGDT_EN		BIT(0)
@@ -334,6 +343,7 @@ struct mtk_phy_instance {
 	int discth;
 	int pre_emphasis;
 	bool bc12_en;
+	bool force_vbus_valid;
 	bool type_force_mode;
 };
 
@@ -934,13 +944,20 @@ static void u2_phy_instance_set_mode(struct mtk_tphy *tphy,
 	tmp = readl(u2_banks->com + U3P_U2PHYDTM1);
 	switch (mode) {
 	case PHY_MODE_USB_DEVICE:
+		tmp &= ~P2C_FORCE_SESSION_VALID;
 		tmp |= P2C_FORCE_IDDIG | P2C_RG_IDDIG;
 		break;
 	case PHY_MODE_USB_HOST:
+		if (instance->force_vbus_valid) {
+			tmp |= P2C_FORCE_SESSION_VALID |
+			       P2C_RG_VBUSVALID | P2C_RG_AVALID;
+			tmp &= ~(P2C_RG_SESSEND | P2C_RG_BVALID);
+		}
 		tmp |= P2C_FORCE_IDDIG;
 		tmp &= ~P2C_RG_IDDIG;
 		break;
 	case PHY_MODE_USB_OTG:
+		tmp &= ~P2C_FORCE_SESSION_VALID;
 		tmp &= ~(P2C_FORCE_IDDIG | P2C_RG_IDDIG);
 		break;
 	default:
@@ -1134,6 +1151,8 @@ static void phy_parse_property(struct mtk_tphy *tphy,
 		return;
 
 	instance->bc12_en = device_property_read_bool(dev, "mediatek,bc12");
+	instance->force_vbus_valid =
+		device_property_read_bool(dev, "mediatek,force-vbus-valid");
 	device_property_read_u32(dev, "mediatek,eye-src",
 				 &instance->eye_src);
 	device_property_read_u32(dev, "mediatek,eye-vrt",
