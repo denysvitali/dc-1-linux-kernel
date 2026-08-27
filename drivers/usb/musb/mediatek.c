@@ -69,17 +69,19 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 	struct musb *musb = glue->musb;
 	u8 devctl = readb(musb->mregs + MUSB_DEVCTL);
 	enum usb_role new_role;
+	int ret;
 
 	if (role == glue->role)
 		return 0;
 
 	switch (role) {
 	case USB_ROLE_HOST:
-		musb->xceiv->otg->state = OTG_STATE_A_WAIT_VRISE;
-		glue->phy_mode = PHY_MODE_USB_HOST;
 		new_role = USB_ROLE_HOST;
-		if (glue->role == USB_ROLE_NONE)
-			phy_power_on(glue->phy);
+		if (glue->role == USB_ROLE_NONE) {
+			ret = phy_power_on(glue->phy);
+			if (ret)
+				return ret;
+		}
 
 		/* Leave the gadget driver bound (unbind wedges configfs
 		 * and musb_gadget_stop() also stops the host). Just drop
@@ -87,9 +89,26 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		 */
 		if (musb->g.udc)
 			usb_gadget_disconnect(&musb->g);
-		devctl |= MUSB_DEVCTL_SESSION;
-		musb_writeb(musb->mregs, MUSB_DEVCTL, devctl);
-		MUSB_HST_MODE(musb);
+
+		/*
+		 * Force ID low before starting the MUSB session. Starting the
+		 * session while the PHY still reports B-device makes MUSB wait
+		 * for locally-sourced VBUS and raise VBUS_ERROR on a charging
+		 * hub, where the tablet is deliberately a sink and data host.
+		 */
+		ret = phy_set_mode(glue->phy, PHY_MODE_USB_HOST);
+		if (!ret)
+			ret = musb_set_host(musb);
+		if (ret) {
+			phy_set_mode(glue->phy, glue->phy_mode);
+			if (glue->role == USB_ROLE_NONE)
+				phy_power_off(glue->phy);
+			else if (musb->g.udc && musb->gadget_driver)
+				usb_gadget_connect(&musb->g);
+			return ret;
+		}
+		musb->xceiv->otg->state = OTG_STATE_A_WAIT_VRISE;
+		glue->phy_mode = PHY_MODE_USB_HOST;
 		break;
 	case USB_ROLE_DEVICE:
 		musb->xceiv->otg->state = OTG_STATE_B_IDLE;
