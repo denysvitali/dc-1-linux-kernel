@@ -1635,8 +1635,12 @@
 
 	/*
 	 * Board RTC, in addition to the PMIC RTC. The factory DTBO configures
-	 * GPIO13 and GPIO14 as pulled-up inputs, with GPIO14 alone carrying the
-	 * level-low alarm interrupt. Its default-time is intentionally omitted:
+	 * GPIO13 and GPIO14 as pulled-up inputs, with GPIO14 nominally carrying
+	 * the level-low alarm interrupt. Do not register that interrupt: GPIO14
+	 * remains asserted while STATUS1 reports no INT2 event, producing about
+	 * 500 IRQs/s even after the driver disarms every INT2 output mode. RTC
+	 * timekeeping remains useful without an alarm IRQ; timed wake was never
+	 * operational on this port. Its default-time is intentionally omitted:
 	 * retained hardware time or userspace must establish the clock.
 	 */
 	rtc@30 {
@@ -1644,9 +1648,6 @@
 		reg = <0x30>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&rtc_pins>;
-		interrupt-parent = <&pio>;
-		interrupts = <14 IRQ_TYPE_LEVEL_LOW>;
-		wakeup-source;
 	};
 };
 
