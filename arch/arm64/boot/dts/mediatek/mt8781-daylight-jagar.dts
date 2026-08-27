@@ -1336,28 +1336,29 @@
 		touchscreen-inverted-x;
 		touchscreen-inverted-y;
 		/*
-		 * Measured on hardware 2026-08-23 by five-target
-		 * correspondence taps (libinput debug-events capture,
-		 * outlier-rejected least squares; max residual ~2 mm of
-		 * hand-placement scatter): the sensor reports past the
-		 * visible glass.  The fit back-solved the inversion with the
-		 * declared 16008x21344 maxima, but at capture time the driver
-		 * was inverting around the stale DT-fallback maxima
-		 * 16319x21119 (prop.max_* was latched before the firmware
-		 * override; fixed in wacom_i2c.c alongside this change), so
-		 * the values it recorded -- x 0..15707 / y 312..21344 -- sit
-		 * in a frame offset by (-311, +225) from true hardware
-		 * coordinates.  Values here are that fit shifted back into
-		 * true pre-inversion hardware frame.  The driver remaps this
-		 * window onto the full reported range so every userspace
-		 * stack gets exactly the visible area; a
-		 * LIBINPUT_CALIBRATION_MATRIX was tried first but is not
-		 * applied to tablet-class devices downstream.
+		 * Refit on hardware 2026-08-27 after the prop.max_* fix was
+		 * live: nine screen targets with raw evdev coordinates, plus
+		 * three repeated taps at each diagonal corner and one rejected
+		 * hand-placement outlier.  The previous window was displaced,
+		 * leaving the pointer about 14--19 logical pixels left and
+		 * 4--12 pixels above the nib.  This pre-inversion hardware-frame
+		 * window is the direct least-squares fit; its equivalent runtime
+		 * axis transform was rechecked over nine targets at 1280x960
+		 * (1.08 logical-pixel RMS, 1.55 maximum residual).
+		 *
+		 * The fitted Y maximum is 25 units beyond the controller's
+		 * 21344 feature-report maximum, so the outermost ~1.5 logical
+		 * pixels are unreachable by the pen.  That lies beneath this
+		 * panel's measured bezel overlap; retaining the extrapolated
+		 * endpoint keeps the whole usable surface aligned instead of
+		 * stretching it to an unobservable edge.  Keep the correction
+		 * here: LIBINPUT_CALIBRATION_MATRIX was tried first but is not
+		 * applied reliably to tablet-class devices downstream.
 		 */
-		wacom,visible-x-min = <311>;
-		wacom,visible-x-max = <16018>;
-		wacom,visible-y-min = <87>;
-		wacom,visible-y-max = <21119>;
+		wacom,visible-x-min = <0>;
+		wacom,visible-x-max = <16005>;
+		wacom,visible-y-min = <57>;
+		wacom,visible-y-max = <21369>;
 		/*
 		 * Measured on hardware 2026-08-23: this firmware holds
 		 * data[3] bit 4 set on every in-proximity frame and never
