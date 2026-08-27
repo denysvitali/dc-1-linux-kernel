@@ -207,9 +207,14 @@ struct tcpci;
  * @set_orientation:
  *		Optional; Enable setting the connector orientation
  *		CONFIG_STANDARD_OUTPUT (0x18) bit0.
+ * @role_sw_fwnode:
+ *		Optional; fwnode of a USB role switch already resolved by
+ *		the chip driver. Copied onto struct tcpc_dev so TCPM can
+ *		drive a controller that is not OF-graph-linked here.
  */
 struct tcpci_data {
 	struct regmap *regmap;
+	struct fwnode_handle *role_sw_fwnode;
 	unsigned char TX_BUF_BYTE_x_hidden:1;
 	unsigned char auto_discharge_disconnect:1;
 	unsigned char vbus_vsafe0v:1;

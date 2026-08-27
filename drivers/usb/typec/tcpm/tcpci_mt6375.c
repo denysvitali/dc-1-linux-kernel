@@ -10,11 +10,16 @@
  *
  * This board boots a signed bootloader device tree that cannot describe the
  * chip: the charger driver at the primary address spawns this one with the
- * secondary client, and the Type-C connector is described by a software node
- * carrying sink-only capabilities. Fixed PDOs stop at 12 V so every
- * negotiable voltage stays inside the charger's OVP buckets. No interrupt
- * line is described either, so alerts are polled; PD sources retransmit
- * their capabilities, which absorbs the poll latency while a contract forms.
+ * secondary client, and the Type-C connector is described by a software node.
+ * Power stays sink-only (the MT6375 OTG boost is not wired, and a Type-C hub
+ * already supplies VBUS) but the data role is dual so a hub can DR_SWAP us
+ * to host while a PC host keeps us as the gadget. Fixed PDOs stop at 12 V so
+ * every negotiable voltage stays inside the charger's OVP buckets. No
+ * interrupt line is described either, so alerts are polled; PD sources
+ * retransmit their capabilities, which absorbs the poll latency while a
+ * contract forms. The MUSB dual-role switch is looked up by compatible
+ * because the connector is a software node and cannot graph-link into the
+ * OF tree.
  *
  * Settled contracts reach the charger through TCPM's per-port power supply
  * ("tcpm-source-psy-*"): its ONLINE/VOLTAGE_NOW/CURRENT_MAX mirror whatever
@@ -26,12 +31,15 @@
 #include <linux/i2c.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/string.h>
 #include <linux/usb/pd.h>
+#include <linux/usb/role.h>
 #include <linux/usb/tcpci.h>
 #include <linux/workqueue.h>
 
@@ -111,9 +119,14 @@ static const struct reg_sequence mt6375_tcpc_init_regs[] = {
  * Sink capabilities: fixed PDOs only, 12 V ceiling. Everything above the
  * 11 V mark has no matching OVP bucket yet, and PPS would want continuous
  * input-voltage steering the policy does not implement.
+ *
+ * USB_COMM + DATA_SWAP on the 5 V PDO: we stay a power sink (hub/charger
+ * keeps supplying VBUS) but advertise that a partner may DR_SWAP us to
+ * host. PDO_FIXED_DUAL_ROLE is deliberately absent -- that flag is a
+ * power-role swap, which this charger path does not implement.
  */
 static const u32 mt6375_tcpc_sink_pdos[] = {
-	PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM),
+	PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP),
 	PDO_FIXED(9000, 3000, 0),
 	PDO_FIXED(12000, 3000, 0),
 };
@@ -122,13 +135,60 @@ static const struct property_entry mt6375_tcpc_connector_props[] = {
 	PROPERTY_ENTRY_STRING("compatible", "usb-c-connector"),
 	PROPERTY_ENTRY_STRING("power-role", "sink"),
 	PROPERTY_ENTRY_STRING("try-power-role", "sink"),
-	PROPERTY_ENTRY_STRING("data-role", "device"),
+	PROPERTY_ENTRY_STRING("data-role", "dual"),
 	PROPERTY_ENTRY_U32_ARRAY("sink-pdos", mt6375_tcpc_sink_pdos),
 	PROPERTY_ENTRY_U32("op-sink-microwatt", 10000000),
 	{ }
 };
 
 static const struct software_node mt6375_tcpc_root_node = { };
+
+/*
+ * The connector is a software node, so TCPM cannot follow an OF graph to
+ * MUSB's role switch. Hand TCPM the MUSB device's fwnode instead -- that is
+ * the fwnode the glue registers the switch with. Defer until MUSB has
+ * probed and the switch exists. Without it we cannot DR_SWAP to host.
+ */
+static int mt6375_tcpc_get_role_sw_fwnode(struct fwnode_handle **fw)
+{
+	struct device_node *np;
+	struct platform_device *pdev;
+	struct usb_role_switch *sw;
+
+	*fw = NULL;
+	np = of_find_compatible_node(NULL, NULL, "mediatek,mtk-musb");
+	if (!np)
+		return 0;
+	if (!of_device_is_available(np)) {
+		of_node_put(np);
+		return 0;
+	}
+
+	pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!pdev)
+		return -EPROBE_DEFER;
+	if (!pdev->dev.driver) {
+		put_device(&pdev->dev);
+		return -EPROBE_DEFER;
+	}
+
+	/*
+	 * Parent probe registers the musb-hdrc child; the switch appears from
+	 * that child's init. Defer until it shows up rather than silently
+	 * running without a data-role path.
+	 */
+	sw = usb_role_switch_find_by_fwnode(dev_fwnode(&pdev->dev));
+	if (!sw) {
+		put_device(&pdev->dev);
+		return -EPROBE_DEFER;
+	}
+
+	*fw = dev_fwnode(&pdev->dev);
+	usb_role_switch_put(sw);
+	put_device(&pdev->dev);
+	return 0;
+}
 
 static const struct software_node mt6375_tcpc_connector_node = {
 	.name = "connector",
@@ -248,6 +308,11 @@ static int mt6375_tcpc_probe(struct platform_device *pdev)
 			 hi, lo);
 
 	INIT_DELAYED_WORK(&tcpc->poll, mt6375_tcpc_poll);
+
+	ret = mt6375_tcpc_get_role_sw_fwnode(&tcpc->data.role_sw_fwnode);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "waiting for the MUSB role switch\n");
 
 	/* The TX buffer is contiguous behind the byte count. */
 	tcpc->data.TX_BUF_BYTE_x_hidden = true;

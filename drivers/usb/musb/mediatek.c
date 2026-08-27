@@ -81,6 +81,12 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 		if (glue->role == USB_ROLE_NONE)
 			phy_power_on(glue->phy);
 
+		/* Leave the gadget driver bound (unbind wedges configfs
+		 * and musb_gadget_stop() also stops the host). Just drop
+		 * D+ so a hub can see a host, not a device.
+		 */
+		if (musb->g.udc)
+			usb_gadget_disconnect(&musb->g);
 		devctl |= MUSB_DEVCTL_SESSION;
 		musb_writeb(musb->mregs, MUSB_DEVCTL, devctl);
 		MUSB_HST_MODE(musb);
@@ -95,12 +101,16 @@ static int mtk_otg_switch_set(struct mtk_glue *glue, enum usb_role role)
 			phy_power_on(glue->phy);
 
 		MUSB_DEV_MODE(musb);
+		if (musb->g.udc && musb->gadget_driver)
+			usb_gadget_connect(&musb->g);
 		break;
 	case USB_ROLE_NONE:
 		glue->phy_mode = PHY_MODE_USB_OTG;
 		new_role = USB_ROLE_NONE;
 		devctl &= ~MUSB_DEVCTL_SESSION;
 		musb_writeb(musb->mregs, MUSB_DEVCTL, devctl);
+		if (musb->g.udc)
+			usb_gadget_disconnect(&musb->g);
 		if (glue->role != USB_ROLE_NONE)
 			phy_power_off(glue->phy);
 

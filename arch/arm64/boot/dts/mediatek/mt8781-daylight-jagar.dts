@@ -1003,11 +1003,13 @@
  * confirmed by the stock node usb0@11200000 compatible
  * "mediatek,mt6789-usb20" at the same base with the same IRQ (SPI 128).
  *
- * XXX CONFIG PROBLEM, not a DTS problem: the current .config has
- * CONFIG_USB_MTU3=y but "# CONFIG_USB_MUSB_MEDIATEK is not set".  MTU3 is the
- * *xHCI-style* MediaTek controller and will never match this node, so as
- * configured today enabling usb2 gives no gadget and no USB output channel.
- * CONFIG_USB_MUSB_MEDIATEK must be turned on (=y) for USB to be usable.
+ * Dual-role, not peripheral-only. The same dtbswap DTB is used by the
+ * installer and the installed system: the installer binds the CDC-ACM/ECM
+ * gadget so a PC can reach the device, and a Type-C hub (or any partner
+ * that DR_SWAPs) needs the host stack. TCPM on the MT6375 stays a sink
+ * (the hub supplies VBUS / we keep charging) and only the data role
+ * flips. Default after probe is USB_ROLE_NONE; the gadget bind and a
+ * later DR_SWAP are what pick device vs host.
  *
  * PHY tuning values below are the measured stock ones and differ from the
  * .dtsi defaults (which say eye-vrt = 4).
@@ -1015,7 +1017,7 @@
 &usb2 {
 	status = "okay";
 
-	dr_mode = "peripheral";
+	dr_mode = "otg";
 	maximum-speed = "high-speed";
 };
 

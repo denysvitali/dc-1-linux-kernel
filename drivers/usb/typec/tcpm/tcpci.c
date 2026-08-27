@@ -882,6 +882,8 @@ struct tcpci *tcpci_register_port(struct device *dev, struct tcpci_data *data)
 	if (tcpci->data->set_orientation)
 		tcpci->tcpc.set_orientation = tcpci_set_orientation;
 
+	tcpci->tcpc.role_sw_fwnode = tcpci->data->role_sw_fwnode;
+
 	err = tcpci_parse_config(tcpci);
 	if (err < 0)
 		return ERR_PTR(err);

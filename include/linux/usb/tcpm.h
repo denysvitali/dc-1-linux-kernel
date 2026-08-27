@@ -130,9 +130,14 @@ enum tcpm_transmit_type {
  *		swap following Discover Identity on SOP' occurs.
  *		Return true when the TCPM is allowed to request a Vconn swap
  *		after Discovery Identity on SOP.
+ * @role_sw_fwnode:
+ *		Optional; fwnode of a USB role switch already resolved by
+ *		the TCPC driver. Used when the connector is a software node
+ *		and cannot graph-link to the dual-role controller.
  */
 struct tcpc_dev {
 	struct fwnode_handle *fwnode;
+	struct fwnode_handle *role_sw_fwnode;
 
 	int (*init)(struct tcpc_dev *dev);
 	int (*get_vbus)(struct tcpc_dev *dev);

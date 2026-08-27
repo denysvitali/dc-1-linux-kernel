@@ -1598,6 +1598,12 @@ static void musb_pullup(struct musb *musb, int is_on)
 {
 	u8 power;
 
+	/* Dual-role: a gadget driver may stay bound while we are host so
+	 * configfs is never torn down. Do not raise D+ in that state.
+	 */
+	if (is_on && is_host_active(musb))
+		is_on = 0;
+
 	power = musb_readb(musb->mregs, MUSB_POWER);
 	if (is_on)
 		power |= MUSB_POWER_SOFTCONN;
@@ -1845,12 +1851,18 @@ static int musb_gadget_start(struct usb_gadget *g,
 	spin_lock_irqsave(&musb->lock, flags);
 	musb->is_active = 1;
 
-	if (musb->xceiv)
-		otg_set_peripheral(musb->xceiv->otg, &musb->g);
-	else
-		phy_set_mode(musb->phy, PHY_MODE_USB_DEVICE);
+	/* Dual-role: a Type-C DR_SWAP may have already put us in host
+	 * before the gadget bound. Do not yank the PHY back to device;
+	 * D+ stays down until the role switch asks for it.
+	 */
+	if (!is_host_active(musb)) {
+		if (musb->xceiv)
+			otg_set_peripheral(musb->xceiv->otg, &musb->g);
+		else
+			phy_set_mode(musb->phy, PHY_MODE_USB_DEVICE);
 
-	musb_set_state(musb, OTG_STATE_B_IDLE);
+		musb_set_state(musb, OTG_STATE_B_IDLE);
+	}
 	spin_unlock_irqrestore(&musb->lock, flags);
 
 	musb_start(musb);
