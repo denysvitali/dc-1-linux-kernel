@@ -1602,31 +1602,19 @@
 	fuel-gauge@55 {
 		compatible = "ti,bq78z100";
 		reg = <0x55>;
+		status = "disabled";
 
 		/*
-		 * The battery characteristics are now declared as &jagar_battery
-		 * at the root; see the comment there for where the numbers come
-		 * from and why they moved out of the bus node.
+		 * The pack gauge does not ACK at this address: 0x53 on the same
+		 * bus answers, while 0x55 NAKs read and write addressing across
+		 * repeated live probes.  Binding bq27xxx therefore creates only a
+		 * dead power_supply, repeated -ENXIO warnings and a thermal zone
+		 * which disables itself.  The calibrated MT6358 fuel-gauge fallback
+		 * remains the battery source while this node is disabled.
 		 *
-		 * monitored-battery is still omitted here, and P5.2 kept that
-		 * decision rather than reversing it.  Wiring it up belongs with
-		 * P7.1's gauge bring-up, which has to establish the gauge's
-		 * supply, reset and seal state first.  Two further reasons found
-		 * while checking: battery.yaml itself says a battery node is for
-		 * systems with no suitable non-volatile memory or where that NVM
-		 * is unprogrammed, and the BQ78Z100 is a smart gauge that has
-		 * such flash; and bq27xxx_battery.c calls
-		 * power_supply_get_battery_info() before checking di->dm_regs,
-		 * which is NULL for this family, so adding the property would
-		 * emit a "data memory update not supported" warning on every
-		 * boot and change nothing.  Until then the gauge reports
-		 * voltage/current/temperature/SoC from its own flash config,
-		 * which is enough to be a useful sign of life in
-		 * /sys/class/power_supply/.
-		 *
-		 * bq27xxx.yaml also sets interrupts: false for ti,bq78z100, so
-		 * the gauge's alert pin may not be described here.  The factory
-		 * node declares none either.
+		 * Re-enable this node only after a live ACK and protocol measurement
+		 * establishes how the pack gauge is made reachable.  Its supply,
+		 * reset/seal state and alert wiring remain uncharacterized.
 		 */
 	};
 };
