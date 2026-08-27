@@ -1319,16 +1319,23 @@ static const struct drm_display_mode sharp_nt36523n_modes[] = {
 		.vtotal = 3324,
 	},
 	{
-		/* Native vertical timing for the same production DSC family. */
-		.clock = 406993,
+		/*
+		 * Same 120 Hz line rate as the 60 Hz MP mode above
+		 * (clock 261267 kHz, htotal 1310). vtotal 1662 is
+		 * line_rate/120, with vsync=2 and VBP=6 kept from the
+		 * 60 Hz mode. The previous 406993/1610 pair enumerated as
+		 * 193 Hz in GNOME; DSI HS stayed 672 Mbps and TE tracked
+		 * ~124 Hz, and that mode flickered on hardware.
+		 */
+		.clock = 261267,
 		.hdisplay = 1200,
 		.hsync_start = 1230,
 		.hsync_end = 1250,
 		.htotal = 1310,
 		.vdisplay = 1600,
-		.vsync_start = 1602,
-		.vsync_end = 1604,
-		.vtotal = 1610,
+		.vsync_start = 1654,
+		.vsync_end = 1656,
+		.vtotal = 1662,
 	},
 };
 
