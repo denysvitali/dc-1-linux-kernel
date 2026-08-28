@@ -72,6 +72,8 @@ void fhctl_parse_dt(const u8 *compatible_node, struct mtk_pllfh_data *pllfhs,
 		pr_warn("cannot find \"%s\"\n", compatible_node);
 		return;
 	}
+	if (!of_device_is_available(node))
+		goto out_node_put;
 
 	base = of_iomap(node, 0);
 	if (!base) {

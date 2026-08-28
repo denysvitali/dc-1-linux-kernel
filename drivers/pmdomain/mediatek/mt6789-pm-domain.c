@@ -165,7 +165,7 @@ static int __init mt6789_legacy_display_iommu_fixup(void)
 	mmsys_node = of_find_compatible_node(NULL, NULL, "mediatek,mt6789-mmsys");
 	ovl_node = of_find_compatible_node(NULL, NULL, "mediatek,disp_ovl0");
 	if (!iommu_node || !mmsys_node || !ovl_node) {
-		pr_warn("MT6789: cannot find legacy display IOMMU nodes\n");
+		pr_debug("MT6789: legacy display IOMMU fixup not needed\n");
 		ret = 0;
 		goto out_put_nodes;
 	}

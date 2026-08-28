@@ -311,7 +311,7 @@ static int mt6789_usb_echo_ref_set(struct snd_kcontrol *kcontrol,
 		enable = false;
 
 	if (!dl_memif->substream) {
-		dev_warn(afe->dev, "%s(), dl_memif->substream == NULL\n",
+		dev_dbg(afe->dev, "%s(), dl_memif->substream == NULL\n",
 			 __func__);
 
 		if (afe_priv->usb_call_echo_ref_reallocate) {

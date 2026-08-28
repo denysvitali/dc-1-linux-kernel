@@ -2472,9 +2472,6 @@ static int pwrap_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	const struct of_device_id *of_slave_id = NULL;
 
-	dev_err(&pdev->dev, "JAGAR: pwrap_probe ENTERED, np=%pOF child=%pOF\n",
-		np, np ? np->child : NULL);
-
 	if (np->child)
 		of_slave_id = of_match_node(of_slave_match_tbl, np->child);
 
@@ -2612,7 +2609,6 @@ static int pwrap_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	dev_err(wrp->dev, "JAGAR: pwrap_probe SUCCESS\n");
 	return 0;
 }
 
@@ -2624,37 +2620,7 @@ static struct platform_driver pwrap_drv = {
 	.probe = pwrap_probe,
 };
 
-static int __init jagar_pwrap_init(void)
-{
-	struct device_node *np;
-	struct platform_device *pdev;
-	int ret;
-
-	np = of_find_compatible_node(NULL, NULL, "mediatek,mt8186-pwrap");
-	pr_err("JAGAR: of_find_compatible(mt8186-pwrap) np=%pOF available=%d\n",
-	       np, np ? of_device_is_available(np) : -1);
-	if (np) {
-		pdev = of_find_device_by_node(np);
-		pr_err("JAGAR: of_find_device_by_node pdev=%s drv=%s\n",
-		       pdev ? dev_name(&pdev->dev) : "NULL",
-		       (pdev && pdev->dev.driver) ? pdev->dev.driver->name : "none");
-		if (pdev)
-			put_device(&pdev->dev);
-		of_node_put(np);
-	}
-
-	ret = platform_driver_register(&pwrap_drv);
-	pr_err("JAGAR: platform_driver_register(%s) = %d\n",
-	       pwrap_drv.driver.name, ret);
-	return ret;
-}
-module_init(jagar_pwrap_init);
-
-static void __exit jagar_pwrap_exit(void)
-{
-	platform_driver_unregister(&pwrap_drv);
-}
-module_exit(jagar_pwrap_exit);
+module_platform_driver(pwrap_drv);
 
 MODULE_AUTHOR("Flora Fu, MediaTek");
 MODULE_DESCRIPTION("MediaTek MT8135 PMIC Wrapper Driver");

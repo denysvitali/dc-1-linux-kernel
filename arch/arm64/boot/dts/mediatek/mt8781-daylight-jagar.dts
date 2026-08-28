@@ -2021,6 +2021,12 @@
 			compatible = "mediatek,mt6358-rtc";
 		};
 
+		auxadc {
+			compatible = "mediatek,mt6358-auxadc";
+			/* No shipped consumer; keep MC3416 at stable iio:device0. */
+			status = "disabled";
+		};
+
 		/*
 		 * Power and volume-up come in through the PMIC, not through GPIOs:
 		 * the stock /odm/gpio-keys node is empty and /mt6366keys carries

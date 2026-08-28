@@ -66,7 +66,7 @@ int mt6789_afe_gpio_init(struct mtk_base_afe *afe)
 							     aud_gpios[i].name);
 		if (IS_ERR(aud_gpios[i].gpioctrl)) {
 			ret = PTR_ERR(aud_gpios[i].gpioctrl);
-			dev_err(afe->dev, "%s(), pinctrl_lookup_state %s fail, ret %d\n",
+			dev_dbg(afe->dev, "%s(), pinctrl_lookup_state %s fail, ret %d\n",
 				__func__, aud_gpios[i].name, ret);
 		} else {
 			aud_gpios[i].gpio_prepare = true;
@@ -255,4 +255,3 @@ int mt6789_afe_gpio_request(struct mtk_base_afe *afe, bool enable,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(mt6789_afe_gpio_request);
-

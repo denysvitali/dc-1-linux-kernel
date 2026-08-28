@@ -766,17 +766,21 @@ int mtk_mbox_probe(struct platform_device *pdev, struct mtk_mbox_device *mbdev,
 		/*send status reg*/
 		snprintf(name, sizeof(name), "mbox%d_send", mbox);
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
-		minfo->send_status_reg = devm_ioremap_resource(dev, res);
-		if (IS_ERR((void const *) minfo->send_status_reg)) {
-			pr_notice("MBOX %d can't find send status reg\n", mbox);
+		if (res) {
+			minfo->send_status_reg = devm_ioremap_resource(dev, res);
+			if (IS_ERR((void const *) minfo->send_status_reg))
+				minfo->send_status_reg = NULL;
+		} else {
 			minfo->send_status_reg = NULL;
 		}
 		/*recv status reg*/
 		snprintf(name, sizeof(name), "mbox%d_recv", mbox);
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
-		minfo->recv_status_reg = devm_ioremap_resource(dev, res);
-		if (IS_ERR((void const *) minfo->recv_status_reg)) {
-			pr_notice("MBOX %d can't find recv status reg\n", mbox);
+		if (res) {
+			minfo->recv_status_reg = devm_ioremap_resource(dev, res);
+			if (IS_ERR((void const *) minfo->recv_status_reg))
+				minfo->recv_status_reg = NULL;
+		} else {
 			minfo->recv_status_reg = NULL;
 		}
 

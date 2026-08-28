@@ -1664,8 +1664,11 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 	mtk_crtc->cmdq_client.client.tx_block = false;
 	mtk_crtc->cmdq_client.client.knows_txdone = true;
 	mtk_crtc->cmdq_client.client.rx_callback = ddp_cmdq_cb;
-	mtk_crtc->cmdq_client.chan =
+	if (of_property_present(mtk_crtc->mmsys_dev->of_node, "mboxes"))
+		mtk_crtc->cmdq_client.chan =
 			mbox_request_channel(&mtk_crtc->cmdq_client.client, i);
+	else
+		mtk_crtc->cmdq_client.chan = NULL;
 	if (IS_ERR(mtk_crtc->cmdq_client.chan)) {
 		dev_dbg(dev, "mtk_crtc %d failed to create mailbox client, writing register by CPU now\n",
 			drm_crtc_index(&mtk_crtc->base));

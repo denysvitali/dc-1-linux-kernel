@@ -4,6 +4,7 @@
 CONFIG_LOG_BUF_SHIFT=18
 # CONFIG_SCHED_CACHE is not set
 CONFIG_BLK_DEV_INITRD=y
+CONFIG_BOOT_CONFIG=y
 CONFIG_CC_OPTIMIZE_FOR_SIZE=y
 CONFIG_EXPERT=y
 CONFIG_MODULES=y
@@ -39,6 +40,9 @@ CONFIG_RSEQ=y
 # CGROUP_SCHED, and no cpu controller is compiled in (see CGROUPS below).
 CONFIG_UCLAMP_TASK=y
 CONFIG_CGROUPS=y
+CONFIG_CGROUP_BPF=y
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
 # CGROUPS on its own ships an empty cgroup.controllers: no controller is
 # compiled in, so systemd can account and limit nothing per unit and
 # systemd-oomd is permanently ConditionPathExists-skipped. PSI is oomd's input
@@ -359,9 +363,13 @@ CONFIG_PHY_MTK_TPHY=y
 CONFIG_PHY_MTK_MIPI_DSI=y
 CONFIG_NVMEM=y
 CONFIG_NVMEM_MTK_EFUSE=y
+# MT6789 has no entry or efuse-cell layout in the generic socinfo driver.
+# CONFIG_MTK_SOCINFO is not set
 CONFIG_EXT4_FS=y
+CONFIG_EXT4_FS_POSIX_ACL=y
 CONFIG_F2FS_FS=y
 CONFIG_FILE_LOCKING=y
+CONFIG_AUTOFS_FS=y
 # CONFIG_DNOTIFY is not set
 CONFIG_INOTIFY_USER=y
 CONFIG_MSDOS_FS=y
