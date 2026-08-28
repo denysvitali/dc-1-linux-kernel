@@ -548,6 +548,54 @@ static int mt6358_fg_get_property(struct power_supply *psy,
 	}
 }
 
+/*
+ * The PMIC accumulator survives while Linux is running, but charge_uah is a
+ * software anchor and is therefore lost on every reboot.  The DC-1's pack
+ * gauge, which would normally retain this state itself, does not answer.  Let
+ * privileged early userspace restore a recent clean-shutdown anchor through
+ * the standard CHARGE_NOW property; all validation and persistence policy
+ * stays in userspace, while the driver enforces the physical range.
+ *
+ * Update first so last_car is current.  Subsequent polling then integrates
+ * from the restore instant rather than counting any pre-restore delta twice.
+ */
+static int mt6358_fg_set_property(struct power_supply *psy,
+				  enum power_supply_property psp,
+				  const union power_supply_propval *val)
+{
+	struct mt6358_fg *fg = power_supply_get_drvdata(psy);
+	int before, after, ret;
+
+	if (psp != POWER_SUPPLY_PROP_CHARGE_NOW)
+		return -EINVAL;
+	if (val->intval < 0 || val->intval > fg->charge_full_design_uah)
+		return -ERANGE;
+
+	mutex_lock(&fg->lock);
+	ret = mt6358_fg_update(fg);
+	if (ret) {
+		mutex_unlock(&fg->lock);
+		return ret;
+	}
+
+	before = mt6358_fg_capacity(fg);
+	fg->charge_uah = val->intval;
+	after = mt6358_fg_capacity(fg);
+	mutex_unlock(&fg->lock);
+
+	dev_info(fg->dev, "restored charge anchor: %d uAh (%d%%)\n",
+		 val->intval, after);
+	if (before != after)
+		power_supply_changed(fg->psy);
+	return 0;
+}
+
+static int mt6358_fg_property_is_writeable(struct power_supply *psy,
+					    enum power_supply_property psp)
+{
+	return psp == POWER_SUPPLY_PROP_CHARGE_NOW;
+}
+
 static enum power_supply_property mt6358_fg_properties[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_PRESENT,
@@ -571,6 +619,8 @@ static const struct power_supply_desc mt6358_fg_desc = {
 	.properties = mt6358_fg_properties,
 	.num_properties = ARRAY_SIZE(mt6358_fg_properties),
 	.get_property = mt6358_fg_get_property,
+	.set_property = mt6358_fg_set_property,
+	.property_is_writeable = mt6358_fg_property_is_writeable,
 };
 
 /*
