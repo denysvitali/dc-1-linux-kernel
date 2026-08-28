@@ -2663,7 +2663,8 @@ static const struct hc_driver musb_hc_driver = {
 	.description		= "musb-hcd",
 	.product_desc		= "MUSB HDRC host driver",
 	.hcd_priv_size		= sizeof(struct musb *),
-	.flags			= HCD_USB2 | HCD_DMA | HCD_MEMORY,
+	.flags			= HCD_USB2 | HCD_MEMORY |
+				  (IS_ENABLED(CONFIG_MUSB_PIO_ONLY) ? 0 : HCD_DMA),
 
 	/* not using irq handler or reset hooks from usbcore, since
 	 * those must be shared with peripheral code for OTG configs

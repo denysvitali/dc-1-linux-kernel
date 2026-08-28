@@ -43,6 +43,13 @@ CONFIG_CGROUPS=y
 CONFIG_CGROUP_BPF=y
 CONFIG_BPF=y
 CONFIG_BPF_SYSCALL=y
+# systemd-nsresourced loads a BPF LSM policy to lock its resource namespace.
+# BPF_EVENTS is implicit once its perf/kprobe prerequisites are present.
+CONFIG_BPF_JIT=y
+CONFIG_BPF_LSM=y
+CONFIG_KPROBES=y
+CONFIG_KPROBE_EVENTS=y
+CONFIG_PERF_EVENTS=y
 # CGROUPS on its own ships an empty cgroup.controllers: no controller is
 # compiled in, so systemd can account and limit nothing per unit and
 # systemd-oomd is permanently ConditionPathExists-skipped. PSI is oomd's input
@@ -61,6 +68,11 @@ CONFIG_MEMCG=y
 # "default y" once NAMESPACES is on, so these two lines cover the set.
 CONFIG_NAMESPACES=y
 CONFIG_USER_NS=y
+# Tracker's content extractor uses Landlock to confine itself.  Keep the LSM
+# built in so the sandbox is available before userspace or modules start.
+CONFIG_SECURITY=y
+CONFIG_SECURITY_LANDLOCK=y
+CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,ipe,bpf"
 # CONFIG_CACHESTAT_SYSCALL is not set
 # Symbols in backtraces. Without this the freezer's "task refusing to freeze"
 # dumps print raw addresses, which cannot be resolved after the fact on a
@@ -148,7 +160,7 @@ CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
 CONFIG_ARM_MEDIATEK_CPUFREQ_HW=y
 CONFIG_PARTITION_ADVANCED=y
 CONFIG_BINFMT_SCRIPT=y
-# CONFIG_COREDUMP is not set
+CONFIG_COREDUMP=y
 CONFIG_SLUB_TINY=y
 # CONFIG_COMPAT_BRK is not set
 # CONFIG_COMPACTION is not set
@@ -160,10 +172,16 @@ CONFIG_NET=y
 CONFIG_PACKET=y
 CONFIG_UNIX=y
 CONFIG_INET=y
+CONFIG_SYN_COOKIES=y
 CONFIG_RFKILL=y
 CONFIG_CFG80211=y
 CONFIG_MAC80211=y
 CONFIG_BT=y
+CONFIG_BT_RFCOMM=y
+CONFIG_BT_RFCOMM_TTY=y
+CONFIG_BT_BNEP=y
+CONFIG_BT_BNEP_MC_FILTER=y
+CONFIG_BT_BNEP_PROTO_FILTER=y
 CONFIG_BT_MTKSDIO=y
 # Tailscale: CONFIG_TUN backs /dev/net/tun (tailscaled's userspace WireGuard
 # data plane); without it tailscaled dies with "CreateTUN ... /dev/net/tun
@@ -222,6 +240,10 @@ CONFIG_SERIAL_OF_PLATFORM=y
 CONFIG_I2C_CHARDEV=y
 CONFIG_I2C_MT65XX=y
 CONFIG_INPUT_EVDEV=y
+# GNOME Remote Desktop and Bluetooth userspace create virtual input/HID
+# devices through these interfaces; make them independent of module loading.
+CONFIG_INPUT_UINPUT=y
+CONFIG_UHID=y
 CONFIG_INPUT_KEYBOARD=y
 CONFIG_KEYBOARD_MTK_PMIC=y
 CONFIG_KEYBOARD_MT6779=y
@@ -365,6 +387,9 @@ CONFIG_NVMEM=y
 CONFIG_NVMEM_MTK_EFUSE=y
 # MT6789 has no entry or efuse-cell layout in the generic socinfo driver.
 # CONFIG_MTK_SOCINFO is not set
+# xdg-document-portal needs /dev/fuse for its document filesystem.  Built-in
+# support also guarantees the device exists when early systemd units probe it.
+CONFIG_FUSE_FS=y
 CONFIG_EXT4_FS=y
 CONFIG_EXT4_FS_POSIX_ACL=y
 CONFIG_F2FS_FS=y
@@ -392,12 +417,15 @@ CONFIG_PSTORE_RAM=y
 CONFIG_DMA_CMA=y
 CONFIG_CMA_SIZE_MBYTES=64
 CONFIG_PRINTK_TIME=y
+CONFIG_MAGIC_SYSRQ=y
+CONFIG_MAGIC_SYSRQ_DEFAULT_ENABLE=0x0
+# CONFIG_MAGIC_SYSRQ_SERIAL is not set
 # CONFIG_SYMBOLIC_ERRNAME is not set
 # CONFIG_DEBUG_MISC is not set
 # CONFIG_SECTION_MISMATCH_WARN_ONLY is not set
 CONFIG_DEBUG_FS=y
 # CONFIG_RCU_TRACE is not set
-# CONFIG_FTRACE is not set
+CONFIG_FTRACE=y
 # CONFIG_STRICT_DEVMEM is not set
 # CONFIG_RUNTIME_TESTING_MENU is not set
 
