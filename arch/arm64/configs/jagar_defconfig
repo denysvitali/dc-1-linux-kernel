@@ -68,11 +68,15 @@ CONFIG_MEMCG=y
 # "default y" once NAMESPACES is on, so these two lines cover the set.
 CONFIG_NAMESPACES=y
 CONFIG_USER_NS=y
-# Tracker's content extractor uses Landlock to confine itself.  Keep the LSM
-# built in so the sandbox is available before userspace or modules start.
+# Tracker's content extractor uses Landlock to confine itself. systemd's
+# namespace restrictions also need securityfs to discover BPF-LSM and BTF to
+# load their CO-RE policy. Keep the complete chain built in.
 CONFIG_SECURITY=y
+CONFIG_SECURITYFS=y
 CONFIG_SECURITY_LANDLOCK=y
 CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,ipe,bpf"
+CONFIG_DEBUG_INFO_DWARF5=y
+CONFIG_DEBUG_INFO_BTF=y
 # CONFIG_CACHESTAT_SYSCALL is not set
 # Symbols in backtraces. Without this the freezer's "task refusing to freeze"
 # dumps print raw addresses, which cannot be resolved after the fact on a
