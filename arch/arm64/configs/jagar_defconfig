@@ -295,6 +295,23 @@ CONFIG_REGULATOR_MT6315=y
 CONFIG_REGULATOR_MT6358=y
 CONFIG_REGULATOR_MT6359=y
 CONFIG_REGULATOR_TPS65132=y
+
+# --- USB Video Class capture ---
+# The DC-1 has no built-in camera, but its Type-C port can act as a USB 2.0
+# data host while remaining a power sink. Keep this media stack restricted to
+# standards-compliant UVC capture: no platform cameras, sensors, lenses,
+# ancillary auto-selection, unrelated media device classes, or UVC buttons.
+CONFIG_MEDIA_SUPPORT=y
+CONFIG_MEDIA_SUPPORT_FILTER=y
+# CONFIG_MEDIA_SUBDRV_AUTOSELECT is not set
+CONFIG_MEDIA_CAMERA_SUPPORT=y
+CONFIG_MEDIA_USB_SUPPORT=y
+CONFIG_VIDEO_DEV=y
+# CONFIG_VIDEO_CAMERA_SENSOR is not set
+# CONFIG_VIDEO_CAMERA_LENS is not set
+CONFIG_USB_VIDEO_CLASS=y
+# CONFIG_USB_VIDEO_CLASS_INPUT_EVDEV is not set
+
 CONFIG_DRM=y
 CONFIG_DRM_SIMPLEDRM=y
 CONFIG_DRM_PANFROST=m
