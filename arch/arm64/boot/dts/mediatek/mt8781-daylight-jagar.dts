@@ -48,29 +48,18 @@
 		#size-cells = <2>;
 		ranges;
 
-		/*
-		 * MTK preloader/LK leave UART0 muxed and running at 921600 8n1.
-		 * "earlycon" on the command line resolves through stdout-path and
-		 * uses the OF_EARLYCON_DECLARE(mtk8250, "mediatek,mt6577-uart")
-		 * hook, so it works before any clock driver has loaded.
-		 */
+		/* LK supplies the UART0 path; keep its DT alias for diagnostics. */
 		stdout-path = "serial0:921600n1";
 
 		/*
-		 * Fallback command line.  If the boot chain patches /chosen/bootargs
-		 * (MTK LK does fdt_setprop on the DT it hands to the kernel) that wins
-		 * and this string is discarded, so having it here is strictly safer
-		 * than having nothing.
+		 * Fallback command line. LK may replace /chosen/bootargs before Linux.
+		 * Do not add earlycon or console=ttyS0: this board has no UART header,
+		 * and a synchronous early UART write can hang if LK gated its clock.
 		 *
-		 * - earlycon + keep_bootcon: the only console that works before
-		 *   clk-mt6789.ko is loaded (uart0's "bus" clock is CLK_IFRAO_UART0,
-		 *   whose provider is a module in this defconfig -> mtk8250_probe
-		 *   returns -EPROBE_DEFER until then).
-		 * - clk/regulator/pd_ignore_unused: stop the kernel gating off the
-		 *   clocks, rails and power domains that LK left on for the panel,
-		 *   the framebuffer scanout and UFS.
-		 * - maxcpus=1: bring up cpu0 only for the first attempt; see the
-		 *   CPU discussion at the bottom of this file.
+		 * - clk/regulator/pd_ignore_unused: skip the boot-time unused-resource
+		 *   sweeps for clocks, rails and power domains that LK left on for the
+		 *   panel, framebuffer scanout and UFS.
+		 * - maxcpus=1: retain the boot-proven CPU bring-up boundary.
 		 * - arm64.nomte mirrors stock; stock has a reason to set it and we
 		 *   have no way to know what it is.
 		 */
@@ -763,8 +752,8 @@
  *
  * XXX UNKNOWN: whether UART0 is physically accessible on the DC-1 at all
  * (test pads / pogo pins / USB-C sideband).  Nothing in the DT says.
- * Note also that stock boots with mtk_printk_ctrl.disable_uart=1, which is a
- * software gag on the stock kernel only; it does not affect earlycon here.
+ * Stock boots with mtk_printk_ctrl.disable_uart=1, a stock-kernel setting;
+ * this mainline DT deliberately omits earlycon and a serial console.
  */
 &uart0 {
 	status = "okay";
@@ -1651,11 +1640,7 @@
  * MT6366 behind the PMIC wrapper, IRQ on GPIO137, exactly as on the other two
  * mt6789 boards.  Voltage windows are the generic MT6366 ones.
  *
- * Dependency warning: pwrap needs CLK_IFRAO_PMIC_* from infracfg_ao
- * (COMMON_CLK_MT6789=m) and its IRQ from &pio (PINCTRL_MT6789=m), so nothing
- * downstream of this node -- including &ufs's vcc-supply -- can probe until
- * userspace has modprobed those.  That is a config choice, not a DT bug, but it
- * is why the first boot must rely on earlycon + simplefb and not on UFS.
+ * The clock and pinctrl providers are built in for the current jagar config.
  */
 &pwrap {
 	status = "okay";
