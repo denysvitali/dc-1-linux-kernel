@@ -13,6 +13,7 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/soc/mediatek/mtk-cmdq.h>
@@ -187,6 +188,8 @@ struct mtk_disp_ovl_data {
 	bool skip_config_reset;
 	bool reset_on_stop;
 	bool defer_irq_enable;
+	bool needs_physical_larb;
+	unsigned int larb_id;
 };
 
 /*
@@ -1264,6 +1267,38 @@ static const struct component_ops mtk_disp_ovl_component_ops = {
 	.unbind = mtk_disp_ovl_unbind,
 };
 
+/* MT6789 physical scanout still needs its LARB restored after power loss. */
+static int mtk_disp_ovl_link_larb(struct device *dev, unsigned int larb_id)
+{
+	struct platform_device *larb_pdev;
+	struct device_node *node;
+	struct device_link *link;
+	u32 id;
+
+	for_each_available_child_of_node(dev->of_node->parent, node) {
+		if (!of_device_is_compatible(node, "mediatek,mt6789-smi-larb") ||
+		    of_property_read_u32(node, "mediatek,larb-id", &id) ||
+		    id != larb_id)
+			continue;
+
+		larb_pdev = of_find_device_by_node(node);
+		of_node_put(node);
+		if (!larb_pdev)
+			return -EPROBE_DEFER;
+		if (!platform_get_drvdata(larb_pdev)) {
+			put_device(&larb_pdev->dev);
+			return -EPROBE_DEFER;
+		}
+
+		link = device_link_add(dev, &larb_pdev->dev,
+				       DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_CONSUMER);
+		put_device(&larb_pdev->dev);
+		return link ? 0 : -EINVAL;
+	}
+
+	return -ENODEV;
+}
+
 static int mtk_disp_ovl_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1310,6 +1345,14 @@ static int mtk_disp_ovl_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "Failed to request irq %d\n", irq);
 	priv->irq_enabled = !priv->data->defer_irq_enable;
+
+	/* The IOMMU supplies these links itself when translated DMA is used. */
+	if (priv->data->needs_physical_larb &&
+	    !of_find_property(dev->of_node, "iommus", NULL)) {
+		ret = mtk_disp_ovl_link_larb(dev, priv->data->larb_id);
+		if (ret)
+			return dev_err_probe(dev, ret, "Failed to link physical DMA LARB\n");
+	}
 
 	pm_runtime_enable(dev);
 
@@ -1386,6 +1429,8 @@ static const struct mtk_disp_ovl_data mt6789_ovl_driver_data = {
 	.skip_config_reset = true,
 	.reset_on_stop = true,
 	.defer_irq_enable = true,
+	.needs_physical_larb = true,
+	.larb_id = 0,
 };
 
 static const struct mtk_disp_ovl_data mt6789_ovl_2l_driver_data = {
@@ -1400,6 +1445,8 @@ static const struct mtk_disp_ovl_data mt6789_ovl_2l_driver_data = {
 	.skip_config_reset = true,
 	.reset_on_stop = true,
 	.defer_irq_enable = true,
+	.needs_physical_larb = true,
+	.larb_id = 1,
 };
 
 static const struct mtk_disp_ovl_data mt8192_ovl_driver_data = {
