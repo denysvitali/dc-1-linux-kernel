@@ -2,6 +2,15 @@
 #
 # ARM CPU Idle drivers
 #
+config ARM_JAGAR_CPUIDLE
+	bool "Daylight DC-1 shallow CPU idle driver"
+	depends on ARM64 && ARCH_MEDIATEK && SUSPEND
+	help
+	  Register architectural WFI on the Daylight DC-1 so suspend-to-idle
+	  can freeze the tick and timekeeping. No PSCI power state or CPU
+	  power-domain transition is requested. Other boards are unaffected.
+	  Select this for the DC-1 until deeper firmware idle is validated.
+
 config ARM_CPUIDLE
 	bool "Generic ARM CPU idle Driver"
 	depends on ARM
