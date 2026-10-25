@@ -79,6 +79,7 @@ MODULE_LICENSE("GPL");
 #define MT_QUIRK_APPLE_TOUCHBAR		BIT(23)
 #define MT_QUIRK_YOGABOOK9I		BIT(24)
 #define MT_QUIRK_KEEP_LATENCY_ON_CLOSE	BIT(25)
+#define MT_QUIRK_CONTACTID_TRANSDUCER	BIT(26)
 
 #define MT_INPUTMODE_TOUCHSCREEN	0x02
 #define MT_INPUTMODE_TOUCHPAD		0x03
@@ -235,6 +236,7 @@ static void mt_post_parse(struct mt_device *td, struct mt_application *app);
 #define MT_CLS_APPLE_TOUCHBAR			0x0114
 #define MT_CLS_YOGABOOK9I			0x0115
 #define MT_CLS_EGALAX_P80H84			0x0116
+#define MT_CLS_BRYDGE_MAX			0x0117
 #define MT_CLS_SIS				0x0457
 
 #define MT_DEFAULT_MAXCONTACT	10
@@ -433,8 +435,14 @@ static const struct mt_class mt_classes[] = {
 	{ .name = MT_CLS_APPLE_TOUCHBAR,
 		.quirks = MT_QUIRK_HOVERING |
 			MT_QUIRK_SLOT_IS_CONTACTID_MINUS_ONE |
-			MT_QUIRK_APPLE_TOUCHBAR,
+			MT_QUIRK_APPLE_TOUCHBAR |
+			MT_QUIRK_CONTACTID_TRANSDUCER,
 		.maxcontacts = 11,
+	},
+	{ .name = MT_CLS_BRYDGE_MAX,
+		.quirks = MT_QUIRK_HOVERING |
+			MT_QUIRK_CONTACTID_TRANSDUCER,
+		.is_indirect = true,
 	},
 	{ .name = MT_CLS_SIS,
 		.quirks = MT_QUIRK_NOT_SEEN_MEANS_UP |
@@ -715,7 +723,7 @@ static struct mt_report_data *mt_allocate_report_data(struct mt_device *td,
 				unsigned int hid = field->usage[n].hid;
 
 				if (hid == HID_DG_CONTACTID ||
-				   (cls->quirks & MT_QUIRK_APPLE_TOUCHBAR &&
+				   (cls->quirks & MT_QUIRK_CONTACTID_TRANSDUCER &&
 				   hid == HID_DG_TRANSDUCER_INDEX)) {
 					rdata->is_mt_collection = true;
 					break;
@@ -908,10 +916,10 @@ static int mt_touch_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 			return 1;
 		case HID_DG_TRANSDUCER_INDEX:
 			/*
-			 * Contact ID in case of Apple Touch Bars is contained
-			 * in fields with HID_DG_TRANSDUCER_INDEX usage.
+			 * Apple Touch Bars and Brydge MAX touchpads use
+			 * HID_DG_TRANSDUCER_INDEX for contact IDs.
 			 */
-			if (!(cls->quirks & MT_QUIRK_APPLE_TOUCHBAR))
+			if (!(cls->quirks & MT_QUIRK_CONTACTID_TRANSDUCER))
 				return 0;
 			fallthrough;
 		case HID_DG_CONTACTID:
@@ -1431,6 +1439,10 @@ static int mt_touch_input_configured(struct hid_device *hdev,
 
 	if (app->quirks & MT_QUIRK_NOT_SEEN_MEANS_UP)
 		app->mt_flags |= INPUT_MT_DROP_UNUSED;
+
+	/* The Brydge repeats its left-button usage in the report. */
+	if (cls->name == MT_CLS_BRYDGE_MAX)
+		td->is_buttonpad = true;
 
 	/* check for clickpads */
 	if ((app->mt_flags & INPUT_MT_POINTER) &&
@@ -2123,6 +2135,8 @@ static int mt_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	td->haptic->hdev = hdev;
 	td->hdev = hdev;
 	td->mtclass = *mtclass;
+	if (mtclass->name == MT_CLS_BRYDGE_MAX)
+		hdev->quirks |= HID_QUIRK_Y_INVERT;
 	td->inputmode_value = MT_INPUTMODE_TOUCHSCREEN;
 	hid_set_drvdata(hdev, td);
 
@@ -2707,6 +2721,11 @@ static const struct hid_device_id mt_devices[] = {
 	{ .driver_data = MT_CLS_APPLE_TOUCHBAR,
 		HID_USB_DEVICE(USB_VENDOR_ID_APPLE,
 			USB_DEVICE_ID_APPLE_TOUCHBAR_DISPLAY) },
+
+	/* Brydge 11.0 MAX+ Bluetooth keyboard/touchpad */
+	{ .driver_data = MT_CLS_BRYDGE_MAX,
+		HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_BRYDGE,
+				     USB_DEVICE_ID_BRYDGE_11_MAX_PLUS) },
 
 	/* Google MT devices */
 	{ .driver_data = MT_CLS_GOOGLE,
