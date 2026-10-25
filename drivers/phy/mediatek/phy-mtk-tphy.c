@@ -944,7 +944,17 @@ static void u2_phy_instance_set_mode(struct mtk_tphy *tphy,
 	tmp = readl(u2_banks->com + U3P_U2PHYDTM1);
 	switch (mode) {
 	case PHY_MODE_USB_DEVICE:
-		tmp &= ~P2C_FORCE_SESSION_VALID;
+		/* TCPM validates VBUS on boards whose UTMI input stays at SessEnd.
+		 * Device mode needs the same override as host mode, with BVALID
+		 * asserted so MUSB can attach the bound gadget to the host.
+		 */
+		if (instance->force_vbus_valid) {
+			tmp |= P2C_FORCE_SESSION_VALID | P2C_RG_VBUSVALID |
+			       P2C_RG_AVALID | P2C_RG_BVALID;
+			tmp &= ~P2C_RG_SESSEND;
+		} else {
+			tmp &= ~P2C_FORCE_SESSION_VALID;
+		}
 		tmp |= P2C_FORCE_IDDIG | P2C_RG_IDDIG;
 		break;
 	case PHY_MODE_USB_HOST:
