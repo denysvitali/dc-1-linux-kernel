@@ -481,6 +481,17 @@ config MAX44009
 	 To compile this driver as a module, choose M here:
 	 the module will be called max44009.
 
+config MN29005
+	tristate "MN29005 raw ambient light sensor"
+	depends on I2C && PM
+	help
+	  Fixed-gain raw ambient light readings for revision 0x1288.
+	  Lux conversion, proximity and interrupts are not supported.
+	  The board must establish AP I2C ownership before enabling its DT node.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called mn29005.
+
 config NOA1305
 	tristate "ON Semiconductor NOA1305 ambient light sensor"
 	depends on I2C
