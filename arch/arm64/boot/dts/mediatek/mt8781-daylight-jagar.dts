@@ -1481,16 +1481,14 @@
 	clock-frequency = <400000>;
 
 	/*
-	 * Memsic MN29-family ALS/proximity part, 7-bit address 0x49.
-	 *
-	 * Identified by the stock tinysys sensorhub driver name (`mn29xxx`) and
-	 * by live bit-banged probing (exactly one ACKing address), not yet by a
-	 * register ID.  The earlier pre-SCP probe saw every write-data byte NAK
-	 * and constant reads, so this node intentionally exposes the controller
-	 * for controlled measurement while leaving the device unbound.  Do not
-	 * add a compatible until both an exact part identity and its documented
-	 * register protocol are established.
+	 * AP owns GPIO132/133. Do not enable an SCP sensorhub on these pins.
+	 * Public MN29005 protocol, independently read revision 0x1288.
+	 * Polling ALS only; no proximity emitter or IRQ configuration.
 	 */
+	light-sensor@49 {
+		compatible = "mediatek,mn29xxxals";
+		reg = <0x49>;
+	};
 };
 
 &i2c6 {
@@ -2466,7 +2464,8 @@
  */
 &scp {
 	compatible = "mediatek,mt6789-tinysys-scp";
-	status = "okay";
+	/* Sensor buses belong to the AP; never start a competing sensorhub. */
+	status = "disabled";
 
 	reg = <0 0x10500000 0 0xc0000>,	/* sram / TCM */
 	      <0 0x10724000 0 0x1000>,	/* cfgreg */
