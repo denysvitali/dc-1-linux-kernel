@@ -1,0 +1,12 @@
+MN29005 offline fault-injection test
+===================================
+
+Run from a kernel source checkout with Python 3 and a C compiler:
+
+    python3 tools/testing/iio/test_mn29005.py
+
+CC selects another compiler. The test compiles the actual mn29005.c with
+observing I2C and runtime-PM stubs, then exercises transfer failures,
+restoration, readiness, saturation, identity and ownership checks. It does
+not access a device or replace a real kernel build, concurrency testing,
+physical bus-fault testing or hardware power/suspend qualification.
