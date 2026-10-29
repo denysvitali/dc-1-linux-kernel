@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/iio/light/mediatek,mn29xxxals.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MN29005 ambient light sensor using the MediaTek MN29 protocol
+
+maintainers:
+  - Sean Qureshi <2031258+stqism@users.noreply.github.com>
+
+description: |
+  Ambient light support for the MN29005 protocol with revision 0x1288.
+  The compatible follows the public MediaTek MN29 ALS driver. It does not
+  imply support for every MN29-family part. The host must have exclusive
+  ownership of the I2C bus; a sensor hub must not access the same device.
+  This binding describes polling ambient light operation only. Proximity
+  emission and interrupts are not enabled.
+
+properties:
+  compatible:
+    const: mediatek,mn29xxxals
+
+  reg:
+    items:
+      - const: 0x49
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        light-sensor@49 {
+            compatible = "mediatek,mn29xxxals";
+            reg = <0x49>;
+        };
+    };
