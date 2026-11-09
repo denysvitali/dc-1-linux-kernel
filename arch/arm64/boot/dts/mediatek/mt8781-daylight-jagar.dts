@@ -1422,6 +1422,11 @@
 		compatible = "richtek,rt4539";
 		reg = <0x3c>;
 
+		/*
+		 * rt4539.c pairs this label with "lcd-backlight-amber" on
+		 * i2c2: this node becomes the only backlight device and mixes
+		 * both chips, so neither label may change on its own.
+		 */
 		label = "lcd-backlight";
 		default-state = "off";
 		enable-gpios = <&pio 98 GPIO_ACTIVE_HIGH>;

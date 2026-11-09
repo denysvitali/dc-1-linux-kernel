@@ -1,0 +1,28 @@
+What:		/sys/bus/i2c/devices/.../warmth
+Date:		November 2026
+KernelVersion:	7.2
+Contact:	Denys Vitali <denys@denv.it>
+Description:
+		(RW) Colour mix of a paired cool and warm RT4539 frontlight,
+		from 0 (cool chip only) to max_warmth (warm chip only). The
+		backlight class device's brightness remains the total
+		luminance; a write here re-mixes the current brightness on
+		both chips in one update.
+
+		Up to half of max_warmth the warm chip rises beside an
+		undimmed cool chip. Above it the cool chip dims while the warm
+		chip keeps rising, until the cool chip is switched off at
+		max_warmth. A chip leaving the mix starts its fade at once and
+		is powered down after it; the write does not wait for the fade.
+
+		Present only on the cool chip of a pair, which is the parent
+		of the backlight class device (reachable as
+		/sys/class/backlight/<label>/device/warmth). The value is not
+		persistent and starts at 0.
+
+What:		/sys/bus/i2c/devices/.../max_warmth
+Date:		November 2026
+KernelVersion:	7.2
+Contact:	Denys Vitali <denys@denv.it>
+Description:
+		(RO) Largest value accepted by warmth.

@@ -5,6 +5,14 @@
  * Brightness is a 12-bit value latched by a consecutive write to registers
  * 0x04 and 0x05.  The MTP register at 0xff is deliberately outside this
  * driver's regmap so no kernel or userspace path can program nonvolatile data.
+ *
+ * Boards with a cool and a warm frontlight carry two of these chips.  When a
+ * node labelled "<label>-amber" accompanies the node labelled "<label>", the
+ * pair is exposed as the single backlight device "<label>": its brightness is
+ * the total luminance and the "warmth" attribute of the cool chip's I2C device
+ * selects the mix.  Both chips are then updated by one brightness request, so
+ * no intermediate colour is ever displayed.  The warm chip registers no
+ * backlight device of its own.
  */
 
 #include <linux/backlight.h>
@@ -16,8 +24,13 @@
 #include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/sysfs.h>
+#include <linux/workqueue.h>
 
 #define RT4539_REG_DIMMING		0x00
 #define RT4539_REG_BOOST		0x01
@@ -41,13 +54,28 @@
 #define RT4539_RESOLUTION_12_BIT	0x04
 #define RT4539_MAX_HW_BRIGHTNESS	0x0fff
 
+#define RT4539_WARM_LABEL_SUFFIX	"-amber"
+#define RT4539_MAX_WARMTH		255
+
 struct rt4539 {
 	struct device *dev;
 	struct regmap *regmap;
 	struct gpio_desc *enable_gpio;
 	struct backlight_device *backlight;
-	/* Serializes register writes with power and shutdown transitions. */
+	/* Warm chip mixed into this backlight; NULL for a single-chip device. */
+	struct rt4539 *warm;
+	/*
+	 * Serializes register writes with power and shutdown transitions.  A
+	 * paired update takes the cool chip's lock, then the warm chip's.
+	 */
 	struct mutex lock;
+	/* Completes a fade started by a lit backlight; see rt4539_apply(). */
+	struct delayed_work off_work;
+	unsigned long off_deadline;
+	bool fading;
+	bool removed;
+	u32 warmth;
+	u32 hw_brightness;
 	u32 max_brightness;
 	u32 max_hw_brightness;
 	u32 min_hw_brightness;
@@ -314,6 +342,7 @@ static int rt4539_prepare(struct rt4539 *rt, u32 brightness)
 		goto fail;
 
 	rt->enabled = true;
+	rt->hw_brightness = brightness;
 	return 0;
 
 fail:
@@ -321,36 +350,43 @@ fail:
 	return ret;
 }
 
-static int rt4539_disable(struct rt4539 *rt)
+static void rt4539_fail_safe(struct rt4539 *rt)
 {
-	int first_error = 0;
+	/* EN low is the fail-safe even if an I2C transaction failed. */
+	gpiod_set_value_cansleep(rt->enable_gpio, 0);
+	rt->enabled = false;
+}
+
+/* Start the screen-off fade.  Returns the time to wait before power-down. */
+static int rt4539_fade_out(struct rt4539 *rt, u32 *settle_ms)
+{
+	int first_error;
 	int ret;
 
-	if (!rt->enabled)
-		return 0;
-
-	ret = regmap_write(rt->regmap, RT4539_REG_TIME_CTRL,
-			   rt->off_time_ctrl);
-	if (ret)
-		first_error = ret;
+	first_error = regmap_write(rt->regmap, RT4539_REG_TIME_CTRL,
+				   rt->off_time_ctrl);
 	ret = rt4539_write_brightness(rt, 0);
 	if (ret && !first_error)
 		first_error = ret;
-	if (!first_error && rt->off_settle_delay_ms)
-		msleep(rt->off_settle_delay_ms);
+	if (!first_error)
+		*settle_ms = max(*settle_ms, rt->off_settle_delay_ms);
+
+	return first_error;
+}
+
+static int rt4539_power_down(struct rt4539 *rt)
+{
+	int ret;
+
 	ret = regmap_update_bits(rt->regmap, RT4539_REG_ENABLE,
 				 RT4539_BL_ENABLE, 0);
-	if (ret && !first_error)
-		first_error = ret;
-
-	/* EN low is the fail-safe even if the fade transaction failed. */
-	gpiod_set_value_cansleep(rt->enable_gpio, 0);
-	rt->enabled = false;
-	return first_error;
+	rt4539_fail_safe(rt);
+	return ret;
 }
 
 static void rt4539_force_off(struct rt4539 *rt)
 {
+	rt->fading = false;
 	if (!rt->enabled)
 		return;
 
@@ -361,34 +397,175 @@ static void rt4539_force_off(struct rt4539 *rt)
 	rt->enabled = false;
 }
 
-static int rt4539_backlight_update_status(struct backlight_device *backlight)
+/*
+ * Convert a brightness and a mixing share (out of RT4539_MAX_WARMTH) into the
+ * chip's 12-bit range.  Zero means the chip is powered down.
+ */
+static u32 rt4539_scale(const struct rt4539 *rt, u32 brightness,
+			u32 max_brightness, u32 share)
 {
-	struct rt4539 *rt = bl_get_data(backlight);
-	u32 brightness = backlight_get_brightness(backlight);
-	u32 hardware_brightness;
+	u64 divisor = (u64)max_brightness * RT4539_MAX_WARMTH;
+	u64 value;
+
+	if (!brightness || !share)
+		return 0;
+
+	value = div64_u64((u64)brightness * share * rt->max_hw_brightness +
+			  divisor / 2, divisor);
+	return clamp_t(u64, value, rt->min_hw_brightness,
+		       rt->max_hw_brightness);
+}
+
+static void rt4539_off_work(struct work_struct *work)
+{
+	struct rt4539 *rt = container_of(to_delayed_work(work), struct rt4539,
+					 off_work);
 	int ret;
 
 	mutex_lock(&rt->lock);
-	if (!brightness) {
-		ret = rt4539_disable(rt);
+	if (rt->fading && rt->enabled) {
+		/* Requeued after a cancel: honour the fade still in progress. */
+		if (time_before(jiffies, rt->off_deadline)) {
+			schedule_delayed_work(&rt->off_work,
+					      rt->off_deadline - jiffies);
+		} else {
+			rt->fading = false;
+			ret = rt4539_power_down(rt);
+			if (ret)
+				dev_err(rt->dev, "deferred power-down failed: %d\n",
+					ret);
+		}
+	}
+	mutex_unlock(&rt->lock);
+}
+
+/*
+ * Apply one hardware brightness per chip; all chip locks are held.  A chip
+ * that needs its 20 ms power-up goes first so the already lit chips change
+ * together with it.
+ *
+ * A chip switched off starts the screen-off fade at once.  With @sync (system
+ * suspend) the chips share one fade interval and are powered down before
+ * returning.  Otherwise the power-down is deferred to off_work, so a mix or
+ * blank request returns in a few milliseconds instead of waiting ~290 ms for
+ * the fade, and a chip lit again before the fade ends is simply re-lit.
+ */
+static int rt4539_apply(struct rt4539 *const chips[], const u32 targets[],
+			unsigned int count, bool sync)
+{
+	bool power_down[2] = { };
+	u32 settle_ms = 0;
+	int first_error = 0;
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < count; i++) {
+		if (!targets[i] || chips[i]->enabled)
+			continue;
+		ret = rt4539_prepare(chips[i], targets[i]);
+		if (ret && !first_error)
+			first_error = ret;
+	}
+
+	for (i = 0; i < count; i++) {
+		struct rt4539 *rt = chips[i];
+
+		ret = 0;
+		if (!rt->enabled)
+			continue;
+		if (!targets[i] && rt->fading) {
+			if (sync) {
+				/* off_work rechecks fading under the lock. */
+				cancel_delayed_work(&rt->off_work);
+				rt->fading = false;
+				settle_ms = max(settle_ms,
+						rt->off_settle_delay_ms);
+				power_down[i] = true;
+			}
+		} else if (!targets[i]) {
+			ret = rt4539_fade_out(rt, &settle_ms);
+			rt->hw_brightness = 0;
+			if (ret) {
+				rt4539_fail_safe(rt);
+			} else if (sync) {
+				power_down[i] = true;
+			} else {
+				rt->fading = true;
+				rt->off_deadline = jiffies +
+					msecs_to_jiffies(rt->off_settle_delay_ms);
+				schedule_delayed_work(&rt->off_work,
+					msecs_to_jiffies(rt->off_settle_delay_ms));
+			}
+		} else {
+			if (rt->fading) {
+				cancel_delayed_work(&rt->off_work);
+				rt->fading = false;
+				ret = regmap_write(rt->regmap,
+						   RT4539_REG_TIME_CTRL,
+						   rt->time_ctrl);
+			}
+			if (!ret && targets[i] != rt->hw_brightness)
+				ret = rt4539_write_brightness(rt, targets[i]);
+			if (ret)
+				rt4539_fail_safe(rt);
+			else
+				rt->hw_brightness = targets[i];
+		}
+		if (ret && !first_error)
+			first_error = ret;
+	}
+
+	if (settle_ms && (power_down[0] || power_down[1]))
+		msleep(settle_ms);
+
+	for (i = 0; i < count; i++) {
+		if (!power_down[i])
+			continue;
+		ret = rt4539_power_down(chips[i]);
+		if (ret && !first_error)
+			first_error = ret;
+	}
+
+	return first_error;
+}
+
+static int rt4539_backlight_update_status(struct backlight_device *backlight)
+{
+	struct rt4539 *rt = bl_get_data(backlight);
+	u32 max_brightness = backlight->props.max_brightness;
+	u32 brightness = backlight_get_brightness(backlight);
+	bool sync = backlight->props.state & BL_CORE_SUSPENDED;
+	struct rt4539 *chips[2] = { rt, rt->warm };
+	u32 targets[2];
+	int ret;
+
+	mutex_lock(&rt->lock);
+	if (rt->removed) {
+		ret = -ENODEV;
+		goto out;
+	}
+	if (!rt->warm) {
+		targets[0] = rt4539_scale(rt, brightness, max_brightness,
+					  RT4539_MAX_WARMTH);
+		ret = rt4539_apply(chips, targets, 1, sync);
 		goto out;
 	}
 
-	hardware_brightness = DIV_ROUND_CLOSEST_ULL((u64)brightness *
-						    rt->max_hw_brightness,
-						    backlight->props.max_brightness);
-	hardware_brightness = clamp_t(u32, hardware_brightness,
-				      rt->min_hw_brightness,
-				      rt->max_hw_brightness);
+	/*
+	 * Constant-sum crossfade.  The lower half of the warmth range raises
+	 * the warm chip beside an untouched cool chip; the upper half dims the
+	 * cool chip while the warm chip keeps rising, so the light turns warm
+	 * instead of dying.  The cool chip is off only at maximum warmth.
+	 */
+	targets[0] = rt4539_scale(rt, brightness, max_brightness,
+				  min(2 * (RT4539_MAX_WARMTH - rt->warmth),
+				      RT4539_MAX_WARMTH));
+	targets[1] = rt4539_scale(rt->warm, brightness, max_brightness,
+				  2 * rt->warmth);
 
-	if (!rt->enabled)
-		ret = rt4539_prepare(rt, hardware_brightness);
-	else
-		ret = rt4539_write_brightness(rt, hardware_brightness);
-	if (ret && rt->enabled) {
-		gpiod_set_value_cansleep(rt->enable_gpio, 0);
-		rt->enabled = false;
-	}
+	mutex_lock_nested(&rt->warm->lock, SINGLE_DEPTH_NESTING);
+	ret = rt4539_apply(chips, targets, 2, sync);
+	mutex_unlock(&rt->warm->lock);
 
 out:
 	mutex_unlock(&rt->lock);
@@ -399,6 +576,157 @@ static const struct backlight_ops rt4539_backlight_ops = {
 	.options = BL_CORE_SUSPENDRESUME,
 	.update_status = rt4539_backlight_update_status,
 };
+
+static ssize_t warmth_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct rt4539 *rt = dev_get_drvdata(dev);
+	u32 warmth;
+
+	mutex_lock(&rt->lock);
+	warmth = rt->warmth;
+	mutex_unlock(&rt->lock);
+
+	return sysfs_emit(buf, "%u\n", warmth);
+}
+
+static ssize_t warmth_store(struct device *dev, struct device_attribute *attr,
+			    const char *buf, size_t count)
+{
+	struct rt4539 *rt = dev_get_drvdata(dev);
+	u32 warmth;
+	int ret;
+
+	ret = kstrtou32(buf, 0, &warmth);
+	if (ret)
+		return ret;
+	if (warmth > RT4539_MAX_WARMTH)
+		return -EINVAL;
+
+	mutex_lock(&rt->lock);
+	rt->warmth = warmth;
+	mutex_unlock(&rt->lock);
+
+	/* Re-mix the current brightness under the backlight's update lock. */
+	ret = backlight_update_status(rt->backlight);
+	return ret ?: count;
+}
+static DEVICE_ATTR_RW(warmth);
+
+static ssize_t max_warmth_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", RT4539_MAX_WARMTH);
+}
+static DEVICE_ATTR_RO(max_warmth);
+
+static struct attribute *rt4539_attrs[] = {
+	&dev_attr_warmth.attr,
+	&dev_attr_max_warmth.attr,
+	NULL
+};
+
+static umode_t rt4539_attr_is_visible(struct kobject *kobj,
+				      struct attribute *attr, int index)
+{
+	struct rt4539 *rt = dev_get_drvdata(kobj_to_dev(kobj));
+
+	return rt->warm ? attr->mode : 0;
+}
+
+static const struct attribute_group rt4539_group = {
+	.attrs = rt4539_attrs,
+	.is_visible = rt4539_attr_is_visible,
+};
+
+static const struct attribute_group *rt4539_groups[] = {
+	&rt4539_group,
+	NULL
+};
+
+static struct i2c_driver rt4539_driver;
+
+/* Find the enabled RT4539 node carrying @label, with a reference held. */
+static struct device_node *rt4539_find_node(const char *label)
+{
+	struct device_node *np;
+	const char *other;
+
+	for_each_compatible_node(np, NULL, "richtek,rt4539") {
+		if (of_device_is_available(np) &&
+		    !of_property_read_string(np, "label", &other) &&
+		    !strcmp(other, label))
+			return np;
+	}
+
+	return NULL;
+}
+
+/* True when @label names the warm half of a pair described in the tree. */
+static bool rt4539_is_warm_channel(const char *label)
+{
+	size_t suffix = strlen(RT4539_WARM_LABEL_SUFFIX);
+	size_t length = strlen(label);
+	struct device_node *np;
+	bool paired;
+	char *cool;
+
+	if (length <= suffix ||
+	    strcmp(label + length - suffix, RT4539_WARM_LABEL_SUFFIX))
+		return false;
+
+	cool = kstrndup(label, length - suffix, GFP_KERNEL);
+	if (!cool)
+		return false;
+	np = rt4539_find_node(cool);
+	kfree(cool);
+	paired = np;
+	of_node_put(np);
+
+	return paired;
+}
+
+/*
+ * Bind the warm chip paired with @rt, if the tree describes one.  The device
+ * link unbinds this driver from the cool chip before the warm chip can go
+ * away, so rt->warm stays valid for as long as the backlight exists.
+ */
+static int rt4539_attach_warm_channel(struct rt4539 *rt, const char *label)
+{
+	struct device *dev = rt->dev;
+	struct i2c_client *client;
+	struct device_node *np;
+	char *warm_label;
+	int ret = -EPROBE_DEFER;
+
+	warm_label = kasprintf(GFP_KERNEL, "%s" RT4539_WARM_LABEL_SUFFIX,
+			       label);
+	if (!warm_label)
+		return -ENOMEM;
+	np = rt4539_find_node(warm_label);
+	kfree(warm_label);
+	if (!np)
+		return 0;
+
+	client = of_find_i2c_device_by_node(np);
+	of_node_put(np);
+	if (!client)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "warm channel is not registered yet\n");
+
+	device_lock(&client->dev);
+	if (client->dev.driver == &rt4539_driver.driver &&
+	    device_link_add(dev, &client->dev, DL_FLAG_AUTOREMOVE_CONSUMER)) {
+		rt->warm = i2c_get_clientdata(client);
+		ret = 0;
+	}
+	device_unlock(&client->dev);
+	put_device(&client->dev);
+
+	if (ret)
+		return dev_err_probe(dev, ret, "warm channel is not bound yet\n");
+	return 0;
+}
 
 static int rt4539_probe(struct i2c_client *client)
 {
@@ -416,6 +744,7 @@ static int rt4539_probe(struct i2c_client *client)
 		return -ENOMEM;
 	rt->dev = dev;
 	mutex_init(&rt->lock);
+	INIT_DELAYED_WORK(&rt->off_work, rt4539_off_work);
 
 	rt->enable_gpio = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
 	if (IS_ERR(rt->enable_gpio))
@@ -434,6 +763,18 @@ static int rt4539_probe(struct i2c_client *client)
 	ret = device_property_read_string(dev, "label", &label);
 	if (ret)
 		label = dev_name(dev);
+
+	i2c_set_clientdata(client, rt);
+	if (rt4539_is_warm_channel(label)) {
+		dev_info(dev, "%s is the warm channel of a paired backlight\n",
+			 label);
+		return 0;
+	}
+
+	ret = rt4539_attach_warm_channel(rt, label);
+	if (ret)
+		return ret;
+
 	props.max_brightness = rt->max_brightness;
 	props.brightness = 0;
 	rt->backlight = devm_backlight_device_register(dev, label, dev, rt,
@@ -443,9 +784,8 @@ static int rt4539_probe(struct i2c_client *client)
 		return dev_err_probe(dev, PTR_ERR(rt->backlight),
 				     "failed to register backlight\n");
 
-	i2c_set_clientdata(client, rt);
-	dev_info(dev, "registered %s, off until first brightness request\n",
-		 label);
+	dev_info(dev, "registered %s%s, off until first brightness request\n",
+		 label, rt->warm ? " with a warm channel" : "");
 	return 0;
 }
 
@@ -453,8 +793,24 @@ static void rt4539_remove(struct i2c_client *client)
 {
 	struct rt4539 *rt = i2c_get_clientdata(client);
 
+	/*
+	 * The backlight device outlives remove() until devres runs, so refuse
+	 * later requests before stopping the deferred power-downs.
+	 */
+	mutex_lock(&rt->lock);
+	rt->removed = true;
+	mutex_unlock(&rt->lock);
+	cancel_delayed_work_sync(&rt->off_work);
+	if (rt->warm)
+		cancel_delayed_work_sync(&rt->warm->off_work);
+
 	mutex_lock(&rt->lock);
 	rt4539_force_off(rt);
+	if (rt->warm) {
+		mutex_lock_nested(&rt->warm->lock, SINGLE_DEPTH_NESTING);
+		rt4539_force_off(rt->warm);
+		mutex_unlock(&rt->warm->lock);
+	}
 	mutex_unlock(&rt->lock);
 }
 
@@ -473,6 +829,7 @@ static struct i2c_driver rt4539_driver = {
 	.driver = {
 		.name = "rt4539",
 		.of_match_table = rt4539_of_match,
+		.dev_groups = rt4539_groups,
 	},
 	.probe = rt4539_probe,
 	.remove = rt4539_remove,
