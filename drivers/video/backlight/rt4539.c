@@ -389,7 +389,6 @@ static void rt4539_fail_safe(struct rt4539 *rt)
 	rt->enabled = false;
 }
 
-/* Start the screen-off fade.  Returns the time to wait before power-down. */
 /*
  * Live slope from @from towards @to for @steps transitions.  Near the target
  * the 128 ms slope completes in a fraction of a step, so every step stays
@@ -535,15 +534,12 @@ static int rt4539_apply(struct rt4539 *const chips[], const u32 targets[],
 		ret = 0;
 		if (!rt->enabled)
 			continue;
-		if (!targets[i]) {
-			if (sync && rt->fading) {
-				/* off_work rechecks fading under the lock. */
-				cancel_delayed_work(&rt->off_work);
-				rt->fading = false;
-				settle_ms = max(settle_ms,
-						rt->off_settle_delay_ms);
-				power_down[i] = true;
-			}
+		if (!targets[i] && sync && rt->fading) {
+			/* off_work rechecks fading under the lock. */
+			cancel_delayed_work(&rt->off_work);
+			rt->fading = false;
+			settle_ms = max(settle_ms, rt->off_settle_delay_ms);
+			power_down[i] = true;
 		} else if (!targets[i]) {
 			/*
 			 * Restart the fade: the chip may be powered down only
