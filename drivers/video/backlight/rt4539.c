@@ -57,6 +57,13 @@
 #define RT4539_WARM_LABEL_SUFFIX	"-amber"
 #define RT4539_MAX_WARMTH		255
 
+/* Slope codes live in TIME_CTRL's low three bits; see slope_delay_ms[]. */
+#define RT4539_SLOPE_1_MS		1
+#define RT4539_SLOPE_8_MS		2
+#define RT4539_SLOPE_128_MS		3
+#define RT4539_SLOPE_MASK		7
+#define RT4539_MAX_PROFILE_STEPS	8
+
 struct rt4539 {
 	struct device *dev;
 	struct regmap *regmap;
@@ -81,6 +88,8 @@ struct rt4539 {
 	u32 min_hw_brightness;
 	u32 enable_post_delay_ms;
 	u32 off_settle_delay_ms;
+	u32 profile_steps;
+	u32 profile_step_ms;
 	u8 fb_enable;
 	u8 led_current;
 	u8 control;
@@ -92,6 +101,9 @@ struct rt4539 {
 	u8 pfm;
 	bool enabled;
 };
+
+/* TIME_CTRL slope code to fade time, indexed by the code's low three bits. */
+static const u16 slope_delay_ms[] = { 0, 1, 8, 128, 256, 512, 768, 1024 };
 
 static const struct regmap_config rt4539_regmap_config = {
 	.reg_bits = 8,
@@ -118,7 +130,6 @@ static int rt4539_read_required_u32(struct device *dev, const char *name,
 
 static int rt4539_parse_properties(struct rt4539 *rt)
 {
-	static const u16 slope_delay_ms[] = { 0, 1, 8, 128, 256, 512, 768, 1024 };
 	struct device *dev = rt->dev;
 	const char *default_state;
 	u32 fbs[6];
@@ -193,6 +204,27 @@ static int rt4539_parse_properties(struct rt4539 *rt)
 	if (ret)
 		return ret;
 	rt->time_ctrl = value;
+
+	/*
+	 * Brightness and mix changes should reach the panel within a frame or
+	 * two instead of the 128 ms stock slope.  Without a profile, time-ctrl
+	 * stays the slope for every live change.
+	 */
+	if (device_property_present(dev, "brightness-profile")) {
+		ret = rt4539_read_required_u32(dev, "brightness-profile",
+					       RT4539_MAX_PROFILE_STEPS,
+					       &rt->profile_steps);
+		if (ret)
+			return ret;
+		if (!rt->profile_steps)
+			return dev_err_probe(dev, -EINVAL,
+					     "brightness-profile must be nonzero\n");
+		ret = rt4539_read_required_u32(dev,
+					       "brightness-profile-step-ms",
+					       256, &rt->profile_step_ms);
+		if (ret)
+			return ret;
+	}
 
 	ret = rt4539_read_required_u32(dev,
 				       "screen-off-backlight-off-time-ctrl",
@@ -358,6 +390,36 @@ static void rt4539_fail_safe(struct rt4539 *rt)
 }
 
 /* Start the screen-off fade.  Returns the time to wait before power-down. */
+/*
+ * Live slope from @from towards @to for @steps transitions.  Near the target
+ * the 128 ms slope completes in a fraction of a step, so every step stays
+ * under brightness-profile-step-ms; farther away the 8 ms slope never
+ * overshoots a step and still lands well inside it.  Without a profile live
+ * changes use time-ctrl.  The screen-off slope stays reserved for the fade.
+ */
+static u8 rt4539_live_slope(const struct rt4539 *rt, u32 from, u32 to,
+			   u32 steps)
+{
+	u32 distance = from > to ? from - to : to - from;
+	u32 near;
+
+	if (!rt->profile_steps)
+		return rt->time_ctrl;
+
+	near = max_t(u32, rt->max_hw_brightness / steps, 1);
+	if (distance <= near && slope_delay_ms[RT4539_SLOPE_128_MS] <=
+	    rt->profile_step_ms)
+		near = RT4539_SLOPE_128_MS;
+	else
+		near = RT4539_SLOPE_8_MS;
+
+	if (slope_delay_ms[near] > rt->profile_step_ms)
+		near = RT4539_SLOPE_1_MS;
+
+	return (rt->time_ctrl & ~RT4539_SLOPE_MASK) | near;
+}
+
+/* Start the screen-off fade.  Returns the time to wait before power-down. */
 static int rt4539_fade_out(struct rt4539 *rt, u32 *settle_ms)
 {
 	int first_error;
@@ -473,8 +535,8 @@ static int rt4539_apply(struct rt4539 *const chips[], const u32 targets[],
 		ret = 0;
 		if (!rt->enabled)
 			continue;
-		if (!targets[i] && rt->fading) {
-			if (sync) {
+		if (!targets[i]) {
+			if (sync && rt->fading) {
 				/* off_work rechecks fading under the lock. */
 				cancel_delayed_work(&rt->off_work);
 				rt->fading = false;
@@ -483,27 +545,35 @@ static int rt4539_apply(struct rt4539 *const chips[], const u32 targets[],
 				power_down[i] = true;
 			}
 		} else if (!targets[i]) {
+			/*
+			 * Restart the fade: the chip may be powered down only
+			 * off_settle_delay_ms after this request, and cancelled fades
+			 * keep running out while this one does.
+			 */
 			ret = rt4539_fade_out(rt, &settle_ms);
-			rt->hw_brightness = 0;
+			if (!ret && rt->hw_brightness)
+				rt->fading = true;
 			if (ret) {
 				rt4539_fail_safe(rt);
 			} else if (sync) {
 				power_down[i] = true;
-			} else {
-				rt->fading = true;
+			} else if (rt->fading) {
 				rt->off_deadline = jiffies +
 					msecs_to_jiffies(rt->off_settle_delay_ms);
 				schedule_delayed_work(&rt->off_work,
 					msecs_to_jiffies(rt->off_settle_delay_ms));
 			}
+			rt->hw_brightness = 0;
 		} else {
-			if (rt->fading) {
-				cancel_delayed_work(&rt->off_work);
-				rt->fading = false;
-				ret = regmap_write(rt->regmap,
-						   RT4539_REG_TIME_CTRL,
-						   rt->time_ctrl);
-			}
+			/*
+			 * A cancelled power-down keeps running out from brightness 0;
+			 * there is no need to touch the slope before relighting.
+			 */
+			rt->fading = false;
+			ret = regmap_write(rt->regmap, RT4539_REG_TIME_CTRL,
+					   rt4539_live_slope(rt, rt->hw_brightness,
+							     targets[i],
+							     rt->profile_steps));
 			if (!ret && targets[i] != rt->hw_brightness)
 				ret = rt4539_write_brightness(rt, targets[i]);
 			if (ret)

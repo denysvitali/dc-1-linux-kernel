@@ -26,3 +26,18 @@ KernelVersion:	7.2
 Contact:	Denys Vitali <denys@denv.it>
 Description:
 		(RO) Largest value accepted by warmth.
+
+What:		/devicetree/property brightness-profile,
+		brightness-profile-step-ms
+Date:		November 2026
+KernelVersion:	7.2
+Contact:	Denys Vitali <denys@denv.it>
+Description:
+		Number of slope transitions a live brightness or warmth change
+		is split into (1 to 8) and the target duration of each, in
+		milliseconds. Near the target the driver uses the 128 ms slope,
+		which finishes within a fraction of a step; farther away it uses
+		the 8 ms slope so the step is not overshot. Without the
+		property every live change uses time-ctrl. The
+		screen-off fade always keeps
+		screen-off-backlight-off-time-ctrl.
