@@ -293,6 +293,27 @@ enum dentist_divider_range {
 	CLK_SF(CLK5_CLK2_DS_CNTL, CLK2_ALLOW_DS, mask_sh), \
 	CLK_SF(CLK5_CLK3_DS_CNTL, CLK3_ALLOW_DS, mask_sh)
 
+#define CLK_REG_LIST_DCN60()	  \
+	CLK_SR_DCN60(CLK8_CLK_TICK_CNT_CONFIG_REG,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK0_CURRENT_CNT,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK1_CURRENT_CNT,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK2_CURRENT_CNT,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK3_CURRENT_CNT,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK4_CURRENT_CNT,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK0_BYPASS_CNTL,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK1_BYPASS_CNTL,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK2_BYPASS_CNTL,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK3_BYPASS_CNTL,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK4_BYPASS_CNTL,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK0_DS_CNTL,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK1_DS_CNTL,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK2_DS_CNTL,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK3_DS_CNTL,  CLK08, 0), \
+	CLK_SR_DCN60(CLK8_CLK4_DS_CNTL,  CLK08, 0)
+
+#define CLK_COMMON_MASK_SH_LIST_DCN60(mask_sh) \
+	CLK_COMMON_MASK_SH_LIST_DCN42(mask_sh)
+
 #define CLK_REG_FIELD_LIST(type) \
 	type DPREFCLK_SRC_SEL; \
 	type DENTIST_DPREFCLK_WDIVIDER; \
@@ -406,6 +427,7 @@ struct clk_mgr_registers {
 	uint32_t CLK6_spll_field_8;
 	CLK42_REG_LIST(8, uint32_t)
 	CLK42_REG_LIST(5, uint32_t)
+	uint32_t CLK8_CLK0_ALLOW_DS;
 };
 
 struct clk_mgr_shift {
@@ -518,6 +540,15 @@ struct clk_mgr_internal {
 	 */
 	const void *dal_init_table;
 	long long dal_init_table_addr;
+
+	/**
+	 * @utm_override_table:
+	 *
+	 * GPU-accessible DRAM buffer for the UTM table transferred to SMU via
+	 * DALSMC_MSG_TransferTableDram2Smu(TABLE_SOC_UTM).
+	 */
+	void *utm_override_table;
+	long long utm_override_table_addr;
 
 	bool dpm_present;
 	bool pme_trigger_pending;

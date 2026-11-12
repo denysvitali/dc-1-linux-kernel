@@ -140,21 +140,22 @@ static bool numa_cma_configured __initdata;
 static int __init early_numa_cma(char *p)
 {
 	int nid, count = 0;
-	unsigned long tmp;
+	unsigned long node;
+	phys_addr_t size;
 	char *s = p;
 
 	while (*s) {
-		if (sscanf(s, "%lu%n", &tmp, &count) != 1)
+		if (sscanf(s, "%lu%n", &node, &count) != 1)
 			break;
 
 		if (s[count] == ':') {
-			if (tmp >= MAX_NUMNODES)
+			if (node >= MAX_NUMNODES)
 				break;
-			nid = array_index_nospec(tmp, MAX_NUMNODES);
+			nid = array_index_nospec(node, MAX_NUMNODES);
 
 			s += count + 1;
-			tmp = memparse(s, &s);
-			numa_cma_size[nid] = tmp;
+			size = memparse(s, &s);
+			numa_cma_size[nid] = size;
 
 			if (*s == ',')
 				s++;
@@ -207,9 +208,10 @@ static void __init dma_numa_cma_reserve(void)
 		pernuma_size_bytes = cma_get_size(dma_contiguous_default_area);
 
 	for_each_node(nid) {
-		int size, ret;
+		phys_addr_t size;
 		char name[CMA_MAX_NAME];
 		struct cma **cma;
+		int ret;
 
 		if (!node_online(nid)) {
 			if (pernuma_size_bytes || numa_cma_size[nid])
@@ -449,8 +451,8 @@ struct page *dma_alloc_contiguous(struct device *dev, size_t size, gfp_t gfp)
  *
  * This function releases memory allocated by dma_alloc_contiguous(). As the
  * cma_release returns false when provided pages do not belong to contiguous
- * area and true otherwise, this function then does a fallback __free_pages()
- * upon a false-return.
+ * area and true otherwise, this function then does a fallback
+ * free_pages_exact() upon a false-return.
  */
 void dma_free_contiguous(struct device *dev, struct page *page, size_t size)
 {
@@ -474,7 +476,7 @@ void dma_free_contiguous(struct device *dev, struct page *page, size_t size)
 	}
 
 	/* not in any cma, free from buddy */
-	__free_pages(page, get_order(size));
+	free_pages_exact(page_address(page), size);
 }
 
 /*

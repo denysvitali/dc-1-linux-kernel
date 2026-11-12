@@ -673,7 +673,7 @@ static int tmp401_probe(struct i2c_client *client)
 	struct tmp401_data *data;
 	int status;
 
-	data = devm_kzalloc(dev, sizeof(struct tmp401_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct tmp401_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -695,7 +695,7 @@ static int tmp401_probe(struct i2c_client *client)
 	info->type = hwmon_chip;
 	info->config = data->chip_channel_config;
 
-	data->chip_channel_config[0] = HWMON_C_UPDATE_INTERVAL;
+	data->chip_channel_config[0] = HWMON_C_REGISTER_TZ | HWMON_C_UPDATE_INTERVAL;
 
 	info = &data->temp_info;
 	info->type = hwmon_temp;

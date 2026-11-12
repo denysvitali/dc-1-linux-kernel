@@ -84,7 +84,7 @@ enum npc_kpu_lc_ltype {
 	NPC_LT_LC_CUSTOM1 = 0xF,
 };
 
-/* Don't modify Ltypes upto SCTP, otherwise it will
+/* Don't modify Ltypes up to SCTP, otherwise it will
  * effect flow tag calculation and thus RSS.
  */
 enum npc_kpu_ld_ltype {
@@ -140,7 +140,7 @@ enum npc_kpu_lg_ltype {
 	NPC_LT_LG_CUSTOM1 = 0xF,
 };
 
-/* Don't modify Ltypes upto SCTP, otherwise it will
+/* Don't modify Ltypes up to SCTP, otherwise it will
  * effect flow tag calculation and thus RSS.
  */
 enum npc_kpu_lh_ltype {
@@ -161,10 +161,12 @@ enum npc_kpu_lh_ltype {
  * Software assigns pkind for each incoming port such as CGX
  * Ethernet interfaces, LBK interfaces, etc.
  */
-#define NPC_UNRESERVED_PKIND_COUNT NPC_RX_CPT_HDR_PTP_PKIND
+#define NPC_UNRESERVED_PKIND_COUNT NPC_RX_SKIP_SIZE_PKIND
 
 enum npc_pkind_type {
 	NPC_RX_LBK_PKIND = 0ULL,
+	NPC_RX_SKIP_SIZE_PKIND = 46ULL,
+	NPC_RX_CPT_SKIP_SIZE_PKIND = 50ULL,
 	NPC_RX_CPT_HDR_PTP_PKIND = 54ULL,
 	NPC_RX_CUSTOM_PRE_L2_PKIND = 55ULL,
 	NPC_RX_VLAN_EXDSA_PKIND = 56ULL,

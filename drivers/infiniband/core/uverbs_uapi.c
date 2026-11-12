@@ -628,6 +628,7 @@ void uverbs_destroy_api(struct uverbs_api *uapi)
 static const struct uapi_definition uverbs_core_api[] = {
 	UAPI_DEF_CHAIN(uverbs_def_obj_async_fd),
 	UAPI_DEF_CHAIN(uverbs_def_obj_counters),
+	UAPI_DEF_CHAIN(uverbs_def_obj_comp_cntr),
 	UAPI_DEF_CHAIN(uverbs_def_obj_cq),
 	UAPI_DEF_CHAIN(uverbs_def_obj_device),
 	UAPI_DEF_CHAIN(uverbs_def_obj_dm),
@@ -728,7 +729,7 @@ void uverbs_disassociate_api(struct uverbs_api *uapi)
 			 *
 			 * release_cleanup is the exception because
 			 * uverbs_uobject_fd_release() needs it. In this case
-			 * the module reference held by the fops will guarentee
+			 * the module reference held by the fops will guarantee
 			 * the type_class remains valid too.
 			 */
 			if (type_attrs &&

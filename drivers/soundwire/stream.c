@@ -1060,14 +1060,23 @@ static int sdw_slave_port_config(struct sdw_slave *slave,
 
 	i = 0;
 	list_for_each_entry(p_rt, &s_rt->port_list, port_node) {
-		/*
-		 * TODO: Check valid port range as defined by DisCo/
-		 * slave
-		 */
 		if (!is_bpt_stream) {
 			ret = sdw_slave_port_is_valid_range(&slave->dev, port_config[i].num);
 			if (ret < 0)
 				return ret;
+
+			/*
+			 * A port in the generic valid range may still be unsupported by
+			 * the Slave or unavailable for the requested stream direction.
+			 */
+			if (!sdw_get_slave_dpn_prop(slave, s_rt->direction,
+						    port_config[i].num)) {
+				dev_err(&slave->dev,
+					"port %u not supported for %s\n",
+					port_config[i].num,
+					s_rt->direction == SDW_DATA_DIR_TX ? "TX" : "RX");
+				return -EINVAL;
+			}
 		} else if (port_config[i].num) {
 			return -EINVAL;
 		}
@@ -1562,7 +1571,7 @@ int sdw_prepare_stream(struct sdw_stream_runtime *stream)
 	if (stream->state != SDW_STREAM_CONFIGURED &&
 	    stream->state != SDW_STREAM_DEPREPARED &&
 	    stream->state != SDW_STREAM_DISABLED) {
-		pr_err("%s: %s: inconsistent state state %d\n",
+		pr_err("%s: %s: inconsistent state %d\n",
 		       __func__, stream->name, stream->state);
 		ret = -EINVAL;
 		goto state_err;
@@ -1646,7 +1655,7 @@ int sdw_enable_stream(struct sdw_stream_runtime *stream)
 
 	if (stream->state != SDW_STREAM_PREPARED &&
 	    stream->state != SDW_STREAM_DISABLED) {
-		pr_err("%s: %s: inconsistent state state %d\n",
+		pr_err("%s: %s: inconsistent state %d\n",
 		       __func__, stream->name, stream->state);
 		ret = -EINVAL;
 		goto state_err;
@@ -1733,7 +1742,7 @@ int sdw_disable_stream(struct sdw_stream_runtime *stream)
 	}
 
 	if (stream->state != SDW_STREAM_ENABLED) {
-		pr_err("%s: %s: inconsistent state state %d\n",
+		pr_err("%s: %s: inconsistent state %d\n",
 		       __func__, stream->name, stream->state);
 		ret = -EINVAL;
 		goto state_err;
@@ -1839,7 +1848,7 @@ int sdw_deprepare_stream(struct sdw_stream_runtime *stream)
 
 	if (stream->state != SDW_STREAM_PREPARED &&
 	    stream->state != SDW_STREAM_DISABLED) {
-		pr_err("%s: %s: inconsistent state state %d\n",
+		pr_err("%s: %s: inconsistent state %d\n",
 		       __func__, stream->name, stream->state);
 		ret = -EINVAL;
 		goto state_err;

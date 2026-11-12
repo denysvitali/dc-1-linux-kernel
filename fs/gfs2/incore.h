@@ -321,7 +321,6 @@ enum {
 	GLF_INITIAL			= 10,
 	GLF_HAVE_FROZEN_REPLY		= 11,
 	GLF_INSTANTIATE_IN_PROG		= 12, /* instantiate happening now */
-	GLF_LRU				= 13,
 	GLF_OBJECT			= 14, /* Used only for tracing */
 	GLF_BLOCKING			= 15,
 	GLF_TRY_TO_EVICT		= 17, /* iopen glocks only */
@@ -355,7 +354,7 @@ struct gfs2_glock {
 	unsigned long gl_tchange;
 	void *gl_object;
 
-	struct list_head gl_lru;
+	struct list_head gl_dead;
 	struct list_head gl_ail_list;
 	atomic_t gl_ail_count;
 	atomic_t gl_revokes;
@@ -392,7 +391,7 @@ struct gfs2_inode {
 	u64 i_generation;
 	u64 i_eattr;
 	unsigned long i_flags;		/* GIF_... */
-	struct gfs2_glock *i_gl;
+	struct gfs2_glock __rcu *i_gl;
 	struct gfs2_holder i_iopen_gh;
 	struct gfs2_qadata *i_qadata; /* quota allocation data */
 	struct gfs2_holder i_rgd_gh;
@@ -601,7 +600,6 @@ enum {
 	SDF_DEMOTE		= 5,
 	SDF_NOJOURNALID		= 6,
 	SDF_RORECOVERY		= 7, /* read only recovery */
-	SDF_SKIP_DLM_UNLOCK	= 8,
 	SDF_FORCE_AIL_FLUSH     = 9,
 	SDF_FREEZE_INITIATOR	= 10,
 	SDF_KILL		= 15,
@@ -718,7 +716,6 @@ struct gfs2_sbd {
 	struct work_struct sd_freeze_work;
 	struct work_struct sd_withdraw_work;
 	wait_queue_head_t sd_kill_wait;
-	wait_queue_head_t sd_async_glock_wait;
 	atomic_t sd_glock_disposal;
 	struct completion sd_locking_init;
 	struct completion sd_withdraw_helper;
@@ -834,6 +831,9 @@ struct gfs2_sbd {
 	struct list_head sd_ail1_list;
 	struct list_head sd_ail2_list;
 
+	/* glocks */
+	spinlock_t sd_dead_lock;
+
 	/* For quiescing the filesystem */
 	struct gfs2_holder sd_freeze_gh;
 	struct mutex sd_freeze_mutex;
@@ -878,5 +878,8 @@ static inline unsigned gfs2_max_stuffed_size(const struct gfs2_inode *ip)
 	return GFS2_SB(&ip->i_inode)->sd_sb.sb_bsize - sizeof(struct gfs2_dinode);
 }
 
+static inline struct gfs2_glock *gfs2_inode_glock(struct inode *inode)
+{
+       return rcu_dereference_protected(GFS2_I(inode)->i_gl, 1);
+}
 #endif /* __INCORE_DOT_H__ */
-

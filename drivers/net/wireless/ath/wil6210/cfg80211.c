@@ -1432,7 +1432,7 @@ static int wil_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx,
 
 int wil_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 			 struct cfg80211_mgmt_tx_params *params,
-			 u64 *cookie)
+			 u64 cookie)
 {
 	const u8 *buf = params->buf;
 	size_t len = params->len;
@@ -1488,8 +1488,7 @@ out:
 	 */
 	tx_status = (rc == 0);
 	rc = (rc == -EAGAIN) ? 0 : rc;
-	cfg80211_mgmt_tx_status(wdev, cookie ? *cookie : 0, buf, len,
-				tx_status, GFP_KERNEL);
+	cfg80211_mgmt_tx_status(wdev, cookie, buf, len, tx_status, GFP_KERNEL);
 
 	return rc;
 }
@@ -1621,11 +1620,13 @@ static void wil_del_rx_key(u8 key_index, enum wmi_key_usage key_usage,
 
 static int wil_cfg80211_add_key(struct wiphy *wiphy,
 				struct wireless_dev *wdev, int link_id,
-				u8 key_index, bool pairwise,
+				u8 key_index,
+				enum nl80211_key_type type,
 				const u8 *mac_addr,
 				struct key_params *params)
 {
 	int rc;
+	bool pairwise = type == NL80211_KEYTYPE_PAIRWISE;
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
 	enum wmi_key_usage key_usage = wil_detect_key_usage(wdev, pairwise);
@@ -1696,12 +1697,14 @@ static int wil_cfg80211_add_key(struct wiphy *wiphy,
 
 static int wil_cfg80211_del_key(struct wiphy *wiphy,
 				struct wireless_dev *wdev, int link_id,
-				u8 key_index, bool pairwise,
+				u8 key_index,
+				enum nl80211_key_type type,
 				const u8 *mac_addr)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
-	enum wmi_key_usage key_usage = wil_detect_key_usage(wdev, pairwise);
+	enum wmi_key_usage key_usage =
+		wil_detect_key_usage(wdev, type == NL80211_KEYTYPE_PAIRWISE);
 	struct wil_sta_info *cs = wil_find_sta_by_key_usage(wil, vif->mid,
 							    key_usage,
 							    mac_addr);
@@ -1735,7 +1738,7 @@ static int wil_remain_on_channel(struct wiphy *wiphy,
 				 struct wireless_dev *wdev,
 				 struct ieee80211_channel *chan,
 				 unsigned int duration,
-				 u64 *cookie, const u8 *rx_addr)
+				 u64 cookie, const u8 *rx_addr)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	int rc;
@@ -2072,7 +2075,8 @@ void wil_cfg80211_ap_recovery(struct wil6210_priv *wil)
 		key_params.seq_len = IEEE80211_GCMP_PN_LEN;
 		rc = wil_cfg80211_add_key(wiphy, vif_to_wdev(vif), -1,
 					  vif->gtk_index,
-					  false, NULL, &key_params);
+					  NL80211_KEYTYPE_PAIRWISE,
+					  NULL, &key_params);
 		if (rc)
 			wil_err(wil, "vif %d recovery add key failed (%d)\n",
 				i, rc);
@@ -2326,7 +2330,7 @@ static void wil_probe_client_handle(struct wil6210_priv *wil,
 	 */
 	bool alive = (sta->status == wil_sta_connected);
 
-	cfg80211_probe_status(ndev, sta->addr, req->cookie, alive,
+	cfg80211_probe_status(ndev, sta->addr, req->cookie, -1, alive,
 			      0, false, GFP_KERNEL);
 }
 
@@ -2379,9 +2383,9 @@ void wil_probe_client_flush(struct wil6210_vif *vif)
 	mutex_unlock(&vif->probe_client_mutex);
 }
 
-static int wil_cfg80211_probe_client(struct wiphy *wiphy,
-				     struct net_device *dev,
-				     const u8 *peer, u64 *cookie)
+static int wil_cfg80211_probe_peer(struct wiphy *wiphy,
+				   struct net_device *dev,
+				   const u8 *peer, u64 cookie)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	struct wil6210_vif *vif = ndev_to_vif(dev);
@@ -2399,13 +2403,12 @@ static int wil_cfg80211_probe_client(struct wiphy *wiphy,
 		return -ENOMEM;
 
 	req->cid = cid;
-	req->cookie = cid;
+	req->cookie = cookie;
 
 	mutex_lock(&vif->probe_client_mutex);
 	list_add_tail(&req->list, &vif->probe_client_pending);
 	mutex_unlock(&vif->probe_client_mutex);
 
-	*cookie = req->cookie;
 	queue_work(wil->wq_service, &vif->probe_client_worker);
 	return 0;
 }
@@ -2660,7 +2663,7 @@ static const struct cfg80211_ops wil_cfg80211_ops = {
 	.add_station = wil_cfg80211_add_station,
 	.del_station = wil_cfg80211_del_station,
 	.change_station = wil_cfg80211_change_station,
-	.probe_client = wil_cfg80211_probe_client,
+	.probe_peer = wil_cfg80211_probe_peer,
 	.change_bss = wil_cfg80211_change_bss,
 	/* P2P device */
 	.start_p2p_device = wil_cfg80211_start_p2p_device,

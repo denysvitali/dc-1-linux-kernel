@@ -2096,7 +2096,7 @@ static int stm32f7_i2c_enable_smbus_alert(struct stm32f7_i2c_dev *i2c_dev)
 	struct device *dev = i2c_dev->dev;
 	void __iomem *base = i2c_dev->base;
 
-	alert = devm_kzalloc(dev, sizeof(*alert), GFP_KERNEL);
+	alert = devm_kzalloc_obj(dev, *alert);
 	if (!alert)
 		return -ENOMEM;
 
@@ -2161,7 +2161,7 @@ static int stm32f7_i2c_probe(struct platform_device *pdev)
 	dma_addr_t phy_addr;
 	int irq_error, irq_event, ret;
 
-	i2c_dev = devm_kzalloc(&pdev->dev, sizeof(*i2c_dev), GFP_KERNEL);
+	i2c_dev = devm_kzalloc_obj(&pdev->dev, *i2c_dev);
 	if (!i2c_dev)
 		return -ENOMEM;
 
@@ -2204,7 +2204,7 @@ static int stm32f7_i2c_probe(struct platform_device *pdev)
 					IRQF_ONESHOT,
 					pdev->name, i2c_dev);
 	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "Failed to request irq event\n");
+		return ret;
 
 	if (!i2c_dev->setup.single_it_line) {
 		irq_error = platform_get_irq(pdev, 1);
@@ -2217,7 +2217,7 @@ static int stm32f7_i2c_probe(struct platform_device *pdev)
 						IRQF_ONESHOT,
 						pdev->name, i2c_dev);
 		if (ret)
-			return dev_err_probe(&pdev->dev, ret, "Failed to request irq error\n");
+			return ret;
 	}
 
 	ret = stm32f7_i2c_setup_timing(i2c_dev, &i2c_dev->setup);

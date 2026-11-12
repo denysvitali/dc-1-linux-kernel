@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB
 /* Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. */
 
+#include <linux/slab.h>
 #include <rdma/ib_umem_odp.h>
 #include <rdma/iter.h>
 #include "mlx5_ib.h"
@@ -517,22 +518,20 @@ static void *mlx5r_umr_alloc_xlt(size_t *nents, size_t ent_size, gfp_t gfp_mask)
 	size = min_t(size_t, ent_size * ALIGN(*nents, xlt_chunk_align),
 		     MLX5_MAX_UMR_CHUNK);
 	*nents = size / ent_size;
-	res = (void *)__get_free_pages(gfp_mask | __GFP_NOWARN,
-				       get_order(size));
+	res = kmalloc(PAGE_ALIGN(size), gfp_mask | __GFP_NOWARN);
 	if (res)
 		return res;
 
 	if (size > MLX5_SPARE_UMR_CHUNK) {
 		size = MLX5_SPARE_UMR_CHUNK;
 		*nents = size / ent_size;
-		res = (void *)__get_free_pages(gfp_mask | __GFP_NOWARN,
-					       get_order(size));
+		res = kmalloc(size, gfp_mask | __GFP_NOWARN);
 		if (res)
 			return res;
 	}
 
 	*nents = PAGE_SIZE / ent_size;
-	res = (void *)__get_free_page(gfp_mask);
+	res = kmalloc(PAGE_SIZE, gfp_mask);
 	if (res)
 		return res;
 
@@ -548,7 +547,7 @@ static void mlx5r_umr_free_xlt(void *xlt, size_t length)
 		return;
 	}
 
-	free_pages((unsigned long)xlt, get_order(length));
+	kfree(xlt);
 }
 
 static void mlx5r_umr_unmap_free_xlt(struct mlx5_ib_dev *dev, void *xlt,
@@ -760,12 +759,14 @@ static int _mlx5r_umr_update_mr_pas(struct mlx5_ib_mr *mr, unsigned int flags,
 		}
 
 		if (dd) {
+			struct mlx5_data_direct *mdd = dev->mdev->data_direct;
+
 			cur_ksm->va = cpu_to_be64(rdma_block_iter_dma_address(&biter));
 			if (mr->access_flags & IB_ACCESS_RELAXED_ORDERING &&
-			    dev->ddr.mkey_ro_valid)
-				cur_ksm->key = cpu_to_be32(dev->ddr.mkey_ro);
+			    mdd->mkey_ro_valid)
+				cur_ksm->key = cpu_to_be32(mdd->mkey_ro);
 			else
-				cur_ksm->key = cpu_to_be32(dev->ddr.mkey);
+				cur_ksm->key = cpu_to_be32(mdd->mkey);
 			if (mr->umem->is_dmabuf &&
 			    (flags & MLX5_IB_UPD_XLT_ZAP)) {
 				cur_ksm->va = 0;
@@ -810,7 +811,8 @@ int mlx5r_umr_update_data_direct_ksm_pas_range(struct mlx5_ib_mr *mr,
 	    !(flags & MLX5_IB_UPD_XLT_KEEP_PGSZ)))
 		return -EINVAL;
 
-	return _mlx5r_umr_update_mr_pas(mr, flags, mr_to_mdev(mr)->ddr.pdn,
+	return _mlx5r_umr_update_mr_pas(mr, flags,
+					mr_to_mdev(mr)->mdev->data_direct->pdn,
 					true, start_block, nblocks);
 }
 
@@ -978,7 +980,7 @@ static inline int _mlx5r_dmabuf_umr_update_pas(struct mlx5_ib_mr *mr,
 						     start_block, nblocks);
 }
 
-/**
+/*
  * This function makes an mkey non-present by zapping the translation entries of
  * the mkey by zapping (zeroing out) the first N entries, where N is determined
  * by the largest page size supported by the device and the MR length.

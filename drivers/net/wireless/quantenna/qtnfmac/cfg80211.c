@@ -446,15 +446,13 @@ qtnf_update_mgmt_frame_registrations(struct wiphy *wiphy,
 
 static int
 qtnf_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
-	     struct cfg80211_mgmt_tx_params *params, u64 *cookie)
+	     struct cfg80211_mgmt_tx_params *params, u64 cookie)
 {
 	struct qtnf_vif *vif = qtnf_netdev_get_priv(wdev->netdev);
 	const struct ieee80211_mgmt *mgmt_frame = (void *)params->buf;
 	u32 short_cookie = get_random_u32();
 	u16 flags = 0;
 	u16 freq;
-
-	*cookie = short_cookie;
 
 	if (params->offchan)
 		flags |= QLINK_FRAME_TX_FLAG_OFFCHAN;
@@ -533,10 +531,12 @@ qtnf_dump_station(struct wiphy *wiphy, struct wireless_dev *wdev,
 }
 
 static int qtnf_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
-			int link_id, u8 key_index, bool pairwise,
+			int link_id, u8 key_index,
+			enum nl80211_key_type type,
 			const u8 *mac_addr, struct key_params *params)
 {
 	struct qtnf_vif *vif = qtnf_netdev_get_priv(wdev->netdev);
+	bool pairwise = type == NL80211_KEYTYPE_PAIRWISE;
 	int ret;
 
 	ret = qtnf_cmd_send_add_key(vif, key_index, pairwise, mac_addr, params);
@@ -549,10 +549,12 @@ static int qtnf_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
 }
 
 static int qtnf_del_key(struct wiphy *wiphy, struct wireless_dev *wdev,
-			int link_id, u8 key_index, bool pairwise,
+			int link_id, u8 key_index,
+			enum nl80211_key_type type,
 			const u8 *mac_addr)
 {
 	struct qtnf_vif *vif = qtnf_netdev_get_priv(wdev->netdev);
+	bool pairwise = type == NL80211_KEYTYPE_PAIRWISE;
 	int ret;
 
 	ret = qtnf_cmd_send_del_key(vif, key_index, pairwise, mac_addr);

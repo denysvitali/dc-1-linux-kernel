@@ -1982,10 +1982,21 @@ static int ep_modify(struct eventpoll *ep, struct epitem *epi,
 {
 	int pwake = 0;
 	poll_table pt;
+	int error;
 
 	lockdep_assert_irqs_enabled();
 
 	init_poll_funcptr(&pt, NULL);
+
+	/*
+	 * Create the wakeup source before committing the new event mask.
+	 * Leave the old mask and data unchanged if allocation fails.
+	 */
+	if ((event->events & EPOLLWAKEUP) && !ep_has_wakeup_source(epi)) {
+		error = ep_create_wakeup_source(epi);
+		if (error)
+			return error;
+	}
 
 	/*
 	 * Set the new event interest mask before calling f_op->poll();
@@ -1994,12 +2005,9 @@ static int ep_modify(struct eventpoll *ep, struct epitem *epi,
 	 */
 	epi->event.events = event->events; /* need barrier below */
 	epi->event.data = event->data; /* protected by mtx */
-	if (epi->event.events & EPOLLWAKEUP) {
-		if (!ep_has_wakeup_source(epi))
-			ep_create_wakeup_source(epi);
-	} else if (ep_has_wakeup_source(epi)) {
+	if (!(epi->event.events & EPOLLWAKEUP) &&
+	    ep_has_wakeup_source(epi))
 		ep_destroy_wakeup_source(epi);
-	}
 
 	/*
 	 * The following barrier has two effects:
@@ -2264,7 +2272,6 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 	lockdep_assert_irqs_enabled();
 
 	if (timeout && (timeout->tv_sec | timeout->tv_nsec)) {
-		slack = select_estimate_accuracy(timeout);
 		to = &expires;
 		*to = timespec64_to_ktime(*timeout);
 	} else if (timeout) {
@@ -2343,10 +2350,13 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 
 		spin_unlock_irq(&ep->lock);
 
-		if (!eavail)
+		if (!eavail) {
+			if (to)
+				slack = select_estimate_accuracy(timeout);
 			timed_out = !ep_schedule_timeout(to) ||
 				!schedule_hrtimeout_range(to, slack,
 							  HRTIMER_MODE_ABS);
+		}
 		__set_current_state(TASK_RUNNING);
 
 		/*
@@ -2512,11 +2522,11 @@ static int do_epoll_create(int flags)
 	FD_PREPARE(fdf, O_RDWR | (flags & O_CLOEXEC),
 		   anon_inode_getfile("[eventpoll]", &eventpoll_fops, ep,
 				      O_RDWR | (flags & O_CLOEXEC)));
-	if (fdf.err) {
+	if (fdf->fd < 0) {
 		ep_clear_and_put(ep);
-		return fdf.err;
+		return fdf->fd;
 	}
-	ep->file = fd_prepare_file(fdf);
+	ep->file = fdf->file;
 	return fd_publish(fdf);
 }
 

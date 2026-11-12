@@ -143,9 +143,6 @@ enum {
 #define FGRAPH_DATA_INDEX_MASK	GENMASK(FGRAPH_DATA_INDEX_BITS - 1, 0)
 #define FGRAPH_DATA_INDEX_SHIFT	(FGRAPH_DATA_SHIFT + FGRAPH_DATA_BITS)
 
-#define FGRAPH_MAX_INDEX	\
-	((FGRAPH_INDEX_SIZE << FGRAPH_DATA_BITS) + FGRAPH_RET_INDEX)
-
 #define FGRAPH_ARRAY_SIZE	FGRAPH_INDEX_BITS
 
 /*
@@ -1238,8 +1235,8 @@ static int start_graph_tracing(void)
 	unsigned long **ret_stack_list;
 	int ret, cpu;
 
-	ret_stack_list = kcalloc(FTRACE_RETSTACK_ALLOC_SIZE,
-				 sizeof(*ret_stack_list), GFP_KERNEL);
+	ret_stack_list = kzalloc_objs(*ret_stack_list,
+				      FTRACE_RETSTACK_ALLOC_SIZE);
 
 	if (!ret_stack_list)
 		return -ENOMEM;

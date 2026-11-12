@@ -17,6 +17,9 @@ enum bip_flags {
 	BIP_MEMPOOL		= 1 << 15, /* buffer backed by mempool */
 };
 
+/* flags that require generate/verify action. */
+#define BIP_CHECK_FLAGS (BIP_CHECK_GUARD | BIP_CHECK_REFTAG | BIP_CHECK_APPTAG)
+
 struct bio_integrity_payload {
 	struct bvec_iter	bip_iter;
 
@@ -148,7 +151,6 @@ void bio_integrity_setup_default(struct bio *bio);
 unsigned int fs_bio_integrity_alloc(struct bio *bio);
 void fs_bio_integrity_free(struct bio *bio);
 void fs_bio_integrity_generate(struct bio *bio);
-int fs_bio_integrity_verify(struct bio *bio, sector_t sector,
-		unsigned int size);
+int fs_bio_integrity_verify(struct bio *bio, struct bvec_iter *data_iter);
 
 #endif /* _LINUX_BIO_INTEGRITY_H */

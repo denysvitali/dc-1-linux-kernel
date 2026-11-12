@@ -218,20 +218,15 @@ static inline void mlx5e_accel_tx_finish(struct mlx5e_txqsq *sq,
 #endif
 }
 
+static inline bool
+mlx5e_accel_shampo_can_merge(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
+{
+	return mlx5e_psp_shampo_can_merge(rq->hw_gro_data->skb, cqe);
+}
+
 static inline int mlx5e_accel_init_rx(struct mlx5e_priv *priv)
 {
-	int err;
-
-	err = mlx5_accel_psp_fs_init_rx_tables(priv);
-	if (err)
-		goto out;
-
-	err = mlx5e_ktls_init_rx(priv);
-	if (err)
-		mlx5_accel_psp_fs_cleanup_rx_tables(priv);
-
-out:
-	return err;
+	return mlx5e_ktls_init_rx(priv);
 }
 
 static inline void mlx5e_accel_cleanup_rx(struct mlx5e_priv *priv)
@@ -242,12 +237,6 @@ static inline void mlx5e_accel_cleanup_rx(struct mlx5e_priv *priv)
 
 static inline int mlx5e_accel_init_tx(struct mlx5e_priv *priv)
 {
-	int err;
-
-	err = mlx5_accel_psp_fs_init_tx_tables(priv);
-	if (err)
-		return err;
-
 	return mlx5e_ktls_init_tx(priv);
 }
 

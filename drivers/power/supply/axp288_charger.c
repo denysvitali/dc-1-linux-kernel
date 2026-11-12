@@ -849,7 +849,7 @@ static int axp288_charger_probe(struct platform_device *pdev)
 	if (val == 0)
 		return -ENODEV;
 
-	info = devm_kzalloc(dev, sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc_obj(dev, *info);
 	if (!info)
 		return -ENOMEM;
 
@@ -946,8 +946,7 @@ static int axp288_charger_probe(struct platform_device *pdev)
 					NULL, axp288_charger_irq_thread_handler,
 					IRQF_ONESHOT, info->pdev->name, info);
 		if (ret)
-			return dev_err_probe(dev, ret, "failed to request interrupt=%d\n",
-					     info->irq[i]);
+			return ret;
 	}
 
 	return 0;

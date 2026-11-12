@@ -5,6 +5,7 @@
  * Copyright (C) 2021-2023 CHIPS&MEDIA INC
  */
 
+#include <linux/delay.h>
 #include <linux/pm_runtime.h>
 #include "wave5-helper.h"
 
@@ -474,7 +475,10 @@ static void wave5_vpu_dec_finish_decode(struct vpu_instance *inst)
 			v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
 	}
 
-	inst->queuing_fail = false;
+	if (inst->queuing_fail) {
+		inst->queuing_fail = false;
+		v4l2_m2m_try_schedule(m2m_ctx);
+	}
 }
 
 static int wave5_vpu_dec_querycap(struct file *file, void *fh, struct v4l2_capability *cap)
@@ -819,7 +823,15 @@ static int wave5_vpu_dec_stop(struct vpu_instance *inst)
 		 * calls do not block on a mutex while inside this spinlock.
 		 */
 		spin_unlock_irqrestore(&inst->state_spinlock, flags);
+		/*
+		 * V4L2_DEC_CMD_STOP can arrive while the device is runtime
+		 * suspended (e.g. on pipeline teardown). Setting the EOS flag
+		 * accesses VPU registers via send_firmware_command(), so the
+		 * device must be resumed first to avoid an asynchronous SError.
+		 */
+		pm_runtime_resume_and_get(inst->dev->dev);
 		ret = wave5_vpu_dec_set_eos_on_firmware(inst);
+		pm_runtime_put_autosuspend(inst->dev->dev);
 		if (ret)
 			return ret;
 
@@ -1290,8 +1302,14 @@ static void wave5_vpu_dec_buf_queue_dst(struct vb2_buffer *vb)
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 	struct vpu_instance *inst = vb2_get_drv_priv(vb->vb2_queue);
 	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
+	int ret;
 
-	pm_runtime_resume_and_get(inst->dev->dev);
+	ret = pm_runtime_resume_and_get(inst->dev->dev);
+	if (ret < 0) {
+		vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
+		return;
+	}
+
 	vbuf->sequence = inst->queued_dst_buf_num++;
 
 	if (inst->state == VPU_INST_STATE_PIC_RUN) {
@@ -1403,6 +1421,7 @@ static int wave5_vpu_dec_start_streaming(struct vb2_queue *q, unsigned int count
 	} else if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		struct dec_initial_info *initial_info =
 			&inst->codec_info->dec_info.initial_info;
+		struct dec_info *p_dec_info = &inst->codec_info->dec_info;
 
 		if (inst->state == VPU_INST_STATE_STOP)
 			ret = switch_state(inst, VPU_INST_STATE_INIT_SEQ);
@@ -1410,6 +1429,7 @@ static int wave5_vpu_dec_start_streaming(struct vb2_queue *q, unsigned int count
 			goto return_buffers;
 
 		if (inst->state == VPU_INST_STATE_INIT_SEQ &&
+		    p_dec_info->initial_info_obtained &&
 		    inst->dev->product_code == WAVE521C_CODE) {
 			if (initial_info->luma_bitdepth != 8) {
 				dev_info(inst->dev->dev, "%s: no support for %d bit depth",
@@ -1418,7 +1438,6 @@ static int wave5_vpu_dec_start_streaming(struct vb2_queue *q, unsigned int count
 				goto return_buffers;
 			}
 		}
-
 	}
 	pm_runtime_put_autosuspend(inst->dev->dev);
 	return ret;
@@ -1536,15 +1555,15 @@ static void wave5_vpu_dec_stop_streaming(struct vb2_queue *q)
 {
 	struct vpu_instance *inst = vb2_get_drv_priv(q);
 	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
-
-	bool check_cmd = TRUE;
+	unsigned long timeout;
 
 	dev_dbg(inst->dev->dev, "%s: type: %u\n", __func__, q->type);
 	pm_runtime_resume_and_get(inst->dev->dev);
 	inst->empty_queue = true;
-	while (check_cmd) {
+
+	timeout = jiffies + msecs_to_jiffies(VPU_DEC_STOP_TIMEOUT);
+	while (true) {
 		struct queue_status_info q_status;
-		struct dec_output_info dec_output_info;
 
 		wave5_vpu_dec_give_command(inst, DEC_GET_QUEUE_STATUS, &q_status);
 		if ((inst->state == VPU_INST_STATE_STOP ||
@@ -1553,8 +1572,10 @@ static void wave5_vpu_dec_stop_streaming(struct vb2_queue *q)
 			q_status.report_queue_count == 0)
 			break;
 
-		if (wave5_vpu_dec_get_output_info(inst, &dec_output_info))
-			dev_dbg(inst->dev->dev, "there is no output info\n");
+		if (time_after(jiffies, timeout))
+			break;
+
+		usleep_range(1000, 2000);
 	}
 
 	v4l2_m2m_update_stop_streaming_state(m2m_ctx, q);
@@ -1651,6 +1672,7 @@ static void wave5_vpu_dec_device_run(void *priv)
 	struct queue_status_info q_status;
 	u32 fail_res = 0;
 	int ret = 0;
+	bool cmd_issued = false;
 
 	dev_dbg(inst->dev->dev, "%s: Fill the ring buffer with new bitstream data", __func__);
 	pm_runtime_resume_and_get(inst->dev->dev);
@@ -1662,9 +1684,13 @@ static void wave5_vpu_dec_device_run(void *priv)
 		} else if (!inst->eos &&
 				inst->queuing_num == 0 &&
 				inst->state == VPU_INST_STATE_PIC_RUN) {
-			dev_dbg(inst->dev->dev, "%s: no bitstream for feeding, so skip ", __func__);
-			inst->empty_queue = true;
-			goto finish_job_and_return;
+			wave5_vpu_dec_give_command(inst, DEC_GET_QUEUE_STATUS, &q_status);
+			if (q_status.instance_queue_count == v4l2_m2m_num_src_bufs_ready(m2m_ctx)) {
+				dev_dbg(inst->dev->dev, "%s: no bitstream, skip\n",
+					__func__);
+				inst->empty_queue = true;
+				goto finish_job_and_return;
+			}
 		}
 	}
 
@@ -1744,6 +1770,7 @@ static void wave5_vpu_dec_device_run(void *priv)
 			inst->retry = false;
 			if (!inst->eos)
 				inst->queuing_num--;
+			cmd_issued = true;
 		}
 		break;
 	default:
@@ -1761,8 +1788,16 @@ finish_job_and_return:
 	 * in power and CPU time.
 	 * If EOS is passed, device_run will not call job_finish no more, it is called
 	 * only if HW is idle status in order to reduce overhead.
+	 *
+	 * Deferring job_finish() is only safe when this run actually queued a
+	 * DEC_PIC command (cmd_issued): that guarantees a completion IRQ, and
+	 * thus a later finish_decode(), will release the shared job slot. When
+	 * device_run() is entered with no command to issue (e.g. a job that was
+	 * queued while draining but reached the STOP state by the time it ran),
+	 * no IRQ follows, so finish the job here to avoid leaking the slot and
+	 * stalling every instance sharing the VPU.
 	 */
-	if (!inst->sent_eos)
+	if (!inst->sent_eos || !cmd_issued)
 		v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
 }
 
@@ -1776,10 +1811,21 @@ static void wave5_vpu_dec_job_abort(void *priv)
 	if (ret)
 		return;
 
+	/*
+	 * job_abort() runs from the STREAMOFF path and may be called while the
+	 * device is runtime suspended. Setting the EOS flag talks to the
+	 * firmware (send_firmware_command() accesses VPU registers), so the
+	 * device must be resumed first; otherwise the register access faults
+	 * with an asynchronous SError.
+	 */
+	pm_runtime_resume_and_get(inst->dev->dev);
+
 	ret = wave5_vpu_dec_set_eos_on_firmware(inst);
 	if (ret)
 		dev_warn(inst->dev->dev,
 			 "Setting EOS for the bitstream, fail: %d\n", ret);
+
+	pm_runtime_put_autosuspend(inst->dev->dev);
 
 	v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
 }
@@ -1982,7 +2028,7 @@ int wave5_vpu_dec_register_device(struct vpu_device *dev)
 	if (dev->product_code == WAVE515_CODE)
 		wave5_vdi_allocate_sram(dev);
 
-	vdev_dec = devm_kzalloc(dev->v4l2_dev.dev, sizeof(*vdev_dec), GFP_KERNEL);
+	vdev_dec = devm_kzalloc_obj(dev->v4l2_dev.dev, *vdev_dec);
 	if (!vdev_dec)
 		return -ENOMEM;
 

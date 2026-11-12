@@ -30,7 +30,7 @@
 #include "hid-ids.h"
 
 #define APPLE_RDESC_JIS		BIT(0)
-/* BIT(1) reserved, was: APPLE_IGNORE_MOUSE */
+#define APPLE_IGNORE_MOUSE	BIT(1)
 #define APPLE_HAS_FN		BIT(2)
 /* BIT(3) reserved, was: APPLE_HIDDEV */
 #define APPLE_ISO_TILDE_QUIRK	BIT(4)
@@ -90,6 +90,9 @@ struct apple_sc_backlight {
 	struct led_classdev cdev;
 	struct hid_device *hdev;
 };
+
+/* T2 VHCI re-enumerates the internal keyboard across system resume. */
+static int apple_backlight_resume_brightness = -1;
 
 struct apple_backlight_config_report {
 	u8 report_id;
@@ -368,6 +371,11 @@ static const struct apple_non_apple_keyboard non_apple_keyboards[] = {
 	{ "TH87" },			/* EPOMAKER TH87 BT mode */
 	{ "HFD Epomaker TH87" },	/* EPOMAKER TH87 USB mode */
 	{ "2.4G Wireless Receiver" },	/* EPOMAKER TH87 dongle */
+	{ "Thock TKL Wireless" },	/* ENDORFY THOCK TKL BT mode */
+	{ "USB Dongle" },		/* ENDORFY THOCK TKL dongle */
+	{ "HFD GS3104T PRO" },		/* GANSS GS3104T PRO USB mode */
+	{ "GS3104T-PRO 2.4G" },		/* GANSS GS3104T PRO 2.4G dongle */
+	{ "GS3104T PRO" },		/* GANSS GS3104T PRO Bluetooth */
 };
 
 static bool apple_is_non_apple_keyboard(struct hid_device *hdev)
@@ -825,6 +833,7 @@ static int apple_backlight_led_set(struct led_classdev *led_cdev,
 static int apple_backlight_init(struct hid_device *hdev)
 {
 	int ret;
+	int brightness;
 	struct apple_sc *asc = hid_get_drvdata(hdev);
 	struct apple_backlight_config_report *rep;
 
@@ -850,23 +859,30 @@ static int apple_backlight_init(struct hid_device *hdev)
 	hid_dbg(hdev, "backlight config: off=%u, on_min=%u, on_max=%u\n",
 		rep->backlight_off, rep->backlight_on_min, rep->backlight_on_max);
 
-	asc->backlight = devm_kzalloc(&hdev->dev, sizeof(*asc->backlight), GFP_KERNEL);
+	asc->backlight = devm_kzalloc_obj(&hdev->dev, *asc->backlight);
 	if (!asc->backlight) {
 		ret = -ENOMEM;
 		goto cleanup_and_exit;
 	}
 
 	asc->backlight->hdev = hdev;
-	asc->backlight->cdev.name = "apple::kbd_backlight";
+	asc->backlight->cdev.name = ":white:" LED_FUNCTION_KBD_BACKLIGHT;
 	asc->backlight->cdev.max_brightness = rep->backlight_on_max;
 	asc->backlight->cdev.brightness_set_blocking = apple_backlight_led_set;
-	asc->backlight->cdev.flags = LED_CORE_SUSPENDRESUME;
+	/* VHCI re-enumeration restores the cached brightness in the next probe. */
 
-	ret = apple_backlight_set(hdev, 0, 0);
+	brightness = READ_ONCE(apple_backlight_resume_brightness);
+	if (brightness < 0)
+		brightness = LED_OFF;
+	else
+		brightness = min_t(int, brightness, rep->backlight_on_max);
+
+	ret = apple_backlight_set(hdev, brightness, 0);
 	if (ret < 0) {
 		hid_err(hdev, "backlight set request failed: %d\n", ret);
 		goto cleanup_and_exit;
 	}
+	asc->backlight->cdev.brightness = brightness;
 
 	ret = devm_led_classdev_register(&hdev->dev, &asc->backlight->cdev);
 
@@ -914,7 +930,7 @@ static int apple_magic_backlight_init(struct hid_device *hdev)
 	if (hdev->collection[0].usage != HID_USAGE_MAGIC_BL)
 		return -ENODEV;
 
-	backlight = devm_kzalloc(&hdev->dev, sizeof(*backlight), GFP_KERNEL);
+	backlight = devm_kzalloc_obj(&hdev->dev, *backlight);
 	if (!backlight)
 		return -ENOMEM;
 
@@ -944,7 +960,10 @@ static int apple_probe(struct hid_device *hdev,
 	struct apple_sc *asc;
 	int ret;
 
-	asc = devm_kzalloc(&hdev->dev, sizeof(*asc), GFP_KERNEL);
+	if (quirks & APPLE_IGNORE_MOUSE && hdev->type == HID_TYPE_USBMOUSE)
+		return -ENODEV;
+
+	asc = devm_kzalloc_obj(&hdev->dev, *asc);
 	if (asc == NULL) {
 		hid_err(hdev, "can't alloc apple descriptor\n");
 		return -ENOMEM;
@@ -999,6 +1018,9 @@ static void apple_remove(struct hid_device *hdev)
 
 	if (asc->quirks & APPLE_RDESC_BATTERY)
 		timer_delete_sync(&asc->battery_timer);
+	if (asc->backlight)
+		WRITE_ONCE(apple_backlight_resume_brightness,
+			   asc->backlight->cdev.brightness);
 
 	hid_hw_stop(hdev);
 }
@@ -1166,27 +1188,31 @@ static const struct hid_device_id apple_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_WELLSPRING9_JIS),
 		.driver_data = APPLE_HAS_FN | APPLE_RDESC_JIS },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_WELLSPRINGT2_J140K),
-		.driver_data = APPLE_HAS_FN | APPLE_BACKLIGHT_CTL | APPLE_ISO_TILDE_QUIRK },
+		.driver_data = APPLE_HAS_FN | APPLE_BACKLIGHT_CTL | APPLE_ISO_TILDE_QUIRK |
+				APPLE_IGNORE_MOUSE },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_WELLSPRINGT2_J132),
 		.driver_data = APPLE_HAS_FN | APPLE_BACKLIGHT_CTL | APPLE_ISO_TILDE_QUIRK |
-			APPLE_DISABLE_FKEYS },
+			APPLE_DISABLE_FKEYS | APPLE_IGNORE_MOUSE },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_WELLSPRINGT2_J680),
 		.driver_data = APPLE_HAS_FN | APPLE_BACKLIGHT_CTL | APPLE_ISO_TILDE_QUIRK |
-			APPLE_DISABLE_FKEYS },
+			APPLE_DISABLE_FKEYS | APPLE_IGNORE_MOUSE },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_WELLSPRINGT2_J680_ALT),
 		.driver_data = APPLE_HAS_FN | APPLE_BACKLIGHT_CTL | APPLE_ISO_TILDE_QUIRK |
-			APPLE_DISABLE_FKEYS },
+			APPLE_DISABLE_FKEYS | APPLE_IGNORE_MOUSE },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_WELLSPRINGT2_J213),
 		.driver_data = APPLE_HAS_FN | APPLE_BACKLIGHT_CTL | APPLE_ISO_TILDE_QUIRK |
-			APPLE_DISABLE_FKEYS },
+			APPLE_DISABLE_FKEYS | APPLE_IGNORE_MOUSE },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_WELLSPRINGT2_J214K),
-		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_DISABLE_FKEYS },
+		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_DISABLE_FKEYS |
+				APPLE_IGNORE_MOUSE },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_WELLSPRINGT2_J223),
-		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_DISABLE_FKEYS },
+		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_DISABLE_FKEYS |
+				APPLE_IGNORE_MOUSE },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_WELLSPRINGT2_J230K),
-		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK },
+		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_IGNORE_MOUSE },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_WELLSPRINGT2_J152F),
-		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_DISABLE_FKEYS },
+		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_DISABLE_FKEYS |
+				APPLE_IGNORE_MOUSE },
 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_ALU_WIRELESS_2009_ANSI),
 		.driver_data = APPLE_NUMLOCK_EMULATION | APPLE_HAS_FN },
 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_ALU_WIRELESS_2009_ISO),

@@ -535,7 +535,7 @@ static int pcie_tgt_init_data(struct arm_cspmu *cspmu)
 	struct nv_cspmu_ctx *ctx = to_nv_cspmu_ctx(cspmu);
 	struct device *dev = cspmu->dev;
 
-	data = devm_kzalloc(dev, sizeof(struct pcie_tgt_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct pcie_tgt_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -762,7 +762,7 @@ static void pcie_tgt_pmu_reset_ev_filter(struct arm_cspmu *cspmu,
 	pcie_tgt_pmu_config_addr_filter(cspmu, false, base, mask, idx);
 }
 
-static u32 pcie_tgt_pmu_event_type(const struct perf_event *event)
+static u64 pcie_tgt_pmu_event_type(const struct perf_event *event)
 {
 	return event->attr.config & NV_PCIE_TGT_EV_TYPE_MASK;
 }
@@ -1008,7 +1008,7 @@ static int nv_cspmu_init_ops(struct arm_cspmu *cspmu)
 	struct arm_cspmu_impl_ops *impl_ops = &cspmu->impl.ops;
 	const struct nv_cspmu_match *match = nv_cspmu_match;
 
-	ctx = devm_kzalloc(dev, sizeof(struct nv_cspmu_ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(dev, struct nv_cspmu_ctx);
 	if (!ctx)
 		return -ENOMEM;
 

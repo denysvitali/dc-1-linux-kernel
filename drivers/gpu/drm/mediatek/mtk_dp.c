@@ -2522,15 +2522,14 @@ static u32 *mtk_dp_bridge_atomic_get_input_bus_fmts(struct drm_bridge *bridge,
 	if (((rate * 97 / 100) < (mode->clock * 24 / 8)) &&
 	    ((rate * 97 / 100) > (mode->clock * 16 / 8)) &&
 	    (display_info->color_formats & BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR422))) {
-		input_fmts = kcalloc(1, sizeof(*input_fmts), GFP_KERNEL);
+		input_fmts = kzalloc_objs(*input_fmts, 1);
 		if (!input_fmts)
 			return NULL;
 		*num_input_fmts = 1;
 		input_fmts[0] = MEDIA_BUS_FMT_YUYV8_1X16;
 	} else {
-		input_fmts = kcalloc(ARRAY_SIZE(mt8195_input_fmts),
-				     sizeof(*input_fmts),
-				     GFP_KERNEL);
+		input_fmts = kzalloc_objs(*input_fmts,
+					  ARRAY_SIZE(mt8195_input_fmts));
 		if (!input_fmts)
 			return NULL;
 
@@ -2578,7 +2577,7 @@ static const struct drm_bridge_funcs mtk_dp_bridge_funcs = {
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
 	.atomic_get_output_bus_fmts = mtk_dp_bridge_atomic_get_output_bus_fmts,
 	.atomic_get_input_bus_fmts = mtk_dp_bridge_atomic_get_input_bus_fmts,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.attach = mtk_dp_bridge_attach,
 	.detach = mtk_dp_bridge_detach,
 	.atomic_enable = mtk_dp_bridge_atomic_enable,

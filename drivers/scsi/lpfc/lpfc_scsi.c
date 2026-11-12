@@ -21,6 +21,7 @@
  * included with this package.                                     *
  *******************************************************************/
 #include <linux/pci.h>
+#include <linux/seq_buf.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/export.h>
@@ -2847,7 +2848,8 @@ skipit:
 	}
 out:
 	if (err_type == BGS_GUARD_ERR_MASK) {
-		scsi_build_sense(cmd, 1, ILLEGAL_REQUEST, 0x10, 0x1);
+		scsi_set_sense(cmd, 1, ILLEGAL_REQUEST,
+			       LOGICAL_BLOCK_GUARD_CHECK_FAILED);
 		set_host_byte(cmd, DID_ABORT);
 		phba->bg_guard_err_cnt++;
 		lpfc_printf_log(phba, KERN_WARNING, LOG_FCP | LOG_BG,
@@ -2856,7 +2858,8 @@ out:
 				sum, guard_tag);
 
 	} else if (err_type == BGS_REFTAG_ERR_MASK) {
-		scsi_build_sense(cmd, 1, ILLEGAL_REQUEST, 0x10, 0x3);
+		scsi_set_sense(cmd, 1, ILLEGAL_REQUEST,
+			       LOGICAL_BLOCK_REFERENCE_TAG_CHECK_FAILED);
 		set_host_byte(cmd, DID_ABORT);
 
 		phba->bg_reftag_err_cnt++;
@@ -2866,7 +2869,8 @@ out:
 				ref_tag, start_ref_tag);
 
 	} else if (err_type == BGS_APPTAG_ERR_MASK) {
-		scsi_build_sense(cmd, 1, ILLEGAL_REQUEST, 0x10, 0x2);
+		scsi_set_sense(cmd, 1, ILLEGAL_REQUEST,
+			       LOGICAL_BLOCK_APPLICATION_TAG_CHECK_FAILED);
 		set_host_byte(cmd, DID_ABORT);
 
 		phba->bg_apptag_err_cnt++;
@@ -2969,7 +2973,8 @@ lpfc_parse_bg_err(struct lpfc_hba *phba, struct lpfc_io_buf *lpfc_cmd,
 
 	if (lpfc_bgs_get_guard_err(bgstat)) {
 		ret = 1;
-		scsi_build_sense(cmd, 1, ILLEGAL_REQUEST, 0x10, 0x1);
+		scsi_set_sense(cmd, 1, ILLEGAL_REQUEST,
+			       LOGICAL_BLOCK_GUARD_CHECK_FAILED);
 		set_host_byte(cmd, DID_ABORT);
 		phba->bg_guard_err_cnt++;
 		lpfc_printf_log(phba, KERN_WARNING, LOG_FCP | LOG_BG,
@@ -2982,7 +2987,8 @@ lpfc_parse_bg_err(struct lpfc_hba *phba, struct lpfc_io_buf *lpfc_cmd,
 
 	if (lpfc_bgs_get_reftag_err(bgstat)) {
 		ret = 1;
-		scsi_build_sense(cmd, 1, ILLEGAL_REQUEST, 0x10, 0x3);
+		scsi_set_sense(cmd, 1, ILLEGAL_REQUEST,
+			       LOGICAL_BLOCK_REFERENCE_TAG_CHECK_FAILED);
 		set_host_byte(cmd, DID_ABORT);
 		phba->bg_reftag_err_cnt++;
 		lpfc_printf_log(phba, KERN_WARNING, LOG_FCP | LOG_BG,
@@ -2995,7 +3001,8 @@ lpfc_parse_bg_err(struct lpfc_hba *phba, struct lpfc_io_buf *lpfc_cmd,
 
 	if (lpfc_bgs_get_apptag_err(bgstat)) {
 		ret = 1;
-		scsi_build_sense(cmd, 1, ILLEGAL_REQUEST, 0x10, 0x2);
+		scsi_set_sense(cmd, 1, ILLEGAL_REQUEST,
+			       LOGICAL_BLOCK_APPLICATION_TAG_CHECK_FAILED);
 		set_host_byte(cmd, DID_ABORT);
 		phba->bg_apptag_err_cnt++;
 		lpfc_printf_log(phba, KERN_WARNING, LOG_FCP | LOG_BG,
@@ -4271,7 +4278,7 @@ lpfc_fcp_io_cmd_wqe_cmpl(struct lpfc_hba *phba, struct lpfc_iocbq *pwqeIn,
 	if (vport->cfg_max_scsicmpl_time &&
 	    time_after(jiffies, lpfc_cmd->start_time +
 	    msecs_to_jiffies(vport->cfg_max_scsicmpl_time))) {
-		spin_lock_irqsave(shost->host_lock, flags);
+		spin_lock_irqsave(&shost->host_lock, flags);
 		if (ndlp) {
 			if (ndlp->cmd_qdepth >
 				atomic_read(&ndlp->cmd_pending) &&
@@ -4284,7 +4291,7 @@ lpfc_fcp_io_cmd_wqe_cmpl(struct lpfc_hba *phba, struct lpfc_iocbq *pwqeIn,
 
 			ndlp->last_change_time = jiffies;
 		}
-		spin_unlock_irqrestore(shost->host_lock, flags);
+		spin_unlock_irqrestore(&shost->host_lock, flags);
 	}
 	lpfc_scsi_unprep_dma_buf(phba, lpfc_cmd);
 
@@ -4551,7 +4558,7 @@ lpfc_scsi_cmd_iocb_cmpl(struct lpfc_hba *phba, struct lpfc_iocbq *pIocbIn,
 	if (vport->cfg_max_scsicmpl_time &&
 	   time_after(jiffies, lpfc_cmd->start_time +
 		msecs_to_jiffies(vport->cfg_max_scsicmpl_time))) {
-		spin_lock_irqsave(shost->host_lock, flags);
+		spin_lock_irqsave(&shost->host_lock, flags);
 		if (pnode) {
 			if (pnode->cmd_qdepth >
 				atomic_read(&pnode->cmd_pending) &&
@@ -4564,7 +4571,7 @@ lpfc_scsi_cmd_iocb_cmpl(struct lpfc_hba *phba, struct lpfc_iocbq *pIocbIn,
 
 			pnode->last_change_time = jiffies;
 		}
-		spin_unlock_irqrestore(shost->host_lock, flags);
+		spin_unlock_irqrestore(&shost->host_lock, flags);
 	}
 	lpfc_scsi_unprep_dma_buf(phba, lpfc_cmd);
 
@@ -5103,57 +5110,37 @@ lpfc_info(struct Scsi_Host *host)
 	struct lpfc_hba   *phba = vport->phba;
 	int link_speed = 0;
 	static char lpfcinfobuf[384];
-	char tmp[384] = {0};
+	struct seq_buf s;
 
 	memset(lpfcinfobuf, 0, sizeof(lpfcinfobuf));
+	seq_buf_init(&s, lpfcinfobuf, sizeof(lpfcinfobuf));
 	if (phba && phba->pcidev){
 		/* Model Description */
-		scnprintf(tmp, sizeof(tmp), phba->ModelDesc);
-		if (strlcat(lpfcinfobuf, tmp, sizeof(lpfcinfobuf)) >=
-		    sizeof(lpfcinfobuf))
-			goto buffer_done;
+		seq_buf_printf(&s, "%s", phba->ModelDesc);
 
 		/* PCI Info */
-		scnprintf(tmp, sizeof(tmp),
-			  " on PCI bus %02x device %02x irq %d",
-			  phba->pcidev->bus->number, phba->pcidev->devfn,
-			  phba->pcidev->irq);
-		if (strlcat(lpfcinfobuf, tmp, sizeof(lpfcinfobuf)) >=
-		    sizeof(lpfcinfobuf))
-			goto buffer_done;
+		seq_buf_printf(&s, " on PCI bus %02x device %02x irq %d",
+			       phba->pcidev->bus->number, phba->pcidev->devfn,
+			       phba->pcidev->irq);
 
 		/* Port Number */
-		if (phba->Port[0]) {
-			scnprintf(tmp, sizeof(tmp), " port %s", phba->Port);
-			if (strlcat(lpfcinfobuf, tmp, sizeof(lpfcinfobuf)) >=
-			    sizeof(lpfcinfobuf))
-				goto buffer_done;
-		}
+		if (phba->Port[0])
+			seq_buf_printf(&s, " port %s", phba->Port);
 
 		/* Link Speed */
 		link_speed = lpfc_sli_port_speed_get(phba);
-		if (link_speed != 0) {
-			scnprintf(tmp, sizeof(tmp),
-				  " Logical Link Speed: %d Mbps", link_speed);
-			if (strlcat(lpfcinfobuf, tmp, sizeof(lpfcinfobuf)) >=
-			    sizeof(lpfcinfobuf))
-				goto buffer_done;
-		}
+		if (link_speed != 0)
+			seq_buf_printf(&s, " Logical Link Speed: %d Mbps",
+				       link_speed);
 
 		/* Support for BSG ioctls */
-		scnprintf(tmp, sizeof(tmp), " BSG");
-		if (strlcat(lpfcinfobuf, tmp, sizeof(lpfcinfobuf)) >=
-		    sizeof(lpfcinfobuf))
-			goto buffer_done;
+		seq_buf_printf(&s, " BSG");
 
 		/* PCI resettable */
-		if (!lpfc_check_pci_resettable(phba)) {
-			scnprintf(tmp, sizeof(tmp), " PCI resettable");
-			strlcat(lpfcinfobuf, tmp, sizeof(lpfcinfobuf));
-		}
+		if (!lpfc_check_pci_resettable(phba))
+			seq_buf_printf(&s, " PCI resettable");
 	}
 
-buffer_done:
 	return lpfcinfobuf;
 }
 
@@ -5520,6 +5507,7 @@ void lpfc_vmid_vport_cleanup(struct lpfc_vport *vport)
  **/
 static int
 lpfc_abort_handler(struct scsi_cmnd *cmnd)
+	__context_unsafe(/*conditional locking*/)
 {
 	struct Scsi_Host  *shost = cmnd->device->host;
 	struct fc_rport *rport = starget_to_rport(scsi_target(cmnd->device));

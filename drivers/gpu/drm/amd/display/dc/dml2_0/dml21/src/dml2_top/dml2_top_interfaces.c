@@ -5,6 +5,7 @@
 #include "dml_top.h"
 #include "dml2_internal_shared_types.h"
 #include "dml2_top_soc15.h"
+#include "dml2_top_utm.h"
 
 unsigned int dml2_get_instance_size_bytes(void)
 {
@@ -18,7 +19,14 @@ bool dml2_initialize_instance(struct dml2_initialize_instance_in_out *in_out)
 	case dml2_project_dcn4x_stage2:
 	case dml2_project_dcn4x_stage2_auto_drr_svp:
 	case dml2_project_dcn42:
+	case dml2_project_dcn42b:
 		return dml2_top_soc15_initialize_instance(in_out);
+	case dml2_project_dcn5x_utm:
+	case dml2_project_dcn6x_soc_var_a:
+	case dml2_project_dcn6x_soc_var_b:
+		return dml2_top_utm_initialize_instance(in_out);
+	case dml2_project_dcn4x_utm:
+	case dml2_project_dcn5x:
 	case dml2_project_invalid:
 	default:
 		return false;

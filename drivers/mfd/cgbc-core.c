@@ -343,7 +343,7 @@ static int cgbc_probe(struct platform_device *pdev)
 	struct cgbc_device_data *cgbc;
 	int ret;
 
-	cgbc = devm_kzalloc(dev, sizeof(*cgbc), GFP_KERNEL);
+	cgbc = devm_kzalloc_obj(dev, *cgbc);
 	if (!cgbc)
 		return -ENOMEM;
 
@@ -364,9 +364,9 @@ static void cgbc_remove(struct platform_device *pdev)
 {
 	struct cgbc_device_data *cgbc = platform_get_drvdata(pdev);
 
-	cgbc_session_release(cgbc);
-
 	mfd_remove_devices(&pdev->dev);
+
+	cgbc_session_release(cgbc);
 }
 
 static struct platform_driver cgbc_driver = {

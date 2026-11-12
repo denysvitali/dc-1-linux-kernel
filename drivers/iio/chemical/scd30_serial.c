@@ -2,7 +2,7 @@
 /*
  * Sensirion SCD30 carbon dioxide sensor serial driver
  *
- * Copyright (c) 2020 Tomasz Duszynski <tomasz.duszynski@octakon.com>
+ * Copyright (c) 2020 Tomasz Duszynski <tduszyns@gmail.com>
  */
 #include <linux/crc16.h>
 #include <linux/device.h>
@@ -218,7 +218,7 @@ static int scd30_serdev_probe(struct serdev_device *serdev)
 	struct scd30_serdev_priv *priv;
 	int irq, ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -257,7 +257,7 @@ static struct serdev_device_driver scd30_serdev_driver = {
 };
 module_serdev_device_driver(scd30_serdev_driver);
 
-MODULE_AUTHOR("Tomasz Duszynski <tomasz.duszynski@octakon.com>");
+MODULE_AUTHOR("Tomasz Duszynski <tduszyns@gmail.com>");
 MODULE_DESCRIPTION("Sensirion SCD30 carbon dioxide sensor serial driver");
 MODULE_LICENSE("GPL v2");
 MODULE_IMPORT_NS("IIO_SCD30");

@@ -1327,6 +1327,7 @@ static int unicam_subdev_enum_frame_size(struct v4l2_subdev *sd,
 }
 
 static int unicam_subdev_set_format(struct v4l2_subdev *sd,
+				    const struct v4l2_subdev_client_info *ci,
 				    struct v4l2_subdev_state *state,
 				    struct v4l2_subdev_format *format)
 {
@@ -2158,7 +2159,8 @@ static int unicam_video_link_validate(struct media_link *link)
 		 * In order to allow the applications using the old behaviour to
 		 * run, let's accept the old combination, but warn about it.
 		 */
-		if (fmtinfo->fourcc != fmt->pixelformat) {
+		if (fmt->pixelformat != fmtinfo->fourcc &&
+		    fmt->pixelformat != fmtinfo->unpacked_fourcc) {
 			if ((fmt->pixelformat == V4L2_PIX_FMT_BGR24 &&
 			     format->code == MEDIA_BUS_FMT_BGR888_1X24) ||
 			    (fmt->pixelformat == V4L2_PIX_FMT_RGB24 &&
@@ -2613,6 +2615,7 @@ static int unicam_async_nf_init(struct unicam_device *unicam)
 	return 0;
 
 error:
+	v4l2_async_nf_cleanup(&unicam->notifier);
 	fwnode_handle_put(ep_handle);
 	return ret;
 }
@@ -2745,6 +2748,7 @@ static void unicam_remove(struct platform_device *pdev)
 	v4l2_device_unregister(&unicam->v4l2_dev);
 	media_device_unregister(&unicam->mdev);
 	v4l2_async_nf_unregister(&unicam->notifier);
+	v4l2_async_nf_cleanup(&unicam->notifier);
 
 	unicam_subdev_cleanup(unicam);
 

@@ -191,7 +191,8 @@ TRACE_DEFINE_ENUM(CP_PHASE_FINISH_CHECKPOINT);
 		{ LOCK_NAME_NODE_WRITE,		"node_write" },		\
 		{ LOCK_NAME_GC_LOCK,		"gc_lock" },		\
 		{ LOCK_NAME_CP_GLOBAL,		"cp_global" },		\
-		{ LOCK_NAME_IO_RWSEM,		"io_rwsem" })
+		{ LOCK_NAME_IO_RWSEM,		"io_rwsem" },		\
+		{ LOCK_NAME_NAT_TREE_LOCK,	"nat_tree_lock" })
 
 struct f2fs_sb_info;
 struct f2fs_io_info;
@@ -1429,6 +1430,50 @@ DEFINE_EVENT(f2fs__folio, f2fs_set_page_dirty,
 	TP_ARGS(folio, type)
 );
 
+DECLARE_EVENT_CLASS(f2fs__cached_block,
+
+	TP_PROTO(struct f2fs_cached_block *block, int type),
+
+	TP_ARGS(block, type),
+
+	TP_STRUCT__entry(
+		__field(dev_t,	dev)
+		__field(pgoff_t, index)
+		__field(int,	type)
+		__field(int,	dirty)
+		__field(int,	uptodate)
+	),
+
+	TP_fast_assign(
+		__entry->dev	= block->cache->sbi->sb->s_dev;
+		__entry->index	= block->index;
+		__entry->type	= type;
+		__entry->dirty	= f2fs_cache_test_dirty(block);
+		__entry->uptodate = f2fs_cache_test_uptodate(block);
+	),
+
+	TP_printk("dev = (%d,%d), %s, index = %lu, dirty = %d, uptodate = %d",
+		show_dev(__entry->dev),
+		show_block_type(__entry->type),
+		(unsigned long)__entry->index,
+		__entry->dirty,
+		__entry->uptodate)
+);
+
+DEFINE_EVENT(f2fs__cached_block, f2fs_write_cache,
+
+	TP_PROTO(struct f2fs_cached_block *block, int type),
+
+	TP_ARGS(block, type)
+);
+
+DEFINE_EVENT(f2fs__cached_block, f2fs_cache_set_dirty,
+
+	TP_PROTO(struct f2fs_cached_block *block, int type),
+
+	TP_ARGS(block, type)
+);
+
 TRACE_EVENT(f2fs_replace_atomic_write_block,
 
 	TP_PROTO(struct inode *inode, struct inode *cow_inode, pgoff_t index,
@@ -1571,6 +1616,33 @@ TRACE_EVENT(f2fs_writepages,
 		__entry->tagged_writepages,
 		__entry->range_cyclic,
 		__entry->for_sync)
+);
+
+TRACE_EVENT(f2fs_write_caches,
+
+	TP_PROTO(struct f2fs_sb_info *sbi, long nr_to_write, long nwritten, int type),
+
+	TP_ARGS(sbi, nr_to_write, nwritten, type),
+
+	TP_STRUCT__entry(
+		__field(dev_t,	dev)
+		__field(long,	nr_to_write)
+		__field(long,	nwritten)
+		__field(int,	type)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= sbi->sb->s_dev;
+		__entry->nr_to_write	= nr_to_write;
+		__entry->nwritten	= nwritten;
+		__entry->type		= type;
+	),
+
+	TP_printk("dev = (%d,%d), %s, nr_to_write = %ld, nwritten = %ld",
+		show_dev(__entry->dev),
+		show_block_type(__entry->type),
+		__entry->nr_to_write,
+		__entry->nwritten)
 );
 
 TRACE_EVENT(f2fs_readpages,
@@ -2114,6 +2186,14 @@ DEFINE_EVENT(f2fs_zip_end, f2fs_decompress_pages_end,
 );
 
 #ifdef CONFIG_F2FS_IOSTAT
+/*
+ * Number of read folio order buckets emitted by the f2fs_iostat tracepoint.
+ * TP_printk() cannot loop, so the field count is fixed here and must be >=
+ * the largest possible NR_PAGE_ORDERS (14 on arm64 with 64K pages). The
+ * BUILD_BUG_ON() in f2fs_update_read_folio_count() enforces this.
+ */
+#define F2FS_IOSTAT_RD_FOLIO_ORDERS	16
+
 TRACE_EVENT(f2fs_iostat,
 
 	TP_PROTO(struct f2fs_sb_info *sbi, unsigned long long *iostat,
@@ -2151,7 +2231,7 @@ TRACE_EVENT(f2fs_iostat,
 		__field(unsigned long long,	fs_mrio)
 		__field(unsigned long long,	fs_discard)
 		__field(unsigned long long,	fs_reset_zone)
-		__array(unsigned long long,	read_folio_count, 11)
+		__array(unsigned long long,	read_folio_count, F2FS_IOSTAT_RD_FOLIO_ORDERS)
 	),
 
 	TP_fast_assign(
@@ -2186,7 +2266,8 @@ TRACE_EVENT(f2fs_iostat,
 		__entry->fs_reset_zone	= iostat[FS_ZONE_RESET_IO];
 		memset(__entry->read_folio_count, 0, sizeof(__entry->read_folio_count));
 		memcpy(__entry->read_folio_count, read_folio_count,
-				sizeof(unsigned long long) * min_t(int, NR_PAGE_ORDERS, 11));
+				sizeof(unsigned long long) *
+				min_t(int, NR_PAGE_ORDERS, F2FS_IOSTAT_RD_FOLIO_ORDERS));
 	),
 
 	TP_printk("dev = (%d,%d), "
@@ -2201,7 +2282,8 @@ TRACE_EVENT(f2fs_iostat,
 		"fs [data=%llu, (gc_data=%llu, cdata=%llu), "
 		"node=%llu, meta=%llu], "
 		"read_folio_count [0=%llu, 1=%llu, 2=%llu, 3=%llu, 4=%llu, "
-		"5=%llu, 6=%llu, 7=%llu, 8=%llu, 9=%llu, 10=%llu]",
+		"5=%llu, 6=%llu, 7=%llu, 8=%llu, 9=%llu, 10=%llu, 11=%llu, "
+		"12=%llu, 13=%llu, 14=%llu, 15=%llu]",
 		show_dev(__entry->dev), __entry->app_wio, __entry->app_dio,
 		__entry->app_bio, __entry->app_mio, __entry->app_bcdio,
 		__entry->app_mcdio, __entry->fs_dio, __entry->fs_cdio,
@@ -2218,7 +2300,9 @@ TRACE_EVENT(f2fs_iostat,
 		__entry->read_folio_count[4], __entry->read_folio_count[5],
 		__entry->read_folio_count[6], __entry->read_folio_count[7],
 		__entry->read_folio_count[8], __entry->read_folio_count[9],
-		__entry->read_folio_count[10])
+		__entry->read_folio_count[10], __entry->read_folio_count[11],
+		__entry->read_folio_count[12], __entry->read_folio_count[13],
+		__entry->read_folio_count[14], __entry->read_folio_count[15])
 );
 
 #ifndef __F2FS_IOSTAT_LATENCY_TYPE

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <assert.h>
 #include <linux/compiler.h>
 #include <elfutils/libdw.h>
 #include <elfutils/libdwfl.h>
 #include <inttypes.h>
+#include <byteswap.h>
 #include <errno.h>
 #include "debug.h"
 #include "dso.h"
@@ -16,6 +18,8 @@
 #include <linux/types.h>
 #include <linux/zalloc.h>
 #include "event.h"
+#include "evsel.h"
+#include "memswap.h"
 #include "perf_regs.h"
 #include "callchain.h"
 #include "util/env.h"
@@ -41,8 +45,10 @@ static int __find_debuginfo(Dwfl_Module *mod __maybe_unused, void **userdata,
 	const struct dso *dso = *userdata;
 
 	assert(dso);
+	mutex_lock(dso__lock((struct dso *)dso));
 	if (dso__symsrc_filename(dso) && strcmp(file_name, dso__symsrc_filename(dso)))
 		*debuginfo_file_name = strdup(dso__symsrc_filename(dso));
+	mutex_unlock(dso__lock((struct dso *)dso));
 	return -1;
 }
 
@@ -173,20 +179,37 @@ static int entry(u64 ip, struct unwind_info *ui)
 	return 0;
 }
 
-static pid_t next_thread(Dwfl *dwfl, void *arg, void **thread_argp)
+static pid_t next_thread(Dwfl *dwfl __maybe_unused, void *arg, void **thread_argp)
 {
+	struct dwfl_ui_thread_info *dwfl_ui_ti = arg;
+
 	/* We want only single thread to be processed. */
 	if (*thread_argp != NULL)
 		return 0;
 
+	assert(dwfl_ui_ti->ui != NULL);
 	*thread_argp = arg;
-	return dwfl_pid(dwfl);
+	return thread__tid(dwfl_ui_ti->ui->thread);
+}
+
+static bool get_thread(Dwfl *dwfl __maybe_unused, pid_t tid, void *arg,
+		       void **thread_argp)
+{
+	struct dwfl_ui_thread_info *dwfl_ui_ti = arg;
+
+	assert(dwfl_ui_ti->ui != NULL);
+	if (tid != thread__tid(dwfl_ui_ti->ui->thread))
+		return false;
+
+	*thread_argp = arg;
+	return true;
 }
 
 static int access_dso_mem(struct unwind_info *ui, Dwarf_Addr addr,
-			  Dwarf_Word *data)
+			  Dwarf_Word *data, size_t len)
 {
 	struct addr_location al;
+	union u64_swap u;
 	ssize_t size;
 	struct dso *dso;
 
@@ -199,13 +222,36 @@ static int access_dso_mem(struct unwind_info *ui, Dwarf_Addr addr,
 	if (!dso)
 		goto out_fail;
 
-	size = dso__data_read_addr(dso, al.map, ui->machine, addr, (u8 *) data, sizeof(*data));
+	size = dso__data_read_addr(dso, al.map, ui->machine, addr, (u8 *)&u, len);
 
 	addr_location__exit(&al);
-	return !(size == sizeof(*data));
+	if (size != (ssize_t)len)
+		return 1;
+	*data = len == sizeof(u32) ? u.val32[0] : u.val64;
+	return 0;
 out_fail:
 	addr_location__exit(&al);
 	return -1;
+}
+
+/*
+ * libdw expects a 32-bit task's words zero-extended.  A recording of the
+ * other byte order was swapped in 8-byte units when it was read (see
+ * perf_event__all64_swap()), so a 4-byte word is picked out of its unit with
+ * that swap undone, as for PERF_SAMPLE_CPU in __evsel__parse_sample().
+ */
+static Dwarf_Word stack_word(struct stack_dump *stack, int offset, size_t len,
+			     bool swapped)
+{
+	union u64_swap u;
+
+	if (len == sizeof(u64))
+		return *(Dwarf_Word *)&stack->data[offset];
+	if (!swapped)
+		return *(u32 *)&stack->data[offset];
+
+	u.val64 = bswap_64(*(u64 *)&stack->data[offset & ~7]);
+	return bswap_32(u.val32[(offset & 4) / 4]);
 }
 
 static bool memory_read(Dwfl *dwfl __maybe_unused, Dwarf_Addr addr, Dwarf_Word *result,
@@ -215,11 +261,16 @@ static bool memory_read(Dwfl *dwfl __maybe_unused, Dwarf_Addr addr, Dwarf_Word *
 	struct unwind_info *ui = dwfl_ui_ti->ui;
 	struct stack_dump *stack = &ui->sample->user_stack;
 	u64 start, end;
+	bool swapped;
+	size_t len;
 	int offset;
 	int ret;
 
 	if (!ui->sample->user_regs)
 		return false;
+	len = ui->sample->user_regs->abi == PERF_SAMPLE_REGS_ABI_32 ?
+	      sizeof(u32) : sizeof(u64);
+	swapped = ui->sample->evsel && ui->sample->evsel->needs_swap;
 
 	ret = perf_reg_value(&start, ui->sample->user_regs,
 			     perf_arch_reg_sp(ui->e_machine));
@@ -229,11 +280,11 @@ static bool memory_read(Dwfl *dwfl __maybe_unused, Dwarf_Addr addr, Dwarf_Word *
 	end = start + stack->size;
 
 	/* Check overflow. */
-	if (addr + sizeof(Dwarf_Word) < addr)
+	if (addr + len < addr)
 		return false;
 
-	if (addr < start || addr + sizeof(Dwarf_Word) > end) {
-		ret = access_dso_mem(ui, addr, result);
+	if (addr < start || addr + len > end) {
+		ret = access_dso_mem(ui, addr, result, len);
 		if (ret) {
 			pr_debug("unwind: access_mem 0x%" PRIx64 " not inside range"
 				 " 0x%" PRIx64 "-0x%" PRIx64 "\n",
@@ -244,7 +295,7 @@ static bool memory_read(Dwfl *dwfl __maybe_unused, Dwarf_Addr addr, Dwarf_Word *
 	}
 
 	offset  = addr - start;
-	*result = *(Dwarf_Word *)&stack->data[offset];
+	*result = stack_word(stack, offset, len, swapped);
 	pr_debug("unwind: access_mem addr 0x%" PRIx64 ", val %lx, offset %d\n",
 		 addr, (unsigned long)*result, offset);
 	return true;
@@ -273,7 +324,8 @@ static bool libdw_set_initial_registers(Dwfl_Thread *thread, void *arg)
 			int dwarf_reg =
 				get_dwarf_regnum_for_perf_regnum(perf_reg, e_machine,
 								 e_flags,
-								 /*only_libdw_supported=*/true);
+								 /*only_libdw_supported=*/true,
+								 user_regs->abi);
 			if (dwarf_reg > max_dwarf_reg)
 				max_dwarf_reg = dwarf_reg;
 		}
@@ -288,7 +340,8 @@ static bool libdw_set_initial_registers(Dwfl_Thread *thread, void *arg)
 			int dwarf_reg =
 				get_dwarf_regnum_for_perf_regnum(perf_reg, e_machine,
 								 e_flags,
-								 /*only_libdw_supported=*/true);
+								 /*only_libdw_supported=*/true,
+								 user_regs->abi);
 			if (dwarf_reg >= 0) {
 				val = 0;
 				if (perf_reg_value(&val, user_regs, perf_reg) == 0)
@@ -306,6 +359,7 @@ static bool libdw_set_initial_registers(Dwfl_Thread *thread, void *arg)
 
 static const Dwfl_Thread_Callbacks callbacks = {
 	.next_thread           = next_thread,
+	.get_thread            = get_thread,
 	.memory_read           = memory_read,
 	.set_initial_registers = libdw_set_initial_registers,
 };
@@ -379,6 +433,11 @@ int libdw__get_entries(unwind_entry_cb_t cb, void *arg,
 		dwfl = dwfl_ui_ti->dwfl;
 	} else {
 		dwfl_ui_ti = zalloc(sizeof(*dwfl_ui_ti));
+		if (!dwfl_ui_ti) {
+			free(ui);
+			return -ENOMEM;
+		}
+
 		dwfl = dwfl_begin(&offline_callbacks);
 		if (!dwfl)
 			goto out;
@@ -400,7 +459,7 @@ int libdw__get_entries(unwind_entry_cb_t cb, void *arg,
 	if (err)
 		goto out;
 
-	dwfl_attach_state(dwfl, /*elf=*/NULL, thread__tid(thread), &callbacks,
+	dwfl_attach_state(dwfl, /*elf=*/NULL, thread__pid(thread), &callbacks,
 			  /* Dwfl thread function argument*/dwfl_ui_ti);
 	// Ignore thread already attached error.
 

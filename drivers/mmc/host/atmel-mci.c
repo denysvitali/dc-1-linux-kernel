@@ -1677,10 +1677,7 @@ static void atmci_detect_change(struct timer_list *t)
 
 		spin_lock(&host->lock);
 
-		if (!present)
-			clear_bit(ATMCI_CARD_PRESENT, &slot->flags);
-		else
-			set_bit(ATMCI_CARD_PRESENT, &slot->flags);
+		assign_bit(ATMCI_CARD_PRESENT, &slot->flags, present);
 
 		/* Clean up queue if present */
 		mrq = slot->mrq;
@@ -2451,7 +2448,7 @@ static int atmci_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return irq;
 
-	host = devm_kzalloc(dev, sizeof(*host), GFP_KERNEL);
+	host = devm_kzalloc_obj(dev, *host);
 	if (!host)
 		return -ENOMEM;
 
@@ -2609,6 +2606,8 @@ static void atmci_remove(struct platform_device *pdev)
 		dma_release_channel(host->dma.chan);
 
 	free_irq(platform_get_irq(pdev, 0), host);
+
+	cancel_work_sync(&host->bh_work);
 
 	clk_disable_unprepare(host->mck);
 

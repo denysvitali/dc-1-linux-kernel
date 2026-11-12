@@ -1552,12 +1552,25 @@ static int sma1307_dai_mute_stream(struct snd_soc_dai *dai, int mute,
 	return 0;
 }
 
+static const u64 sma1307_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops sma1307_dai_ops_amp = {
 	.hw_params = sma1307_dai_hw_params_amp,
 	.set_fmt = sma1307_dai_set_fmt_amp,
 	.set_sysclk = sma1307_dai_set_sysclk_amp,
 	.set_tdm_slot = sma1307_dai_set_tdm_slot,
 	.mute_stream = sma1307_dai_mute_stream,
+	.auto_selectable_formats	= &sma1307_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 #define SMA1307_RATES_PLAYBACK SNDRV_PCM_RATE_8000_96000
@@ -1690,7 +1703,7 @@ static void sma1307_check_fault_worker(struct work_struct *work)
 
 static void sma1307_setting_loaded(struct sma1307_priv *sma1307, const char *file)
 {
-	const struct firmware *fw;
+	const struct firmware *fw __free(firmware) = NULL;
 	int size, offset, num_mode;
 	int ret;
 
@@ -1701,29 +1714,31 @@ static void sma1307_setting_loaded(struct sma1307_priv *sma1307, const char *fil
 			__func__, setting_file, ERR_PTR(ret));
 		sma1307->set.status = false;
 		return;
-	} else if ((fw->size) < SMA1307_SETTING_HEADER_SIZE) {
+	} else if (fw->size % sizeof(int) ||
+		   fw->size < (SMA1307_SETTING_HEADER_SIZE +
+				       SMA1307_SETTING_DEFAULT_SIZE) * sizeof(int)) {
 		dev_err(sma1307->dev, "%s: Invalid file\n", __func__);
-		release_firmware(fw);
 		sma1307->set.status = false;
 		return;
 	}
 
 	int *data __free(kfree) = kzalloc(fw->size, GFP_KERNEL);
 	if (!data) {
-		release_firmware(fw);
 		sma1307->set.status = false;
 		return;
 	}
 	size = fw->size >> 2;
 	memcpy(data, fw->data, fw->size);
 
-	release_firmware(fw);
-
 	/* HEADER */
 	sma1307->set.header_size = SMA1307_SETTING_HEADER_SIZE;
 	sma1307->set.checksum = data[sma1307->set.header_size - 2];
 	sma1307->set.num_mode = data[sma1307->set.header_size - 1];
 	num_mode = sma1307->set.num_mode;
+	if (num_mode < 0 || num_mode > ARRAY_SIZE(sma1307->set.mode_set)) {
+		sma1307->set.status = false;
+		return;
+	}
 	sma1307->set.header = devm_kmalloc_array(sma1307->dev,
 						 sma1307->set.header_size,
 						 sizeof(int),
@@ -1759,7 +1774,11 @@ static void sma1307_setting_loaded(struct sma1307_priv *sma1307, const char *fil
 
 	/* MODE */
 	offset = sma1307->set.header_size + sma1307->set.def_size;
-	sma1307->set.mode_size = DIV_ROUND_CLOSEST(size - offset, num_mode + 1);
+	if ((size - offset) % (num_mode + 1)) {
+		sma1307->set.status = false;
+		return;
+	}
+	sma1307->set.mode_size = (size - offset) / (num_mode + 1);
 	for (int i = 0; i < num_mode; i++) {
 		sma1307->set.mode_set[i]
 		    = devm_kzalloc(sma1307->dev,
@@ -1937,8 +1956,7 @@ static int sma1307_i2c_probe(struct i2c_client *client)
 	int ret = 0;
 	unsigned int device_info;
 
-	sma1307 = devm_kzalloc(&client->dev,
-			       sizeof(*sma1307), GFP_KERNEL);
+	sma1307 = devm_kzalloc_obj(&client->dev, *sma1307);
 	if (!sma1307)
 		return -ENOMEM;
 

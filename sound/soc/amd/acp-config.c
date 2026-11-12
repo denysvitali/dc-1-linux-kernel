@@ -31,6 +31,13 @@ static const struct dmi_system_id acp70_acpi_flag_override_table[] = {
 		},
 	},
 	{
+		/* ASUS EXPERTBOOK AM7406CKA (Kraken Point, ACP 7.0) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "ASUS EXPERTBOOK AM7406CKA"),
+		},
+	},
+	{
 		/* ASUS Zenbook S16 UM5606GA (Strix Point, ACP 7.0) */
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC."),
@@ -45,15 +52,92 @@ static const struct dmi_system_id acp70_acpi_flag_override_table[] = {
 		},
 	},
 	{
+		/* Lenovo Legion 7 15ASH11 (Strix Halo, ACP 7.0) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83V9"),
+		},
+	},
+	{
+		/* Lenovo Yoga Pro 7 14ASP9 (Strix Point, ACP 7.0) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83HN"),
+		},
+	},
+	{
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "TUF Gaming A14 FA401EA"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "FA401EA"),
 		},
 	},
 	{
 		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "Vivobook 18 M1807GA"),
+		},
+	},
+	{
+		/* ASUS Zenbook S14 UM5406GA (Strix Point, ACP 7.0) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Zenbook S14 UM5406GA"),
+		},
+	},
+	{
+		/* HP OmniBook X Flip 14-kc0xxx (Strix Point, ACP 7.2) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "HP"),
+			DMI_MATCH(DMI_BOARD_NAME, "8EA1"),
+		},
+	},
+	{
+		/* HP OmniBook X Flip 16-cc0xxx */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "HP"),
+			DMI_MATCH(DMI_BOARD_NAME, "8EA2"),
+		},
+	},
+	{
+		/* HP Cashmere-A */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "HP"),
+			DMI_MATCH(DMI_BOARD_NAME, "8EF5"),
+		},
+	},
+	{
+		/* HP Sundae */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "HP"),
+			DMI_MATCH(DMI_BOARD_NAME, "8F6D"),
+		},
+	},
+	{
+		/* HP SundaeWhip UMA */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "HP"),
+			DMI_MATCH(DMI_BOARD_NAME, "8FA4"),
+		},
+	},
+	{
+		/* HP SundaeWhip DSC */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "HP"),
+			DMI_MATCH(DMI_BOARD_NAME, "8FA5"),
+		},
+	},
+	{
+		/* HP Kata-A */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "HP"),
+			DMI_MATCH(DMI_BOARD_NAME, "9056"),
+		},
+	},
+	{
+		/* Dell 14S DS14265 */
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Dell 14S DS14265"),
 		},
 	},
 	{}
@@ -190,6 +274,20 @@ static const struct config_entry config_table[] = {
 					DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
 					DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "HVY-WXX9"),
 					DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1040"),
+				},
+			},
+			{}
+		},
+	},
+	{
+		.flags = FLAG_AMD_LEGACY,
+		.device = ACP_PCI_DEV_ID,
+		.dmi_table = (const struct dmi_system_id []) {
+			{
+				.matches = {
+					DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "HVY-WXX9"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1060"),
 				},
 			},
 			{}
@@ -371,6 +469,30 @@ struct snd_soc_acpi_mach snd_soc_acpi_amd_acp70_sof_machines[] = {
 	{},
 };
 EXPORT_SYMBOL(snd_soc_acpi_amd_acp70_sof_machines);
+
+struct snd_soc_acpi_mach snd_soc_acpi_amd_acp7f_sof_machines[] = {
+	{
+		.id = "AMDI1010",
+		.drv_name = "acp7f-dsp",
+		.pdata = &acp_quirk_data,
+		.fw_filename = "sof-acp7f.ri",
+		.sof_tplg_filename = "sof-acp7f.tplg",
+	},
+	{},
+};
+EXPORT_SYMBOL(snd_soc_acpi_amd_acp7f_sof_machines);
+
+struct snd_soc_acpi_mach snd_soc_acpi_amd_acp7b_sof_machines[] = {
+	{
+		.id = "AMDI1010",
+		.drv_name = "acp7b-dsp",
+		.pdata = &acp_quirk_data,
+		.fw_filename = "sof-acp7b.ri",
+		.sof_tplg_filename = "sof-acp7b.tplg",
+	},
+	{},
+};
+EXPORT_SYMBOL(snd_soc_acpi_amd_acp7b_sof_machines);
 
 MODULE_DESCRIPTION("AMD ACP Machine Configuration Module");
 MODULE_LICENSE("Dual BSD/GPL");

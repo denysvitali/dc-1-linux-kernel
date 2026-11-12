@@ -71,11 +71,14 @@ static int ucsi_displayport_enter(struct typec_altmode *alt, u32 *vdo)
 	if (ret < 0) {
 		if (ucsi->version > 0x0100)
 			goto err_unlock;
-		cur = 0xff;
 	}
 
 	if (cur != 0xff) {
-		ret = dp->con->port_altmode[cur] == alt ? 0 : -EBUSY;
+		if (cur < UCSI_MAX_ALTMODES)
+			ret = dp->con->port_altmode[cur] == alt ? 0 : -EBUSY;
+		else
+			ret = -EINVAL;
+
 		goto err_unlock;
 	}
 
@@ -329,7 +332,7 @@ struct typec_altmode *ucsi_register_displayport(struct ucsi_connector *con,
 	if (IS_ERR(alt))
 		return alt;
 
-	dp = devm_kzalloc(&alt->dev, sizeof(*dp), GFP_KERNEL);
+	dp = devm_kzalloc_obj(&alt->dev, *dp);
 	if (!dp) {
 		typec_unregister_altmode(alt);
 		return ERR_PTR(-ENOMEM);

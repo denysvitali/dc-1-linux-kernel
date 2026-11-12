@@ -7,11 +7,13 @@
 
 #include <linux/host1x.h>
 #include <linux/iommu.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 
 #include <trace/events/host1x.h>
 
 #include "../channel.h"
+#include "../context.h"
 #include "../dev.h"
 #include "../intr.h"
 #include "../job.h"
@@ -36,10 +38,9 @@ static void trace_write_gather(struct host1x_cdma *cdma, struct host1x_bo *bo,
 		for (i = 0; i < words; i += TRACE_MAX_LENGTH) {
 			u32 num_words = min(words - i, TRACE_MAX_LENGTH);
 
-			offset += i * sizeof(u32);
-
 			trace_host1x_cdma_push_gather(dev_name(dev), bo,
-						      num_words, offset,
+						      num_words,
+						      offset + i * sizeof(u32),
 						      mem);
 		}
 
@@ -89,7 +90,7 @@ static void submit_setclass(struct host1x_job *job, u32 next_class)
 	 * firmware stream ID.
 	 */
 	if (job->memory_context)
-		stream_id = job->memory_context->stream_id;
+		stream_id = job->memory_context->hw->stream_id;
 	else
 		stream_id = job->engine_fallback_streamid;
 
@@ -121,7 +122,8 @@ static void submit_gathers(struct host1x_job *job, struct host1x_job_cmd *cmds, 
 
 		if (cmd->is_wait) {
 			if (cmd->wait.relative)
-				threshold = job_syncpt_base + cmd->wait.threshold;
+				threshold = wrapping_add(u32, job_syncpt_base,
+							 cmd->wait.threshold);
 			else
 				threshold = cmd->wait.threshold;
 
@@ -260,7 +262,8 @@ prefences_done:
 
 	/* Submit work. */
 	job->syncpt_end = host1x_syncpt_incr_max(sp, job->syncpt_incrs);
-	submit_gathers(job, job->cmds + i, job->num_cmds - i, job->syncpt_end - job->syncpt_incrs);
+	submit_gathers(job, job->cmds + i, job->num_cmds - i,
+		       wrapping_sub(u32, job->syncpt_end, job->syncpt_incrs));
 
 	/* Before releasing MLOCK, ensure engine is idle again. */
 	fence = host1x_syncpt_incr_max(sp, 1);
@@ -298,7 +301,8 @@ prefences_done:
 
 	job->syncpt_end = host1x_syncpt_incr_max(sp, job->syncpt_incrs);
 
-	submit_gathers(job, job->cmds, job->num_cmds, job->syncpt_end - job->syncpt_incrs);
+	submit_gathers(job, job->cmds, job->num_cmds,
+		       wrapping_sub(u32, job->syncpt_end, job->syncpt_incrs));
 #endif
 }
 

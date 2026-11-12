@@ -40,6 +40,7 @@
 #include <linux/part_stat.h>
 #include <linux/sched/sysctl.h>
 #include <linux/blk-crypto.h>
+#include <linux/error-injection.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/block.h>
@@ -897,10 +898,17 @@ void submit_bio_noacct(struct bio *bio)
 		if (!q->limits.max_write_zeroes_sectors)
 			goto not_supported;
 		break;
-	case REQ_OP_ZONE_RESET:
 	case REQ_OP_ZONE_OPEN:
 	case REQ_OP_ZONE_CLOSE:
+	case REQ_OP_ZONE_RESET:
 	case REQ_OP_ZONE_FINISH:
+		/*
+		 * Zone management operations require sequential zones that are
+		 * not offline nor read-only.
+		 */
+		if (!bdev_zone_mgmt_allowed(bdev, bio->bi_iter.bi_sector))
+			goto end_io;
+		break;
 	case REQ_OP_ZONE_RESET_ALL:
 		if (!bdev_is_zoned(bio->bi_bdev))
 			goto not_supported;

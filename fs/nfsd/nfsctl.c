@@ -20,9 +20,14 @@
 #include <linux/module.h>
 #include <linux/fsnotify.h>
 #include <linux/nfslocalio.h>
+#include <linux/nfs3.h>
 
 #include "idmap.h"
 #include "nfsd.h"
+#include "nfserr.h"
+#include "nfs4ctl.h"
+#include "netns.h"
+#include "stats.h"
 #include "cache.h"
 #include "state.h"
 #include "netns.h"
@@ -296,14 +301,15 @@ static ssize_t write_unlock_fs(struct file *file, char *buf, size_t size)
 	 * 2.  Is that directory a mount point, or
 	 * 3.  Is that directory the root of an exported file system?
 	 */
-	nfsd4_cancel_copy_by_sb(netns(file), path.dentry->d_sb);
 	error = nlmsvc_unlock_all_by_sb(path.dentry->d_sb);
 	mutex_lock(&nfsd_mutex);
 	nn = net_generic(netns(file), nfsd_net_id);
-	if (nn->nfsd_serv)
+	if (test_bit(NFSD_NET_UP, &nn->flags)) {
+		nfsd4_cancel_copy_by_sb(netns(file), path.dentry->d_sb);
 		nfsd4_revoke_states(nn, path.dentry->d_sb);
-	else
+	} else {
 		error = -EINVAL;
+	}
 	mutex_unlock(&nfsd_mutex);
 
 	path_put(&path);
@@ -420,6 +426,7 @@ static ssize_t write_threads(struct file *file, char *buf, size_t size)
 	char *mesg = buf;
 	int rv;
 	struct net *net = netns(file);
+	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
 
 	if (size > 0) {
 		int newthreads;
@@ -430,7 +437,10 @@ static ssize_t write_threads(struct file *file, char *buf, size_t size)
 			return -EINVAL;
 		trace_nfsd_ctl_threads(net, newthreads);
 		mutex_lock(&nfsd_mutex);
-		rv = nfsd_svc(1, &newthreads, net, file->f_cred, NULL);
+		if (newthreads > 0 || nn->nfsd_serv != NULL)
+			rv = nfsd_svc(1, &newthreads, net, file->f_cred, NULL);
+		else
+			rv = 0;
 		mutex_unlock(&nfsd_mutex);
 		if (rv < 0)
 			return rv;
@@ -470,7 +480,7 @@ static ssize_t write_pool_threads(struct file *file, char *buf, size_t size)
 	char *mesg = buf;
 	int i;
 	int rv;
-	int len;
+	size_t len;
 	int npools;
 	int *nthreads;
 	struct net *net = netns(file);
@@ -524,9 +534,13 @@ static ssize_t write_pool_threads(struct file *file, char *buf, size_t size)
 
 	mesg = buf;
 	size = SIMPLE_TRANSACTION_LIMIT;
-	for (i = 0; i < npools && size > 0; i++) {
-		snprintf(mesg, size, "%d%c", nthreads[i], (i == npools-1 ? '\n' : ' '));
-		len = strlen(mesg);
+	for (i = 0; i < npools; i++) {
+		len = snprintf(mesg, size, "%d%c", nthreads[i],
+			       (i == npools - 1 ? '\n' : ' '));
+		if (len >= size) {
+			rv = -ENAMETOOLONG;
+			goto out_free;
+		}
 		size -= len;
 		mesg += len;
 	}
@@ -734,7 +748,14 @@ static ssize_t __write_ports_addfd(char *buf, struct net *net, const struct cred
 		return -EINVAL;
 	trace_nfsd_ctl_ports_addfd(net, fd);
 
-	err = nfsd_create_serv(net);
+	/*
+	 * svc_register() is a no-op once userland owns rpcbind, and this
+	 * interface has no way to hand the new listener to that owner.
+	 */
+	if (nn->nfsd_serv && nn->nfsd_serv->sv_no_rpcbind)
+		return -EBUSY;
+
+	err = nfsd_create_serv(net, false);
 	if (err != 0)
 		return err;
 
@@ -766,7 +787,7 @@ static ssize_t __write_ports_addxprt(char *buf, struct net *net, const struct cr
 		return -EINVAL;
 	trace_nfsd_ctl_ports_addxprt(net, transport, port);
 
-	err = nfsd_create_serv(net);
+	err = nfsd_create_serv(net, false);
 	if (err != 0)
 		return err;
 
@@ -1111,7 +1132,7 @@ static ssize_t write_v4_end_grace(struct file *file, char *buf, size_t size)
 	}
 
 	return scnprintf(buf, SIMPLE_TRANSACTION_LIMIT, "%c\n",
-			 nn->grace_ended ? 'Y' : 'N');
+			 test_bit(NFSD_NET_GRACE_ENDED, &nn->flags) ? 'Y' : 'N');
 }
 
 #endif
@@ -1414,8 +1435,8 @@ static int create_proc_exports_entry(void)
 unsigned int nfsd_net_id;
 
 struct nfsd_genl_rqstp {
-	struct sockaddr		rq_daddr;
-	struct sockaddr		rq_saddr;
+	struct sockaddr_storage	rq_daddr;
+	struct sockaddr_storage	rq_saddr;
 	unsigned long		rq_flags;
 	ktime_t			rq_stime;
 	__be32			rq_xid;
@@ -1448,9 +1469,9 @@ static int nfsd_genl_rpc_status_compose_msg(struct sk_buff *skb,
 	    nla_put_s64(skb, NFSD_A_RPC_STATUS_SERVICE_TIME,
 			ktime_to_us(genl_rqstp->rq_stime),
 			NFSD_A_RPC_STATUS_PAD))
-		return -ENOBUFS;
+		goto out_cancel;
 
-	switch (genl_rqstp->rq_saddr.sa_family) {
+	switch (genl_rqstp->rq_saddr.ss_family) {
 	case AF_INET: {
 		const struct sockaddr_in *s_in, *d_in;
 
@@ -1464,7 +1485,7 @@ static int nfsd_genl_rpc_status_compose_msg(struct sk_buff *skb,
 				 s_in->sin_port) ||
 		    nla_put_be16(skb, NFSD_A_RPC_STATUS_DPORT,
 				 d_in->sin_port))
-			return -ENOBUFS;
+			goto out_cancel;
 		break;
 	}
 	case AF_INET6: {
@@ -1480,7 +1501,7 @@ static int nfsd_genl_rpc_status_compose_msg(struct sk_buff *skb,
 				 s_in->sin6_port) ||
 		    nla_put_be16(skb, NFSD_A_RPC_STATUS_DPORT,
 				 d_in->sin6_port))
-			return -ENOBUFS;
+			goto out_cancel;
 		break;
 	}
 	}
@@ -1488,10 +1509,14 @@ static int nfsd_genl_rpc_status_compose_msg(struct sk_buff *skb,
 	for (i = 0; i < genl_rqstp->rq_opcnt; i++)
 		if (nla_put_u32(skb, NFSD_A_RPC_STATUS_COMPOUND_OPS,
 				genl_rqstp->rq_opnum[i]))
-			return -ENOBUFS;
+			goto out_cancel;
 
 	genlmsg_end(skb, hdr);
 	return 0;
+
+out_cancel:
+	genlmsg_cancel(skb, hdr);
+	return -ENOBUFS;
 }
 
 /**
@@ -1517,20 +1542,30 @@ int nfsd_nl_rpc_status_get_dumpit(struct sk_buff *skb,
 
 	rcu_read_lock();
 
-	for (i = 0; i < nn->nfsd_serv->sv_nrpools; i++) {
+	for (i = 0; i < svc_serv_nrpools(nn->nfsd_serv); i++) {
 		struct svc_rqst *rqstp;
+		long thread_skip = 0;
 
 		if (i < cb->args[0]) /* already consumed */
 			continue;
+
+		/*
+		 * The saved thread index only applies to the pool the dump
+		 * was resumed in. Subsequent pools must start from thread 0,
+		 * otherwise their first cb->args[1] threads are silently
+		 * skipped.
+		 */
+		if (i == cb->args[0])
+			thread_skip = cb->args[1];
 
 		rqstp_index = 0;
 		list_for_each_entry_rcu(rqstp,
 				&nn->nfsd_serv->sv_pools[i].sp_all_threads,
 				rq_all) {
-			struct nfsd_genl_rqstp genl_rqstp;
+			struct nfsd_genl_rqstp genl_rqstp = {};
 			unsigned int status_counter;
 
-			if (rqstp_index++ < cb->args[1]) /* already consumed */
+			if (rqstp_index++ < thread_skip) /* already consumed */
 				continue;
 			/*
 			 * Acquire rq_status_counter before parsing the rqst
@@ -1551,38 +1586,62 @@ int nfsd_nl_rpc_status_get_dumpit(struct sk_buff *skb,
 			genl_rqstp.rq_stime = rqstp->rq_stime;
 			genl_rqstp.rq_opcnt = 0;
 			memcpy(&genl_rqstp.rq_daddr, svc_daddr(rqstp),
-			       sizeof(struct sockaddr));
+			       sizeof(struct sockaddr_storage));
 			memcpy(&genl_rqstp.rq_saddr, svc_addr(rqstp),
-			       sizeof(struct sockaddr));
+			       sizeof(struct sockaddr_storage));
 
 #ifdef CONFIG_NFSD_V4
 			if (rqstp->rq_vers == NFS4_VERSION &&
 			    rqstp->rq_proc == NFSPROC4_COMPOUND) {
 				/* NFSv4 compound */
 				struct nfsd4_compoundargs *args;
+				struct nfsd4_op *ops;
+				u32 opcnt;
 				int j;
 
 				args = rqstp->rq_argp;
-				genl_rqstp.rq_opcnt = min_t(u32, args->opcnt,
+				opcnt = READ_ONCE(args->opcnt);
+				ops = READ_ONCE(args->ops);
+
+				/*
+				 * Finish the seqcount retry before
+				 * dereferencing ops. An unchanged counter means
+				 * opcnt and ops came from the same COMPOUND,
+				 * where opcnt cannot exceed what ops holds.
+				 */
+				smp_rmb();
+				if (READ_ONCE(rqstp->rq_status_counter) !=
+				    status_counter)
+					continue;
+
+				genl_rqstp.rq_opcnt = min_t(u32, opcnt,
 							    ARRAY_SIZE(genl_rqstp.rq_opnum));
 				for (j = 0; j < genl_rqstp.rq_opcnt; j++)
-					genl_rqstp.rq_opnum[j] =
-						args->ops[j].opnum;
+					genl_rqstp.rq_opnum[j] = ops[j].opnum;
 			}
 #endif /* CONFIG_NFSD_V4 */
 
 			/*
-			 * Acquire rq_status_counter before reporting the rqst
-			 * fields to the user.
+			 * Read-side load-load fence: order the field reads
+			 * above before the counter re-read below, mirroring
+			 * the smp_rmb() in the standard seqcount retry. The
+			 * begin-side smp_load_acquire() above pairs with the
+			 * smp_store_release() in nfsd_dispatch().
 			 */
-			if (smp_load_acquire(&rqstp->rq_status_counter) !=
-			    status_counter)
+			smp_rmb();
+			if (READ_ONCE(rqstp->rq_status_counter) != status_counter)
 				continue;
 
 			ret = nfsd_genl_rpc_status_compose_msg(skb, cb,
 							       &genl_rqstp);
-			if (ret)
+			if (ret) {
+				if (skb->len) {
+					cb->args[0] = i;
+					cb->args[1] = rqstp_index - 1;
+					ret = skb->len;
+				}
 				goto out;
+			}
 		}
 	}
 
@@ -1617,7 +1676,7 @@ static int nfsd_nl_fh_key_set(const struct nlattr *attr, struct nfsd_net *nn)
 	k1 = get_unaligned_le64(nla_data(attr) + 8);
 
 	if (!fh_key) {
-		fh_key = kmalloc(sizeof(siphash_key_t), GFP_KERNEL);
+		fh_key = kmalloc_obj(siphash_key_t);
 		if (!fh_key) {
 			trace_nfsd_ctl_fh_key_set(false, -ENOMEM);
 			return -ENOMEM;
@@ -1943,6 +2002,213 @@ err_free_msg:
 	return err;
 }
 
+/*
+ * Transport classes NFSD knows how to instantiate. Vetting the name here
+ * keeps a bogus string from reaching svc_xprt_create_from_sa(), where an
+ * unknown name triggers a request_module("svc%s", name) upcall under
+ * nfsd_mutex.
+ */
+static bool nfsd_nl_transport_supported(const char *name)
+{
+	static const char * const supported[] = { "tcp", "udp", "rdma" };
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(supported); i++)
+		if (!strcmp(name, supported[i]))
+			return true;
+	return false;
+}
+
+/* Upper bound on the number of listeners a single request may carry. */
+#define NFSD_NL_LISTENER_MAX	1024
+
+/**
+ * nfsd_nl_validate_listeners - sanity-check the listener list from userland
+ * @info: netlink metadata and command arguments
+ *
+ * Walk every NFSD_A_SERVER_SOCK_ADDR attribute and confirm that the list is
+ * not oversized and that each entry is well-formed.
+ *
+ * Return: the number of entries if every entry is valid, or a negative
+ * errno otherwise.
+ */
+static int nfsd_nl_validate_listeners(struct genl_info *info)
+{
+	const struct nlattr *attr;
+	unsigned int count = 0;
+	int rem;
+
+	nlmsg_for_each_attr_type(attr, NFSD_A_SERVER_SOCK_ADDR, info->nlhdr,
+				 GENL_HDRLEN, rem) {
+		struct nlattr *tb[NFSD_A_SOCK_MAX + 1];
+		struct sockaddr *sa;
+		int err;
+
+		if (++count > NFSD_NL_LISTENER_MAX) {
+			NL_SET_ERR_MSG(info->extack, "too many listeners");
+			return -E2BIG;
+		}
+
+		err = nla_parse_nested(tb, NFSD_A_SOCK_MAX, attr,
+				       nfsd_sock_nl_policy, info->extack);
+		if (err < 0)
+			return err;
+
+		if (!tb[NFSD_A_SOCK_ADDR] || !tb[NFSD_A_SOCK_TRANSPORT_NAME])
+			return -EINVAL;
+
+		if (!nfsd_nl_transport_supported(nla_data(tb[NFSD_A_SOCK_TRANSPORT_NAME]))) {
+			NL_SET_ERR_MSG_ATTR(info->extack,
+					    tb[NFSD_A_SOCK_TRANSPORT_NAME],
+					    "unsupported transport name");
+			return -EPROTONOSUPPORT;
+		}
+
+		sa = nla_data(tb[NFSD_A_SOCK_ADDR]);
+		if (nla_len(tb[NFSD_A_SOCK_ADDR]) < sizeof(sa->sa_family))
+			return -EINVAL;
+
+		switch (sa->sa_family) {
+		case AF_INET:
+			if (nla_len(tb[NFSD_A_SOCK_ADDR]) <
+			    sizeof(struct sockaddr_in))
+				return -EINVAL;
+			break;
+		case AF_INET6:
+			if (nla_len(tb[NFSD_A_SOCK_ADDR]) <
+			    sizeof(struct sockaddr_in6))
+				return -EINVAL;
+			break;
+		default:
+			return -EAFNOSUPPORT;
+		}
+	}
+
+	return count;
+}
+
+static size_t nfsd_nl_listener_set_msgsize(struct svc_serv *serv)
+{
+	size_t size = GENL_HDRLEN +		    /* genlmsg_iput() */
+		      nla_total_size(0);	    /* userspace-rpcbind */
+	struct svc_xprt *xprt;
+	unsigned int p;
+
+	lockdep_assert_held(&nfsd_mutex);
+
+	for (p = 0; p < serv->sv_nprogs; p++)
+		size += serv->sv_programs[p].pg_nvers *
+			(nla_total_size(0) +		    /* rpcbind nest */
+			 nla_total_size(sizeof(u32)) +	    /* program */
+			 nla_total_size(sizeof(u32)) +	    /* version */
+			 nla_total_size(sizeof(u32)));	    /* flags */
+
+	spin_lock_bh(&serv->sv_lock);
+	list_for_each_entry(xprt, &serv->sv_permsocks, xpt_list) {
+		if (!test_bit(XPT_RPCB_UNREG, &xprt->xpt_flags))
+			continue;
+		size += nla_total_size(0) +		    /* addr nest */
+			nla_total_size(strlen(xprt->xpt_class->xcl_name) + 1) +
+			nla_total_size(sizeof(struct sockaddr_storage));
+	}
+	spin_unlock_bh(&serv->sv_lock);
+
+	return size;
+}
+
+static struct sk_buff *
+nfsd_nl_listener_set_msg(struct genl_info *info, struct net *net,
+			 struct svc_serv *serv)
+{
+	struct svc_xprt *xprt;
+	struct sk_buff *skb;
+	unsigned int p, i;
+	void *hdr;
+	int err;
+
+	lockdep_assert_held(&nfsd_mutex);
+
+	skb = genlmsg_new(nfsd_nl_listener_set_msgsize(serv), GFP_KERNEL);
+	if (!skb)
+		return ERR_PTR(-ENOMEM);
+
+	hdr = genlmsg_iput(skb, info);
+	if (!hdr) {
+		err = -EMSGSIZE;
+		goto err_free_msg;
+	}
+
+	if (nla_put_flag(skb, NFSD_A_SERVER_SOCK_USERSPACE_RPCBIND)) {
+		err = -EMSGSIZE;
+		goto err_free_msg;
+	}
+
+	for (p = 0; p < serv->sv_nprogs; p++) {
+		const struct svc_program *progp = &serv->sv_programs[p];
+
+		for (i = 0; i < progp->pg_nvers; i++) {
+			struct nlattr *attr;
+			u32 flags = 0;
+
+			if (!nfsd_version_registerable(net, progp, i))
+				continue;
+
+			if (progp->pg_vers[i]->vs_need_cong_ctrl)
+				flags |= NFSD_RPCBIND_FLAGS_NO_UDP;
+
+			attr = nla_nest_start(skb, NFSD_A_SERVER_SOCK_RPCBIND);
+			if (!attr) {
+				err = -EMSGSIZE;
+				goto err_free_msg;
+			}
+			if (nla_put_u32(skb, NFSD_A_RPCBIND_PROGRAM,
+					progp->pg_prog) ||
+			    nla_put_u32(skb, NFSD_A_RPCBIND_VERSION, i) ||
+			    (flags && nla_put_u32(skb, NFSD_A_RPCBIND_FLAGS,
+						  flags))) {
+				err = -EMSGSIZE;
+				goto err_free_msg;
+			}
+			nla_nest_end(skb, attr);
+		}
+	}
+
+	spin_lock_bh(&serv->sv_lock);
+	list_for_each_entry(xprt, &serv->sv_permsocks, xpt_list) {
+		struct nlattr *attr;
+
+		if (!test_bit(XPT_RPCB_UNREG, &xprt->xpt_flags))
+			continue;
+
+		attr = nla_nest_start(skb, NFSD_A_SERVER_SOCK_ADDR);
+		if (!attr) {
+			err = -EMSGSIZE;
+			goto err_serv_unlock;
+		}
+
+		if (nla_put_string(skb, NFSD_A_SOCK_TRANSPORT_NAME,
+				   xprt->xpt_class->xcl_name) ||
+		    nla_put(skb, NFSD_A_SOCK_ADDR,
+			    sizeof(struct sockaddr_storage),
+			    &xprt->xpt_local)) {
+			err = -EMSGSIZE;
+			goto err_serv_unlock;
+		}
+
+		nla_nest_end(skb, attr);
+	}
+	spin_unlock_bh(&serv->sv_lock);
+
+	genlmsg_end(skb, hdr);
+	return skb;
+
+err_serv_unlock:
+	spin_unlock_bh(&serv->sv_lock);
+err_free_msg:
+	nlmsg_free(skb);
+	return ERR_PTR(err);
+}
+
 /**
  * nfsd_nl_listener_set_doit - set the nfs running sockets
  * @skb: reply buffer
@@ -1953,23 +2219,57 @@ err_free_msg:
 int nfsd_nl_listener_set_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net *net = genl_info_net(info);
+	const struct nlattr *bad_attr = NULL;
 	struct svc_xprt *xprt, *tmp;
+	const char *bad_xprt = NULL;
+	struct sk_buff *rskb = NULL;
+	unsigned int rpcb_failures;
 	const struct nlattr *attr;
+	bool skipped_rpcb = false;
+	bool userspace_rpcbind;
+	bool bad_rpcb = false;
 	struct svc_serv *serv;
 	LIST_HEAD(permsocks);
 	struct nfsd_net *nn;
 	bool delete = false;
+	int nlisteners;
 	int err, rem;
+
+	/*
+	 * Validate the entire listener list before making any changes, so a
+	 * malformed request fails cleanly without creating a serv or touching
+	 * the existing listeners.
+	 */
+	nlisteners = nfsd_nl_validate_listeners(info);
+	if (nlisteners < 0)
+		return nlisteners;
+
+	userspace_rpcbind = nla_get_flag(info->attrs[NFSD_A_SERVER_SOCK_USERSPACE_RPCBIND]);
 
 	mutex_lock(&nfsd_mutex);
 
-	err = nfsd_create_serv(net);
+	nn = net_generic(net, nfsd_net_id);
+
+	/*
+	 * An empty list destroys the serv, and nfsd_destroy_serv() drops
+	 * whatever svc_bind() took either way, so teardown is not an
+	 * ownership change. Only a request that leaves a listener standing
+	 * has to agree with the serv it found.
+	 */
+	if (nlisteners && nn->nfsd_serv &&
+	    nn->nfsd_serv->sv_no_rpcbind != userspace_rpcbind) {
+		NL_SET_ERR_MSG(info->extack,
+			       "cannot change rpcbind ownership while a server exists");
+		mutex_unlock(&nfsd_mutex);
+		return -EBUSY;
+	}
+
+	err = nfsd_create_serv(net, userspace_rpcbind);
 	if (err) {
 		mutex_unlock(&nfsd_mutex);
 		return err;
 	}
 
-	nn = net_generic(net, nfsd_net_id);
 	serv = nn->nfsd_serv;
 
 	spin_lock_bh(&serv->sv_lock);
@@ -1987,14 +2287,9 @@ int nfsd_nl_listener_set_doit(struct sk_buff *skb, struct genl_info *info)
 		const char *xcl_name;
 		struct sockaddr *sa;
 
+		/* validated up front in nfsd_nl_validate_listeners() */
 		if (nla_parse_nested(tb, NFSD_A_SOCK_MAX, attr,
 				     nfsd_sock_nl_policy, info->extack) < 0)
-			continue;
-
-		if (!tb[NFSD_A_SOCK_ADDR] || !tb[NFSD_A_SOCK_TRANSPORT_NAME])
-			continue;
-
-		if (nla_len(tb[NFSD_A_SOCK_ADDR]) < sizeof(*sa))
 			continue;
 
 		xcl_name = nla_data(tb[NFSD_A_SOCK_TRANSPORT_NAME]);
@@ -2040,22 +2335,20 @@ int nfsd_nl_listener_set_doit(struct sk_buff *skb, struct genl_info *info)
 	if (delete)
 		svc_xprt_destroy_all(serv, net, false);
 
+	rpcb_failures = svc_rpcb_failure_count(serv);
+
 	/* walk list of addrs again, open any that still don't exist */
 	nlmsg_for_each_attr_type(attr, NFSD_A_SERVER_SOCK_ADDR, info->nlhdr,
 				 GENL_HDRLEN, rem) {
 		struct nlattr *tb[NFSD_A_SOCK_MAX + 1];
 		const char *xcl_name;
 		struct sockaddr *sa;
-		int ret;
+		bool hit_rpcb;
+		int flags, ret;
 
+		/* validated up front in nfsd_nl_validate_listeners() */
 		if (nla_parse_nested(tb, NFSD_A_SOCK_MAX, attr,
 				     nfsd_sock_nl_policy, info->extack) < 0)
-			continue;
-
-		if (!tb[NFSD_A_SOCK_ADDR] || !tb[NFSD_A_SOCK_TRANSPORT_NAME])
-			continue;
-
-		if (nla_len(tb[NFSD_A_SOCK_ADDR]) < sizeof(*sa))
 			continue;
 
 		xcl_name = nla_data(tb[NFSD_A_SOCK_TRANSPORT_NAME]);
@@ -2070,11 +2363,72 @@ int nfsd_nl_listener_set_doit(struct sk_buff *skb, struct genl_info *info)
 			continue;
 		}
 
-		ret = svc_xprt_create_from_sa(serv, xcl_name, net, sa, 0,
+		flags = (userspace_rpcbind || skipped_rpcb) ? SVC_SOCK_ANONYMOUS : 0;
+		ret = svc_xprt_create_from_sa(serv, xcl_name, net, sa, flags,
 					      current_cred());
+
+		hit_rpcb = false;
+		if (!userspace_rpcbind && !skipped_rpcb &&
+		    svc_rpcb_failure_count(serv) != rpcb_failures) {
+			skipped_rpcb = true;
+			hit_rpcb = true;
+			if (ret < 0)
+				ret = svc_xprt_create_from_sa(serv, xcl_name,
+							      net, sa,
+							      SVC_SOCK_ANONYMOUS,
+							      current_cred());
+		}
+
 		/* always save the latest error */
-		if (ret < 0)
+		if (ret < 0) {
+			bad_attr = attr;
+			bad_xprt = xcl_name;
+			bad_rpcb = hit_rpcb;
 			err = ret;
+		}
+	}
+
+	/*
+	 * The ack carries the errno of the last entry that failed. Point at
+	 * that entry as well, since several entries can share a transport
+	 * name and the errno alone cannot tell them apart.
+	 */
+	if (err) {
+		NL_SET_BAD_ATTR(info->extack, bad_attr);
+		if (bad_rpcb)
+			NL_SET_ERR_MSG_FMT(info->extack,
+					   "cannot create %s listener; rpcbind did not answer",
+					   bad_xprt);
+		else if (skipped_rpcb)
+			NL_SET_ERR_MSG_FMT(info->extack,
+					   "cannot create %s listener; rpcbind did not answer earlier",
+					   bad_xprt);
+		else
+			NL_SET_ERR_MSG_FMT(info->extack,
+					   "cannot create %s listener",
+					   bad_xprt);
+	} else if (skipped_rpcb) {
+		NL_SET_ERR_MSG(info->extack,
+			       "rpcbind did not answer, some listeners are not registered");
+	}
+
+	/*
+	 * Build the reply before the serv can go away, and only on success.
+	 * A caller that got an errno has nothing to register.
+	 */
+	if (!err && userspace_rpcbind) {
+		rskb = nfsd_nl_listener_set_msg(info, net, serv);
+		if (IS_ERR(rskb)) {
+			err = PTR_ERR(rskb);
+			rskb = NULL;
+			/*
+			 * The listeners are up and the errno alone reads as
+			 * if nothing happened. Retrying is safe: a request
+			 * that matches the running set recreates nothing.
+			 */
+			NL_SET_ERR_MSG(info->extack,
+				       "listeners are up but the reply could not be built; retry to fetch it");
+		}
 	}
 
 	if (!serv->sv_nrthreads && list_empty(&nn->nfsd_serv->sv_permsocks))
@@ -2082,6 +2436,10 @@ int nfsd_nl_listener_set_doit(struct sk_buff *skb, struct genl_info *info)
 
 out_unlock_mtx:
 	mutex_unlock(&nfsd_mutex);
+
+	/* rskb is only built once err is known to be zero. */
+	if (rskb)
+		return genlmsg_reply(rskb, info);
 
 	return err;
 }
@@ -2248,6 +2606,255 @@ int nfsd_nl_cache_flush_doit(struct sk_buff *skb, struct genl_info *info)
 	return 0;
 }
 
+/* Emit a single server-proc-entry nest: { op, count }. */
+static int nfsd_nl_put_proc_entry(struct sk_buff *skb, int attr,
+				  u32 op, u64 count)
+{
+	struct nlattr *nest;
+
+	nest = nla_nest_start(skb, attr);
+	if (!nest)
+		return -EMSGSIZE;
+	if (nla_put_u32(skb, NFSD_A_SERVER_PROC_ENTRY_OP, op) ||
+	    nla_put_u64_64bit(skb, NFSD_A_SERVER_PROC_ENTRY_COUNT,
+			      count, NFSD_A_SERVER_PROC_ENTRY_PAD)) {
+		nla_nest_cancel(skb, nest);
+		return -EMSGSIZE;
+	}
+	nla_nest_end(skb, nest);
+	return 0;
+}
+
+/* Emit the scalar server-stats counters. Only ever called on a fresh skb. */
+static int nfsd_nl_server_stats_scalars(struct sk_buff *skb,
+					struct nfsd_net *nn,
+					struct svc_stat *statp)
+{
+	if (nla_put_u64_64bit(skb, NFSD_A_SERVER_STATS_RC_HITS,
+			percpu_counter_sum_positive(&nn->counter[NFSD_STATS_RC_HITS]),
+			NFSD_A_SERVER_STATS_PAD) ||
+	    nla_put_u64_64bit(skb, NFSD_A_SERVER_STATS_RC_MISSES,
+			percpu_counter_sum_positive(&nn->counter[NFSD_STATS_RC_MISSES]),
+			NFSD_A_SERVER_STATS_PAD) ||
+	    nla_put_u64_64bit(skb, NFSD_A_SERVER_STATS_RC_NOCACHE,
+			percpu_counter_sum_positive(&nn->counter[NFSD_STATS_RC_NOCACHE]),
+			NFSD_A_SERVER_STATS_PAD))
+		return -EMSGSIZE;
+
+	if (nla_put_u64_64bit(skb, NFSD_A_SERVER_STATS_FH_STALE,
+			percpu_counter_sum_positive(&nn->counter[NFSD_STATS_FH_STALE]),
+			NFSD_A_SERVER_STATS_PAD))
+		return -EMSGSIZE;
+
+	if (nla_put_u64_64bit(skb, NFSD_A_SERVER_STATS_IO_READ,
+			percpu_counter_sum_positive(&nn->counter[NFSD_STATS_IO_READ]),
+			NFSD_A_SERVER_STATS_PAD) ||
+	    nla_put_u64_64bit(skb, NFSD_A_SERVER_STATS_IO_WRITE,
+			percpu_counter_sum_positive(&nn->counter[NFSD_STATS_IO_WRITE]),
+			NFSD_A_SERVER_STATS_PAD))
+		return -EMSGSIZE;
+
+	if (nla_put_u32(skb, NFSD_A_SERVER_STATS_NETCNT, statp->netcnt) ||
+	    nla_put_u32(skb, NFSD_A_SERVER_STATS_NETUDPCNT, statp->netudpcnt) ||
+	    nla_put_u32(skb, NFSD_A_SERVER_STATS_NETTCPCNT, statp->nettcpcnt) ||
+	    nla_put_u32(skb, NFSD_A_SERVER_STATS_NETTCPCONN, statp->nettcpconn))
+		return -EMSGSIZE;
+
+	if (nla_put_u32(skb, NFSD_A_SERVER_STATS_RPCCNT, statp->rpccnt) ||
+	    nla_put_u32(skb, NFSD_A_SERVER_STATS_RPCBADFMT, statp->rpcbadfmt) ||
+	    nla_put_u32(skb, NFSD_A_SERVER_STATS_RPCBADAUTH, statp->rpcbadauth) ||
+	    nla_put_u32(skb, NFSD_A_SERVER_STATS_RPCBADCLNT, statp->rpcbadclnt))
+		return -EMSGSIZE;
+
+	return 0;
+}
+
+/*
+ * Emit per-version procedure counts for one NFS version, resuming at *idx.
+ * Returns 0 when the version has been fully emitted (or is not present), or
+ * -EMSGSIZE when @skb filled up, leaving *idx at the entry still to emit.
+ */
+static int nfsd_nl_server_stats_proc(struct sk_buff *skb,
+				     struct svc_stat *statp,
+				     struct svc_program *prog,
+				     unsigned int ver, int attr, int *idx)
+{
+	unsigned long __percpu *counts;
+	unsigned int nproc;
+
+	if (!statp->vs_count || ver >= prog->pg_nvers ||
+	    !prog->pg_vers[ver] || !statp->vs_count[ver])
+		return 0;
+
+	counts = statp->vs_count[ver];
+	nproc = prog->pg_vers[ver]->vs_nproc;
+
+	for (; *idx < nproc; (*idx)++) {
+		unsigned long count = 0;
+		int cpu;
+
+		for_each_possible_cpu(cpu)
+			count += per_cpu(counts[*idx], cpu);
+
+		if (!count)
+			continue;
+		if (nfsd_nl_put_proc_entry(skb, attr, *idx, count))
+			return -EMSGSIZE;
+	}
+
+	return 0;
+}
+
+#ifdef CONFIG_NFSD_V4
+/*
+ * Emit NFSv4 per-operation counts, resuming at *idx. Same return convention
+ * as nfsd_nl_server_stats_proc().
+ */
+static int nfsd_nl_server_stats_nfs4ops(struct sk_buff *skb,
+					struct nfsd_net *nn, int *idx)
+{
+	for (; *idx <= LAST_NFS4_OP; (*idx)++) {
+		u64 cnt = percpu_counter_sum_positive(
+				&nn->counter[NFSD_STATS_NFS4_OP(*idx)]);
+
+		if (!cnt)
+			continue;
+		if (nfsd_nl_put_proc_entry(skb, NFSD_A_SERVER_STATS_PROC4OPS_OPS,
+					   *idx, cnt))
+			return -EMSGSIZE;
+	}
+
+	return 0;
+}
+
+/*
+ * Emit NFSv4 callback (backchannel) per-operation counts, resuming at *idx,
+ * which counts from OP_CB_GETATTR. Same return convention as
+ * nfsd_nl_server_stats_proc().
+ */
+static int nfsd_nl_server_stats_cbops(struct sk_buff *skb,
+				      struct nfsd_net *nn, int *idx)
+{
+	int op;
+
+	for (op = OP_CB_GETATTR + *idx; op <= OP_CB_OFFLOAD; op++, (*idx)++) {
+		u64 cnt = percpu_counter_sum_positive(&nn->cb_counter[op]);
+
+		if (!cnt)
+			continue;
+		if (nfsd_nl_put_proc_entry(skb, NFSD_A_SERVER_STATS_PROC4CB_OPS,
+					   op, cnt))
+			return -EMSGSIZE;
+	}
+
+	return 0;
+}
+#endif
+
+/* Sections of the server-stats dump, emitted in order across messages. */
+enum {
+	NFSD_SERVER_STATS_SCALARS = 0,
+	NFSD_SERVER_STATS_PROC2,
+	NFSD_SERVER_STATS_PROC3,
+	NFSD_SERVER_STATS_PROC4,
+	NFSD_SERVER_STATS_PROC4CB,
+	NFSD_SERVER_STATS_PROC4OPS,
+	NFSD_SERVER_STATS_DONE,
+};
+
+/**
+ * nfsd_nl_server_stats_get_dumpit - dump NFS server statistics
+ * @skb: reply buffer
+ * @cb: netlink metadata and command arguments
+ *
+ * The server-stats object is emitted across one or more netlink messages.
+ * cb->args[0] tracks the current section and cb->args[1] the entry index
+ * within it, so a section that does not fit in the current message is resumed
+ * in the next one. The scalar counters are small and emitted once, in the
+ * first message; userspace merges the attributes from every message.
+ *
+ * Returns the size of the reply or a negative errno.
+ */
+int nfsd_nl_server_stats_get_dumpit(struct sk_buff *skb,
+				    struct netlink_callback *cb)
+{
+	struct net *net = sock_net(skb->sk);
+	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
+	struct svc_stat *statp = &nn->nfsd_svcstats;
+	struct svc_program *prog = statp->program;
+	int section = cb->args[0];
+	int idx = cb->args[1];
+	void *hdr;
+
+	if (section >= NFSD_SERVER_STATS_DONE)
+		return 0;
+
+	hdr = genlmsg_put(skb, NETLINK_CB(cb->skb).portid,
+			  cb->nlh->nlmsg_seq, &nfsd_nl_family,
+			  NLM_F_MULTI, NFSD_CMD_SERVER_STATS_GET);
+	if (!hdr)
+		return -ENOBUFS;
+
+	/* Scalar stats fit easily and are emitted in the first message. */
+	if (section == NFSD_SERVER_STATS_SCALARS) {
+		if (nfsd_nl_server_stats_scalars(skb, nn, statp))
+			goto err_cancel;
+		section = NFSD_SERVER_STATS_PROC2;
+		idx = 0;
+	}
+
+	/*
+	 * Emit as many of the remaining sections as fit. A section returning
+	 * -EMSGSIZE means the message is full: close it and resume from the
+	 * same section/index on the next call with a fresh skb. Each entry is
+	 * small enough to fit in a fresh skb, so forward progress is assured.
+	 */
+	while (section < NFSD_SERVER_STATS_DONE) {
+		int ret = 0;
+
+		switch (section) {
+		case NFSD_SERVER_STATS_PROC2:
+			ret = nfsd_nl_server_stats_proc(skb, statp, prog, 2,
+					NFSD_A_SERVER_STATS_PROC2_OPS, &idx);
+			break;
+		case NFSD_SERVER_STATS_PROC3:
+			ret = nfsd_nl_server_stats_proc(skb, statp, prog, 3,
+					NFSD_A_SERVER_STATS_PROC3_OPS, &idx);
+			break;
+		case NFSD_SERVER_STATS_PROC4:
+			ret = nfsd_nl_server_stats_proc(skb, statp, prog, 4,
+					NFSD_A_SERVER_STATS_PROC4_OPS, &idx);
+			break;
+#ifdef CONFIG_NFSD_V4
+		case NFSD_SERVER_STATS_PROC4CB:
+			ret = nfsd_nl_server_stats_cbops(skb, nn, &idx);
+			break;
+		case NFSD_SERVER_STATS_PROC4OPS:
+			ret = nfsd_nl_server_stats_nfs4ops(skb, nn, &idx);
+			break;
+#endif
+		}
+
+		if (ret == -EMSGSIZE)
+			goto out;
+		if (ret)
+			goto err_cancel;
+
+		section++;
+		idx = 0;
+	}
+
+out:
+	genlmsg_end(skb, hdr);
+	cb->args[0] = section;
+	cb->args[1] = idx;
+	return skb->len;
+
+err_cancel:
+	genlmsg_cancel(skb, hdr);
+	return -EMSGSIZE;
+}
+
 int nfsd_cache_notify(struct cache_detail *cd, struct cache_head *h, u32 cache_type)
 {
 	struct genlmsghdr *hdr;
@@ -2343,7 +2950,7 @@ int nfsd_nl_unlock_filesystem_doit(struct sk_buff *skb,
 	error = nlmsvc_unlock_all_by_sb(path.dentry->d_sb);
 
 	mutex_lock(&nfsd_mutex);
-	if (nn->nfsd_serv) {
+	if (test_bit(NFSD_NET_UP, &nn->flags)) {
 		nfsd4_cancel_copy_by_sb(net, path.dentry->d_sb);
 		nfsd4_revoke_states(nn, path.dentry->d_sb);
 	} else {
@@ -2390,7 +2997,7 @@ int nfsd_nl_unlock_export_doit(struct sk_buff *skb, struct genl_info *info)
 		return error;
 
 	mutex_lock(&nfsd_mutex);
-	if (nn->nfsd_serv) {
+	if (test_bit(NFSD_NET_UP, &nn->flags)) {
 		nfsd_file_close_export(net, &path);
 		nfsd4_revoke_export_states(nn, &path);
 	} else
@@ -2431,11 +3038,21 @@ static __net_init int nfsd_net_init(struct net *net)
 	if (retval)
 		goto out_repcache_error;
 
+#ifdef CONFIG_NFSD_V4
+	retval = percpu_counter_init_many(nn->cb_counter, 0, GFP_KERNEL,
+					  NFSD_STATS_CB_OPS_NUM);
+	if (retval)
+		goto out_cb_counter_error;
+#endif
+
 	memset(&nn->nfsd_svcstats, 0, sizeof(nn->nfsd_svcstats));
 	nn->nfsd_svcstats.program = &nfsd_programs[0];
+	retval = svc_stat_alloc_counts(&nn->nfsd_svcstats);
+	if (retval)
+		goto out_proc_error;
 	if (!nfsd_proc_stat_init(net)) {
 		retval = -ENOMEM;
-		goto out_proc_error;
+		goto out_svcstats_error;
 	}
 
 	for (i = 0; i < sizeof(nn->nfsd_versions); i++)
@@ -2453,7 +3070,13 @@ static __net_init int nfsd_net_init(struct net *net)
 #endif
 	return 0;
 
+out_svcstats_error:
+	svc_stat_free_counts(&nn->nfsd_svcstats);
 out_proc_error:
+#ifdef CONFIG_NFSD_V4
+	percpu_counter_destroy_many(nn->cb_counter, NFSD_STATS_CB_OPS_NUM);
+out_cb_counter_error:
+#endif
 	percpu_counter_destroy_many(nn->counter, NFSD_STATS_COUNTERS_NUM);
 out_repcache_error:
 	nfsd_idmap_shutdown(net);
@@ -2493,6 +3116,10 @@ static __net_exit void nfsd_net_exit(struct net *net)
 	kfree_sensitive(nn->fh_key);
 	nfsd_net_cb_shutdown(nn);
 	nfsd_proc_stat_shutdown(net);
+	svc_stat_free_counts(&nn->nfsd_svcstats);
+#ifdef CONFIG_NFSD_V4
+	percpu_counter_destroy_many(nn->cb_counter, NFSD_STATS_CB_OPS_NUM);
+#endif
 	percpu_counter_destroy_many(nn->counter, NFSD_STATS_COUNTERS_NUM);
 	nfsd_idmap_shutdown(net);
 	nfsd_export_shutdown(net);
@@ -2512,11 +3139,12 @@ static int __init init_nfsd(void)
 {
 	int retval;
 
-	nfsd_debugfs_init();
-
 	retval = nfsd4_init_slabs();
 	if (retval)
 		return retval;
+
+	nfsd_debugfs_init();
+
 	retval = nfsd4_init_pnfs();
 	if (retval)
 		goto out_free_slabs;
@@ -2561,8 +3189,8 @@ out_free_lockd:
 out_free_pnfs:
 	nfsd4_exit_pnfs();
 out_free_slabs:
-	nfsd4_free_slabs();
 	nfsd_debugfs_exit();
+	nfsd4_free_slabs();
 	return retval;
 }
 
@@ -2577,9 +3205,9 @@ static void __exit exit_nfsd(void)
 	unregister_pernet_subsys(&nfsd_net_ops);
 	nfsd_drc_slab_free();
 	nfsd_lockd_shutdown();
-	nfsd4_free_slabs();
 	nfsd4_exit_pnfs();
 	nfsd_debugfs_exit();
+	nfsd4_free_slabs();
 }
 
 MODULE_AUTHOR("Olaf Kirch <okir@monad.swb.de>");

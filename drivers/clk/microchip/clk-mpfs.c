@@ -285,7 +285,7 @@ static int mpfs_cfg_clk_set_rate(struct clk_hw *hw, unsigned long rate, unsigned
 
 	mask = clk_div_mask(cfg->width) << cfg->shift;
 	val = divider_setting << cfg->shift;
-	regmap_update_bits(cfg->map, cfg->map_offset, val, mask);
+	regmap_update_bits(cfg->map, cfg->map_offset, mask, val);
 
 	return 0;
 }
@@ -516,7 +516,7 @@ static int mpfs_clk_probe(struct platform_device *pdev)
 	num_clks = ARRAY_SIZE(mpfs_msspll_clks) + ARRAY_SIZE(mpfs_msspll_out_clks)
 		   + ARRAY_SIZE(mpfs_cfg_clks)  + ARRAY_SIZE(mpfs_periph_clks) + 1;
 
-	clk_data = devm_kzalloc(dev, struct_size(clk_data, hw_data.hws, num_clks), GFP_KERNEL);
+	clk_data = devm_kzalloc_flex(dev, *clk_data, hw_data.hws, num_clks);
 	if (!clk_data)
 		return -ENOMEM;
 

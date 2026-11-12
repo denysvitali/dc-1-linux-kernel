@@ -442,10 +442,8 @@ static int sysc_get_clocks(struct sysc *ddata)
 	const char *name;
 	int nr_fck = 0, nr_ick = 0, i, error = 0;
 
-	ddata->clock_roles = devm_kcalloc(ddata->dev,
-					  SYSC_MAX_CLOCKS,
-					  sizeof(*ddata->clock_roles),
-					  GFP_KERNEL);
+	ddata->clock_roles = devm_kzalloc_objs(ddata->dev, *ddata->clock_roles,
+					       SYSC_MAX_CLOCKS);
 	if (!ddata->clock_roles)
 		return -ENOMEM;
 
@@ -485,9 +483,8 @@ static int sysc_get_clocks(struct sysc *ddata)
 	if (!nr_ick)
 		ddata->nr_clocks++;
 
-	ddata->clocks = devm_kcalloc(ddata->dev,
-				     ddata->nr_clocks, sizeof(*ddata->clocks),
-				     GFP_KERNEL);
+	ddata->clocks = devm_kzalloc_objs(ddata->dev, *ddata->clocks,
+					  ddata->nr_clocks);
 	if (!ddata->clocks)
 		return -ENOMEM;
 
@@ -682,6 +679,7 @@ static struct device_node *stdout_path;
 
 static void sysc_init_stdout_path(struct sysc *ddata)
 {
+	struct device_node *chosen;
 	struct device_node *np = NULL;
 	const char *uart;
 
@@ -691,15 +689,18 @@ static void sysc_init_stdout_path(struct sysc *ddata)
 	if (stdout_path)
 		return;
 
-	np = of_find_node_by_path("/chosen");
-	if (!np)
+	chosen = of_find_node_by_path("/chosen");
+	if (!chosen)
 		goto err;
 
-	uart = of_get_property(np, "stdout-path", NULL);
-	if (!uart)
+	uart = of_get_property(chosen, "stdout-path", NULL);
+	if (!uart) {
+		of_node_put(chosen);
 		goto err;
+	}
 
 	np = of_find_node_by_path(uart);
+	of_node_put(chosen);
 	if (!np)
 		goto err;
 
@@ -2841,7 +2842,7 @@ static int sysc_init_pdata(struct sysc *ddata)
 	if (!pdata)
 		return 0;
 
-	mdata = devm_kzalloc(ddata->dev, sizeof(*mdata), GFP_KERNEL);
+	mdata = devm_kzalloc_obj(ddata->dev, *mdata);
 	if (!mdata)
 		return -ENOMEM;
 
@@ -3147,7 +3148,7 @@ static int sysc_probe(struct platform_device *pdev)
 	struct sysc *ddata;
 	int error;
 
-	ddata = devm_kzalloc(&pdev->dev, sizeof(*ddata), GFP_KERNEL);
+	ddata = devm_kzalloc_obj(&pdev->dev, *ddata);
 	if (!ddata)
 		return -ENOMEM;
 

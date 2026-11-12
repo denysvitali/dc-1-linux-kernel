@@ -58,7 +58,7 @@ enum netdev_xdp_rx_metadata {
  * enum netdev_xsk_flags
  * @NETDEV_XSK_FLAGS_TX_TIMESTAMP: HW timestamping egress packets is supported
  *   by the driver.
- * @NETDEV_XSK_FLAGS_TX_CHECKSUM: L3 checksum HW offload is supported by the
+ * @NETDEV_XSK_FLAGS_TX_CHECKSUM: L4 checksum HW offload is supported by the
  *   driver.
  * @NETDEV_XSK_FLAGS_TX_LAUNCH_TIME_FIFO: Launch time HW offload is supported
  *   by the driver.
@@ -219,6 +219,7 @@ enum {
 	NETDEV_A_DMABUF_QUEUES,
 	NETDEV_A_DMABUF_FD,
 	NETDEV_A_DMABUF_ID,
+	NETDEV_A_DMABUF_RX_PAGE_SIZE,
 
 	__NETDEV_A_DMABUF_MAX,
 	NETDEV_A_DMABUF_MAX = (__NETDEV_A_DMABUF_MAX - 1)

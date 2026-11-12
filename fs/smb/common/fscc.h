@@ -202,6 +202,21 @@ struct file_zero_data_information {
 	__le64	BeyondFinalZero;
 } __packed;
 
+struct file_level_trim_range {
+	__le64	Offset;
+	__le64	Length;
+} __packed;
+
+struct file_level_trim {
+	__le32	Key;
+	__le32	NumRanges;
+	struct file_level_trim_range Ranges[];
+} __packed;
+
+struct file_level_trim_output {
+	__le32	NumRangesProcessed;
+} __packed;
+
 /*
  * This level 18, although with struct with same name is different from cifs
  * level 0x107. Level 0x107 has an extra u64 between AccessFlags and
@@ -384,7 +399,7 @@ static_assert(offsetof(struct smb2_file_rename_info, FileName) == sizeof(struct 
 #define FS_OBJECT_ID_INFORMATION	8 /* Query, Set */
 #define FS_DRIVER_PATH_INFORMATION	9 /* Query */
 #define FS_SECTOR_SIZE_INFORMATION	11 /* SMB3 or later. Query */
-/* See POSIX Extensions to MS-FSCC 2.3.1.1 */
+/* See POSIX-FSCC 2.3 */
 #define FS_POSIX_INFORMATION		100 /* SMB3.1.1 POSIX. Query */
 
 /* See MS-FSCC 2.5.1 */
@@ -560,8 +575,7 @@ struct file_notify_information {
 } __packed;
 
 /*
- * See POSIX Extensions to MS-FSCC 2.3.2.1
- * Link: https://gitlab.com/samba-team/smb3-posix-spec/-/blob/master/fscc_posix_extensions.md
+ * See POSIX-FSCC 2.3.1
  */
 typedef struct {
 	/* For undefined recommended transfer size return -1 in that field */

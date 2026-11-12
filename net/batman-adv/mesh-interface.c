@@ -57,6 +57,11 @@
  * @skb: packet buffer which should be modified
  * @len: number of bytes to add
  *
+ * Warning: This function may reallocate the skb data buffer via
+ * skb_cow_head()/... Any pointer into the skb data (e.g. obtained
+ * from skb->data or eth_hdr()) before this call must be considered
+ * invalid afterwards and has to be reacquired.
+ *
  * Return: 0 on success or negative error number in case of failure
  */
 int batadv_skb_head_push(struct sk_buff *skb, unsigned int len)
@@ -87,7 +92,8 @@ int batadv_skb_head_push(struct sk_buff *skb, unsigned int len)
  */
 static u64 batadv_sum_counter(struct batadv_priv *bat_priv,  size_t idx)
 {
-	u64 *counters, sum = 0;
+	u64 *counters;
+	u64 sum = 0;
 	int cpu;
 
 	for_each_possible_cpu(cpu) {
@@ -98,6 +104,15 @@ static u64 batadv_sum_counter(struct batadv_priv *bat_priv,  size_t idx)
 	return sum;
 }
 
+/**
+ * batadv_interface_stats() - return netdev stats for a mesh interface
+ * @dev: the mesh interface to query
+ *
+ * Aggregate the per-CPU traffic counters into the standard netdev stats
+ * structure.
+ *
+ * Return: pointer to the populated net_device_stats structure
+ */
 static struct net_device_stats *batadv_interface_stats(struct net_device *dev)
 {
 	struct batadv_priv *bat_priv = netdev_priv(dev);
@@ -111,12 +126,24 @@ static struct net_device_stats *batadv_interface_stats(struct net_device *dev)
 	return stats;
 }
 
+/**
+ * batadv_interface_set_mac_addr() - change the MAC address of a mesh
+ *  interface
+ * @dev: the mesh interface to modify
+ * @p: pointer to a struct sockaddr holding the new MAC address
+ *
+ * Replace the MAC address of the mesh interface. If the mesh is already
+ * active, also update the local translation table entries for all configured
+ * VLANs so that the new MAC is announced and the old one is removed.
+ *
+ * Return: 0 on success or negative error number in case of failure
+ */
 static int batadv_interface_set_mac_addr(struct net_device *dev, void *p)
 {
 	struct batadv_priv *bat_priv = netdev_priv(dev);
+	u8 old_addr[ETH_ALEN] __aligned(2);
 	struct batadv_meshif_vlan *vlan;
 	struct sockaddr *addr = p;
-	u8 old_addr[ETH_ALEN];
 
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EADDRNOTAVAIL;
@@ -140,6 +167,16 @@ static int batadv_interface_set_mac_addr(struct net_device *dev, void *p)
 	return 0;
 }
 
+/**
+ * batadv_interface_change_mtu() - change the MTU of a mesh interface
+ * @dev: the mesh interface to modify
+ * @new_mtu: requested new MTU value
+ *
+ * Validate that @new_mtu fits within the range supported by the configured
+ * hard interfaces and remember it as the user-configured MTU.
+ *
+ * Return: 0 on success or -EINVAL if @new_mtu is out of range
+ */
 static int batadv_interface_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct batadv_priv *bat_priv = netdev_priv(dev);
@@ -166,31 +203,43 @@ static void batadv_interface_set_rx_mode(struct net_device *dev)
 {
 }
 
+/**
+ * batadv_interface_tx() - transmit a frame on a mesh interface
+ * @skb: the frame to send
+ * @mesh_iface: the mesh interface the frame was queued on
+ *
+ * Return: NETDEV_TX_OK on success
+ */
 static netdev_tx_t batadv_interface_tx(struct sk_buff *skb,
 				       struct net_device *mesh_iface)
 {
-	struct ethhdr *ethhdr;
 	struct batadv_priv *bat_priv = netdev_priv(mesh_iface);
+	enum batadv_dhcp_recipient dhcp_rcp = BATADV_DHCP_NO;
+	enum batadv_forw_mode forw_mode = BATADV_FORW_BCAST;
+	static const u8 ectp_addr[ETH_ALEN] __aligned(2) = {
+		0xCF, 0x00, 0x00, 0x00, 0x00, 0x00
+	};
+	static const u8 stp_addr[ETH_ALEN] __aligned(2) = {
+		0x01, 0x80, 0xC2, 0x00, 0x00, 0x00
+	};
 	struct batadv_hard_iface *primary_if = NULL;
 	struct batadv_bcast_packet *bcast_packet;
-	static const u8 stp_addr[ETH_ALEN] = {0x01, 0x80, 0xC2, 0x00,
-					      0x00, 0x00};
-	static const u8 ectp_addr[ETH_ALEN] = {0xCF, 0x00, 0x00, 0x00,
-					       0x00, 0x00};
-	enum batadv_dhcp_recipient dhcp_rcp = BATADV_DHCP_NO;
-	u8 *dst_hint = NULL, chaddr[ETH_ALEN];
-	struct vlan_ethhdr *vhdr;
-	unsigned int header_len = 0;
-	int data_len = skb->len, ret;
-	unsigned long brd_delay = 0;
-	bool do_bcast = false, client_added;
-	unsigned short vid;
-	u32 seqno;
-	int gw_mode;
-	enum batadv_forw_mode forw_mode = BATADV_FORW_BCAST;
-	int mcast_is_routable = 0;
+	u8 chaddr[ETH_ALEN] __aligned(2);
 	int network_offset = ETH_HLEN;
+	unsigned int header_len = 0;
+	unsigned long brd_delay = 0;
+	int mcast_is_routable = 0;
+	struct vlan_ethhdr *vhdr;
+	int data_len = skb->len;
+	struct ethhdr *ethhdr;
+	bool do_bcast = false;
+	u8 *dst_hint = NULL;
+	unsigned short vid;
+	bool client_added;
 	__be16 proto;
+	int gw_mode;
+	u32 seqno;
+	int ret;
 
 	if (READ_ONCE(bat_priv->mesh_state) != BATADV_MESH_ACTIVE)
 		goto dropped;
@@ -260,6 +309,8 @@ static netdev_tx_t batadv_interface_tx(struct sk_buff *skb,
 	if (batadv_compare_eth(ethhdr->h_dest, ectp_addr))
 		goto dropped;
 
+	batadv_skb_set_priority(skb, 0);
+
 	gw_mode = READ_ONCE(bat_priv->gw.mode);
 	if (is_multicast_ether_addr(ethhdr->h_dest)) {
 		/* if gw mode is off, broadcast every packet */
@@ -293,6 +344,9 @@ static netdev_tx_t batadv_interface_tx(struct sk_buff *skb,
 
 send:
 		if (do_bcast && !is_broadcast_ether_addr(ethhdr->h_dest)) {
+			/* WARNING batadv_mcast_forw_mode might add more headers
+			 * in front of the skb. and might even reallocate the skb
+			 */
 			forw_mode = batadv_mcast_forw_mode(bat_priv, skb, vid,
 							   &mcast_is_routable);
 			switch (forw_mode) {
@@ -309,8 +363,6 @@ send:
 			}
 		}
 	}
-
-	batadv_skb_set_priority(skb, 0);
 
 	/* ethernet packet should be broadcasted */
 	if (do_bcast) {
@@ -408,8 +460,8 @@ void batadv_interface_rx(struct net_device *mesh_iface,
 			 struct sk_buff *skb, int hdr_size,
 			 struct batadv_orig_node *orig_node)
 {
-	struct batadv_bcast_packet *batadv_bcast_packet;
 	struct batadv_priv *bat_priv = netdev_priv(mesh_iface);
+	struct batadv_bcast_packet *batadv_bcast_packet;
 	struct vlan_ethhdr *vhdr;
 	struct ethhdr *ethhdr;
 	unsigned short vid;
@@ -509,6 +561,8 @@ void batadv_meshif_vlan_release(struct kref *ref)
 	hlist_del_rcu(&vlan->list);
 	spin_unlock_bh(&vlan->bat_priv->meshif_vlan_list_lock);
 
+	batadv_tt_local_unreserve_vlan(vlan->bat_priv);
+
 	kfree_rcu(vlan, rcu);
 }
 
@@ -523,7 +577,8 @@ void batadv_meshif_vlan_release(struct kref *ref)
 struct batadv_meshif_vlan *batadv_meshif_vlan_get(struct batadv_priv *bat_priv,
 						  unsigned short vid)
 {
-	struct batadv_meshif_vlan *vlan_tmp, *vlan = NULL;
+	struct batadv_meshif_vlan *vlan = NULL;
+	struct batadv_meshif_vlan *vlan_tmp;
 
 	rcu_read_lock();
 	hlist_for_each_entry_rcu(vlan_tmp, &bat_priv->meshif_vlan_list, list) {
@@ -561,9 +616,15 @@ int batadv_meshif_create_vlan(struct batadv_priv *bat_priv, unsigned short vid)
 		return -EEXIST;
 	}
 
+	if (!batadv_tt_local_reserve_vlan(bat_priv, vid)) {
+		spin_unlock_bh(&bat_priv->meshif_vlan_list_lock);
+		return -EMSGSIZE;
+	}
+
 	vlan = kzalloc_obj(*vlan, GFP_ATOMIC);
 	if (!vlan) {
 		spin_unlock_bh(&bat_priv->meshif_vlan_list_lock);
+		batadv_tt_local_unreserve_vlan(bat_priv);
 		return -ENOMEM;
 	}
 
@@ -741,10 +802,10 @@ static void batadv_set_lockdep_class(struct net_device *dev)
  */
 static int batadv_meshif_init_late(struct net_device *dev)
 {
+	size_t cnt_len = sizeof(u64) * BATADV_CNT_NUM;
 	struct batadv_priv *bat_priv;
 	u32 random_seqno;
 	int ret;
-	size_t cnt_len = sizeof(u64) * BATADV_CNT_NUM;
 
 	batadv_set_lockdep_class(dev);
 
@@ -840,18 +901,7 @@ static int batadv_meshif_slave_add(struct net_device *dev,
 				   struct net_device *slave_dev,
 				   struct netlink_ext_ack *extack)
 {
-	struct batadv_hard_iface *hard_iface;
-	int ret = -EINVAL;
-
-	hard_iface = batadv_hardif_get_by_netdev(slave_dev);
-	if (!hard_iface || hard_iface->mesh_iface)
-		goto out;
-
-	ret = batadv_hardif_enable_interface(hard_iface, dev);
-
-out:
-	batadv_hardif_put(hard_iface);
-	return ret;
+	return batadv_hardif_enable_interface(slave_dev, dev);
 }
 
 /**
@@ -894,6 +944,11 @@ static const struct net_device_ops batadv_netdev_ops = {
 	.ndo_del_slave = batadv_meshif_slave_del,
 };
 
+/**
+ * batadv_get_drvinfo() - ethtool driver info handler for mesh interfaces
+ * @dev: the mesh interface (unused)
+ * @info: ethtool_drvinfo struct to populate
+ */
 static void batadv_get_drvinfo(struct net_device *dev,
 			       struct ethtool_drvinfo *info)
 {
@@ -954,6 +1009,12 @@ static const struct {
 #endif
 };
 
+/**
+ * batadv_get_strings() - ethtool string handler for mesh interfaces
+ * @dev: the mesh interface (unused)
+ * @stringset: ethtool string set to retrieve
+ * @data: buffer to copy the requested string set into
+ */
 static void batadv_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 {
 	if (stringset == ETH_SS_STATS)
@@ -961,6 +1022,12 @@ static void batadv_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 		       sizeof(batadv_counters_strings));
 }
 
+/**
+ * batadv_get_ethtool_stats() - ethtool stats handler for mesh interfaces
+ * @dev: the mesh interface to query
+ * @stats: ethtool_stats struct (unused)
+ * @data: destination array for the gathered counter values
+ */
 static void batadv_get_ethtool_stats(struct net_device *dev,
 				     struct ethtool_stats *stats, u64 *data)
 {
@@ -971,6 +1038,14 @@ static void batadv_get_ethtool_stats(struct net_device *dev,
 		data[i] = batadv_sum_counter(bat_priv, i);
 }
 
+/**
+ * batadv_get_sset_count() - ethtool stringset size handler for mesh interfaces
+ * @dev: the mesh interface (unused)
+ * @stringset: ethtool string set to query
+ *
+ * Return: number of entries in @stringset or -EOPNOTSUPP if @stringset is not
+ *  supported
+ */
 static int batadv_get_sset_count(struct net_device *dev, int stringset)
 {
 	if (stringset == ETH_SS_STATS)

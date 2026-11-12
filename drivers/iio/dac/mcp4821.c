@@ -255,9 +255,13 @@ static const struct iio_info mcp4821_info = {
 
 static int mcp4821_probe(struct spi_device *spi)
 {
+	const struct mcp4821_chip_info *info;
 	struct iio_dev *indio_dev;
 	struct mcp4821_state *state;
-	const struct mcp4821_chip_info *info;
+
+	info = spi_get_device_match_data(spi);
+	if (!info)
+		return -ENODATA;
 
 	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*state));
 	if (indio_dev == NULL)
@@ -268,7 +272,6 @@ static int mcp4821_probe(struct spi_device *spi)
 
 	/* default gain is 2x */
 	state->gain = 2;
-	info = spi_get_device_match_data(spi);
 	indio_dev->name = info->name;
 	indio_dev->info = &mcp4821_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -297,12 +300,12 @@ static const struct of_device_id mcp4821_of_table[] = {
 MODULE_DEVICE_TABLE(of, mcp4821_of_table);
 
 static const struct spi_device_id mcp4821_id_table[] = {
-	{ "mcp4801", (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4801]},
-	{ "mcp4802", (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4802]},
-	{ "mcp4811", (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4811]},
-	{ "mcp4812", (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4812]},
-	{ "mcp4821", (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4821]},
-	{ "mcp4822", (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4822]},
+	{ .name = "mcp4801", .driver_data = (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4801] },
+	{ .name = "mcp4802", .driver_data = (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4802] },
+	{ .name = "mcp4811", .driver_data = (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4811] },
+	{ .name = "mcp4812", .driver_data = (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4812] },
+	{ .name = "mcp4821", .driver_data = (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4821] },
+	{ .name = "mcp4822", .driver_data = (kernel_ulong_t)&mcp4821_chip_info_table[ID_MCP4822] },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, mcp4821_id_table);

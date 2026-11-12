@@ -5567,7 +5567,7 @@ static int init_rcverr(struct hfi1_devdata *dd)
 static void free_rcverr(struct hfi1_devdata *dd)
 {
 	if (dd->rcverr_timer.function)
-		timer_delete_sync(&dd->rcverr_timer);
+		timer_shutdown_sync(&dd->rcverr_timer);
 }
 
 static void handle_rxe_err(struct hfi1_devdata *dd, u32 unused, u64 reg)
@@ -11929,26 +11929,27 @@ u8 encode_rcv_header_entry_size(u8 size)
 
 /**
  * hfi1_validate_rcvhdrcnt - validate hdrcnt
- * @dd: the device data
+ * @pdev: the PCI device
  * @thecnt: the header count
  */
-int hfi1_validate_rcvhdrcnt(struct hfi1_devdata *dd, uint thecnt)
+int hfi1_validate_rcvhdrcnt(struct pci_dev *pdev, uint thecnt)
 {
 	if (thecnt <= HFI1_MIN_HDRQ_EGRBUF_CNT) {
-		dd_dev_err(dd, "Receive header queue count too small\n");
+		dev_err(&pdev->dev, "Receive header queue count too small\n");
 		return -EINVAL;
 	}
 
 	if (thecnt > HFI1_MAX_HDRQ_EGRBUF_CNT) {
-		dd_dev_err(dd,
-			   "Receive header queue count cannot be greater than %u\n",
-			   HFI1_MAX_HDRQ_EGRBUF_CNT);
+		dev_err(&pdev->dev,
+			"Receive header queue count cannot be greater than %u\n",
+			HFI1_MAX_HDRQ_EGRBUF_CNT);
 		return -EINVAL;
 	}
 
 	if (thecnt % HDRQ_INCREMENT) {
-		dd_dev_err(dd, "Receive header queue count %d must be divisible by %lu\n",
-			   thecnt, HDRQ_INCREMENT);
+		dev_err(&pdev->dev,
+			"Receive header queue count %u must be divisible by %lu\n",
+			thecnt, HDRQ_INCREMENT);
 		return -EINVAL;
 	}
 
@@ -12299,7 +12300,7 @@ static void free_cntrs(struct hfi1_devdata *dd)
 	int i;
 
 	if (dd->synth_stats_timer.function)
-		timer_delete_sync(&dd->synth_stats_timer);
+		timer_shutdown_sync(&dd->synth_stats_timer);
 	cancel_work_sync(&dd->update_cntr_work);
 	ppd = (struct hfi1_pportdata *)(dd + 1);
 	for (i = 0; i < dd->num_pports; i++, ppd++) {
@@ -12649,12 +12650,11 @@ static int init_cntrs(struct hfi1_devdata *dd)
 	}
 
 	/* allocate space for the counter values */
-	dd->cntrs = kcalloc(dd->ndevcntrs + num_driver_cntrs, sizeof(u64),
-			    GFP_KERNEL);
+	dd->cntrs = kzalloc_objs(u64, dd->ndevcntrs + num_driver_cntrs);
 	if (!dd->cntrs)
 		goto bail;
 
-	dd->scntrs = kcalloc(dd->ndevcntrs, sizeof(u64), GFP_KERNEL);
+	dd->scntrs = kzalloc_objs(u64, dd->ndevcntrs);
 	if (!dd->scntrs)
 		goto bail;
 
@@ -12804,11 +12804,11 @@ static int init_cntrs(struct hfi1_devdata *dd)
 	/* allocate per port storage for counter values */
 	ppd = (struct hfi1_pportdata *)(dd + 1);
 	for (i = 0; i < dd->num_pports; i++, ppd++) {
-		ppd->cntrs = kcalloc(dd->nportcntrs, sizeof(u64), GFP_KERNEL);
+		ppd->cntrs = kzalloc_objs(u64, dd->nportcntrs);
 		if (!ppd->cntrs)
 			goto bail;
 
-		ppd->scntrs = kcalloc(dd->nportcntrs, sizeof(u64), GFP_KERNEL);
+		ppd->scntrs = kzalloc_objs(u64, dd->nportcntrs);
 		if (!ppd->scntrs)
 			goto bail;
 	}
@@ -15007,7 +15007,7 @@ int hfi1_init_dd(struct hfi1_devdata *dd)
 	 */
 	ret = hfi1_pcie_ddinit(dd, pdev);
 	if (ret < 0)
-		goto bail_free;
+		goto bail;
 
 	/* Save PCI space registers to rewrite after device reset */
 	ret = save_pci_variables(dd);
@@ -15262,8 +15262,6 @@ bail_clear_intr:
 bail_cleanup:
 	hfi1_free_rx(dd);
 	hfi1_pcie_ddcleanup(dd);
-bail_free:
-	hfi1_free_devdata(dd);
 bail:
 	return ret;
 }

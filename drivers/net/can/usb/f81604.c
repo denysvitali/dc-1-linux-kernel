@@ -169,7 +169,7 @@ struct f81604_int_data {
 	u8 rxerr;
 	u8 txerr;
 	u8 val;
-} __packed __aligned(4);
+} __packed;
 
 struct f81604_sff {
 	__be16 id;
@@ -1149,7 +1149,7 @@ static int f81604_probe(struct usb_interface *intf,
 	struct f81604_priv *priv;
 	int i, ret;
 
-	priv = devm_kzalloc(&intf->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&intf->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

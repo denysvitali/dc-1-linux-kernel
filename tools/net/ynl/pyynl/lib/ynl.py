@@ -115,12 +115,15 @@ class Netlink:
     NL_POLICY_TYPE_ATTR_BITFIELD32_MASK = 10
     NL_POLICY_TYPE_ATTR_PAD = 11
     NL_POLICY_TYPE_ATTR_MASK = 12
+    NL_POLICY_TYPE_ATTR_BYTE_ORDER = 13
 
     AttrType = Enum('AttrType', ['flag', 'u8', 'u16', 'u32', 'u64',
                                   's8', 's16', 's32', 's64',
                                   'binary', 'string', 'nul-string',
                                   'nested', 'nested-array',
                                   'bitfield32', 'sint', 'uint'])
+
+    ByteOrder = Enum('ByteOrder', ['big-endian'], start=1)
 
 class NlError(Exception):
     def __init__(self, nl_msg):
@@ -158,7 +161,7 @@ class NlPolicy:
 
     Each policy entry always has a 'type' attribute (e.g. u32, string,
     nested). Optional attributes depending on the 'type': min-value,
-    max-value, min-length, max-length, mask.
+    max-value, min-length, max-length, mask, byte-order.
 
     Policies can form infinite nesting loops. These loops are trimmed
     when policy is converted to a dict with pol.to_dict().
@@ -454,6 +457,9 @@ def _genl_decode_policy(raw):
             policy['bitfield32-mask'] = attr.as_scalar('u32')
         elif attr.type == Netlink.NL_POLICY_TYPE_ATTR_MASK:
             policy['mask'] = attr.as_scalar('u64')
+        elif attr.type == Netlink.NL_POLICY_TYPE_ATTR_BYTE_ORDER:
+            byte_order = attr.as_scalar('u32')
+            policy['byte-order'] = Netlink.ByteOrder(byte_order).name
     return policy
 
 
@@ -661,6 +667,14 @@ class YnlFamily(SpecFamily):
     """
     YNL family -- a Netlink interface built from a YAML spec.
 
+    The spec can be selected either by file path (def_path=) or, when it
+    ships in a well-known location, by family name (family="xyz"); exactly
+    one of the two must be given. For example:
+
+      from pyynl import YnlFamily
+
+      ynl = YnlFamily(family="netdev")
+
     Primary use of the class is to execute Netlink commands:
 
       ynl.<op_name>(attrs, ...)
@@ -691,11 +705,16 @@ class YnlFamily(SpecFamily):
 
       ynl.get_policy(op_name, mode)      -- query kernel policy for an op
     """
-    def __init__(self, def_path, schema=None, process_unknown=False,
-                 recv_size=0):
-        super().__init__(def_path, schema)
+    def __init__(self, def_path=None, schema=None, process_unknown=None,
+                 recv_size=0, family=None):
+        super().__init__(def_path, schema, family=family)
 
         self.include_raw = False
+        # Specs from /usr (selected by family=) have a higher chance of being
+        # stale, default to ignoring unknown attrs. In-tree users, and users
+        # who bundle the spec need to make a conscious decision.
+        if process_unknown is None:
+            process_unknown = family is not None
         self.process_unknown = process_unknown
 
         try:

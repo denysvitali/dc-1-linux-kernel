@@ -126,6 +126,20 @@ function set_ftrace_enabled() {
 	echo "livepatch: kernel.ftrace_enabled = $result" > /dev/kmsg
 }
 
+# ftrace_disable_supported() - probe whether kernel.ftrace_enabled=0
+#	can still disable ftrace on this kernel. Newer kernels deprecate
+#	the knob and always refuse the write with -EOPNOTSUPP.
+function ftrace_disable_supported() {
+	local orig result
+
+	orig=$(sysctl --values kernel.ftrace_enabled)
+	sysctl -q kernel.ftrace_enabled=0 &> /dev/null
+	result=$(sysctl --values kernel.ftrace_enabled)
+	sysctl -q "kernel.ftrace_enabled=$orig" &> /dev/null
+
+	[[ "$result" == "0" ]]
+}
+
 function cleanup() {
 	pop_config
 }
@@ -306,9 +320,9 @@ function start_test {
 	# find new kernel messages since the test started.
 	local last_dmesg_msg="livepatch kselftest timestamp: $(date --rfc-3339=ns)"
 	log "$last_dmesg_msg"
-	loop_until 'dmesg | grep -q "$last_dmesg_msg"' ||
+	loop_until 'dmesg -r | grep -q "$last_dmesg_msg"' ||
 		die "buffer busy? can't find canary dmesg message: $last_dmesg_msg"
-	LAST_DMESG=$(dmesg | grep "$last_dmesg_msg")
+	LAST_DMESG=$(dmesg -r | grep "$last_dmesg_msg")
 
 	echo -n "TEST: $test ... "
 	log "===== TEST: $test ====="
@@ -321,12 +335,18 @@ function check_result {
 	local result
 
 	# Test results include any new dmesg entry since LAST_DMESG, then:
+	# - exclude debug messages except with "livepatch:" prefix
 	# - include lines matching keywords
 	# - exclude lines matching keywords
 	# - filter out dmesg timestamp prefixes
-	result=$(dmesg | awk -v last_dmesg="$LAST_DMESG" 'p; $0 == last_dmesg { p=1 }' | \
+	# - exclude the delayed kobject release messages when CONFIG_DEBUG_KOBJECT_RELEASE is on
+	result=$(dmesg -r | \
+		 awk -v last_dmesg="$LAST_DMESG" \
+		 'p { if ($0 !~ /^<7>/ || $0 ~ /livepatch:/) print; next } $0 == last_dmesg { p = 1 }' | \
 		 grep -e 'livepatch:' -e 'test_klp' | \
 		 grep -v '\(tainting\|taints\) kernel' | \
+		 grep -v 'kobject: .*parent.*(delayed' | \
+		 sed 's/^<[0-9]*>//' | \
 		 sed 's/^\[[ 0-9.]*\] //' | \
 		 sed 's/^\[[ ]*[CT][0-9]*\] //')
 

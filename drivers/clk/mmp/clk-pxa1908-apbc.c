@@ -114,7 +114,7 @@ static void pxa1908_clk_reset_init(struct device_node *np,
 		cells[i].bits = BIT(2);
 		cells[i].flags = 0;
 		cells[i].lock = apbc_gate_clks[i].lock;
-	};
+	}
 
 	mmp_clk_reset_register(np, cells, nr_cells);
 }
@@ -123,7 +123,7 @@ static int pxa1908_apbc_probe(struct platform_device *pdev)
 {
 	struct pxa1908_clk_unit *pxa_unit;
 
-	pxa_unit = devm_kzalloc(&pdev->dev, sizeof(*pxa_unit), GFP_KERNEL);
+	pxa_unit = devm_kzalloc_obj(&pdev->dev, *pxa_unit);
 	if (!pxa_unit)
 		return -ENOMEM;
 

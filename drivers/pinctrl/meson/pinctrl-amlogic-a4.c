@@ -469,9 +469,15 @@ static int aml_pinconf_get(struct pinctrl_dev *pcdev, unsigned int pin,
 		break;
 	case PIN_CONFIG_OUTPUT_ENABLE:
 		ret = aml_pinconf_get_output(info, pin);
-		if (ret <= 0)
+		if (ret < 0)
 			return -EINVAL;
-		arg = 1;
+		arg = ret;
+		break;
+	case PIN_CONFIG_INPUT_ENABLE:
+		ret = aml_pinconf_get_output(info, pin);
+		if (ret < 0)
+			return -EINVAL;
+		arg = !ret;
 		break;
 	case PIN_CONFIG_LEVEL:
 		ret = aml_pinconf_get_output(info, pin);
@@ -619,6 +625,7 @@ static int aml_pinconf_set(struct pinctrl_dev *pcdev, unsigned int pin,
 		switch (param) {
 		case PIN_CONFIG_DRIVE_STRENGTH_UA:
 		case PIN_CONFIG_OUTPUT_ENABLE:
+		case PIN_CONFIG_INPUT_ENABLE:
 		case PIN_CONFIG_LEVEL:
 			arg = pinconf_to_config_argument(configs[i]);
 			break;
@@ -642,6 +649,9 @@ static int aml_pinconf_set(struct pinctrl_dev *pcdev, unsigned int pin,
 			break;
 		case PIN_CONFIG_OUTPUT_ENABLE:
 			ret = aml_pinconf_set_output(info, pin, arg);
+			break;
+		case PIN_CONFIG_INPUT_ENABLE:
+			ret = aml_pinconf_set_output(info, pin, !arg);
 			break;
 		case PIN_CONFIG_LEVEL:
 			ret = aml_pinconf_set_output_drive(info, pin, arg);
@@ -814,7 +824,7 @@ static int aml_pctl_parse_functions(struct device_node *np,
 	if (func->ngroups == 0)
 		return dev_err_probe(dev, -EINVAL, "No groups defined\n");
 
-	func->groups = devm_kcalloc(dev, func->ngroups, sizeof(*func->groups), GFP_KERNEL);
+	func->groups = devm_kzalloc_objs(dev, *func->groups, func->ngroups);
 	if (!func->groups)
 		return -ENOMEM;
 
@@ -1112,11 +1122,12 @@ static int aml_pctl_probe_dt(struct platform_device *pdev,
 	dev_dbg(dev, "nfunctions = %d\n", info->nfunctions);
 	dev_dbg(dev, "ngroups = %d\n", info->ngroups);
 
-	info->functions = devm_kcalloc(dev, info->nfunctions, sizeof(*info->functions), GFP_KERNEL);
+	info->functions = devm_kzalloc_objs(dev, *info->functions,
+					    info->nfunctions);
 
-	info->groups = devm_kcalloc(dev, info->ngroups, sizeof(*info->groups), GFP_KERNEL);
+	info->groups = devm_kzalloc_objs(dev, *info->groups, info->ngroups);
 
-	info->banks = devm_kcalloc(dev, info->nbanks, sizeof(*info->banks), GFP_KERNEL);
+	info->banks = devm_kzalloc_objs(dev, *info->banks, info->nbanks);
 
 	if (!info->functions || !info->groups || !info->banks)
 		return -ENOMEM;
@@ -1125,7 +1136,7 @@ static int aml_pctl_probe_dt(struct platform_device *pdev,
 
 	pctl_desc->npins = aml_count_pins(np);
 
-	pdesc =	devm_kcalloc(dev, pctl_desc->npins, sizeof(*pdesc), GFP_KERNEL);
+	pdesc =	devm_kzalloc_objs(dev, *pdesc, pctl_desc->npins);
 	if (!pdesc)
 		return -ENOMEM;
 
@@ -1173,11 +1184,11 @@ static int aml_pctl_probe(struct platform_device *pdev)
 	struct pinctrl_desc *pctl_desc;
 	int ret, i;
 
-	pctl_desc = devm_kzalloc(dev, sizeof(*pctl_desc), GFP_KERNEL);
+	pctl_desc = devm_kzalloc_obj(dev, *pctl_desc);
 	if (!pctl_desc)
 		return -ENOMEM;
 
-	info = devm_kzalloc(dev, sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc_obj(dev, *info);
 	if (!info)
 		return -ENOMEM;
 

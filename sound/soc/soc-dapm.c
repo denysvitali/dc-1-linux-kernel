@@ -37,6 +37,7 @@
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/initval.h>
+#include "soc-internal.h"
 
 #include <trace/events/asoc.h>
 
@@ -192,7 +193,7 @@ static void dapm_pop_dbg(struct device *dev, const char *fmt, ...)
 
 struct snd_soc_dapm_context *snd_soc_dapm_alloc(struct device *dev)
 {
-	return devm_kzalloc(dev, sizeof(struct snd_soc_dapm_context), GFP_KERNEL);
+	return devm_kzalloc_obj(dev, struct snd_soc_dapm_context);
 }
 
 struct device *snd_soc_dapm_to_dev(struct snd_soc_dapm_context *dapm)
@@ -1203,6 +1204,8 @@ static int dapm_create_or_share_kcontrol(struct snd_soc_dapm_widget *w,
 			case snd_soc_dapm_pga:
 			case snd_soc_dapm_effect:
 			case snd_soc_dapm_out_drv:
+			case snd_soc_dapm_encoder:
+			case snd_soc_dapm_decoder:
 				wname_in_long_name = true;
 				kcname_in_long_name = true;
 				break;
@@ -2785,6 +2788,8 @@ static ssize_t dapm_widget_show_component(struct snd_soc_component *component,
 		case snd_soc_dapm_pga:
 		case snd_soc_dapm_effect:
 		case snd_soc_dapm_out_drv:
+		case snd_soc_dapm_encoder:
+		case snd_soc_dapm_decoder:
 		case snd_soc_dapm_mixer:
 		case snd_soc_dapm_mixer_named_ctl:
 		case snd_soc_dapm_supply:
@@ -2864,6 +2869,7 @@ static void dapm_free_path(struct snd_soc_dapm_path *path)
  */
 void snd_soc_dapm_free_widget(struct snd_soc_dapm_widget *w)
 {
+	struct snd_soc_dapm_context *d;
 	struct snd_soc_dapm_path *p, *next_p;
 	enum snd_soc_dapm_direction dir;
 
@@ -2884,6 +2890,22 @@ void snd_soc_dapm_free_widget(struct snd_soc_dapm_widget *w)
 
 	dapm_debugfs_free_widget(w);
 
+	if (w->dapm) {
+		if (w->dapm->card) {
+			for_each_card_dapms(w->dapm->card, d) {
+				if (d->wcache_sink == w)
+					d->wcache_sink = NULL;
+				if (d->wcache_source == w)
+					d->wcache_source = NULL;
+			}
+		} else {
+			if (w->dapm->wcache_sink == w)
+				w->dapm->wcache_sink = NULL;
+			if (w->dapm->wcache_source == w)
+				w->dapm->wcache_source = NULL;
+		}
+	}
+
 	kfree(w->kcontrols);
 	kfree_const(w->name);
 	kfree_const(w->sname);
@@ -2901,9 +2923,6 @@ static void dapm_free_widgets(struct snd_soc_dapm_context *dapm)
 			continue;
 		snd_soc_dapm_free_widget(w);
 	}
-
-	dapm->wcache_sink	= NULL;
-	dapm->wcache_source	= NULL;
 }
 
 static struct snd_soc_dapm_widget *dapm_find_widget(
@@ -3367,6 +3386,8 @@ int snd_soc_dapm_new_widgets(struct snd_soc_card *card)
 		case snd_soc_dapm_pga:
 		case snd_soc_dapm_effect:
 		case snd_soc_dapm_out_drv:
+		case snd_soc_dapm_encoder:
+		case snd_soc_dapm_decoder:
 			dapm_new_pga(w);
 			break;
 		case snd_soc_dapm_dai_link:
@@ -3608,7 +3629,7 @@ int snd_soc_dapm_put_enum_double(struct snd_kcontrol *kcontrol,
 	val = snd_soc_enum_item_to_val(e, item[0]) << e->shift_l;
 	mask = e->mask << e->shift_l;
 	if (e->shift_l != e->shift_r) {
-		if (item[1] > e->items)
+		if (item[1] >= e->items)
 			return -EINVAL;
 		val |= snd_soc_enum_item_to_val(e, item[1]) << e->shift_r;
 		mask |= e->mask << e->shift_r;
@@ -4004,7 +4025,7 @@ static int dapm_dai_link_event_pre_pmu(struct snd_soc_dapm_widget *w,
 		if (ret < 0)
 			return ret;
 
-		snd_soc_dai_activate(source, substream->stream);
+		snd_soc_dai_active_update(source, substream->stream, 1);
 	}
 
 	substream->stream = SNDRV_PCM_STREAM_PLAYBACK;
@@ -4015,7 +4036,7 @@ static int dapm_dai_link_event_pre_pmu(struct snd_soc_dapm_widget *w,
 		if (ret < 0)
 			return ret;
 
-		snd_soc_dai_activate(sink, substream->stream);
+		snd_soc_dai_active_update(sink, substream->stream, 1);
 	}
 
 	substream->hw_opened = 1;
@@ -4144,14 +4165,14 @@ static int dapm_dai_link_event(struct snd_soc_dapm_widget *w,
 		substream->stream = SNDRV_PCM_STREAM_CAPTURE;
 		snd_soc_dapm_widget_for_each_source_path(w, path) {
 			source = path->source->priv;
-			snd_soc_dai_deactivate(source, substream->stream);
+			snd_soc_dai_active_update(source, substream->stream, -1);
 			snd_soc_dai_shutdown(source, substream, 0);
 		}
 
 		substream->stream = SNDRV_PCM_STREAM_PLAYBACK;
 		snd_soc_dapm_widget_for_each_sink_path(w, path) {
 			sink = path->sink->priv;
-			snd_soc_dai_deactivate(sink, substream->stream);
+			snd_soc_dai_active_update(sink, substream->stream, -1);
 			snd_soc_dai_shutdown(sink, substream, 0);
 		}
 		break;

@@ -501,7 +501,7 @@ static int qcom_glink_send_open_req(struct qcom_glink *glink,
 	req->cmd = cpu_to_le16(GLINK_CMD_OPEN);
 	req->param1 = cpu_to_le16(channel->lcid);
 	req->param2 = cpu_to_le32(name_len);
-	strcpy(req->data, channel->name);
+	strscpy(req->data, channel->name, GLINK_NAME_SIZE);
 
 	trace_qcom_glink_cmd_open_tx(glink->label, channel->name,
 				     channel->lcid, channel->rcid);
@@ -1418,9 +1418,6 @@ static void qcom_glink_destroy_ept(struct rpmsg_endpoint *ept)
 	channel->ept.cb = NULL;
 	spin_unlock_irqrestore(&channel->recv_lock, flags);
 
-	/* Decouple the potential rpdev from the channel */
-	qcom_glink_remove_rpmsg_device(glink, channel);
-
 	qcom_glink_send_close_req(glink, channel);
 }
 
@@ -1897,7 +1894,7 @@ struct qcom_glink *qcom_glink_native_probe(struct device *dev,
 	int ret;
 	struct qcom_glink *glink;
 
-	glink = devm_kzalloc(dev, sizeof(*glink), GFP_KERNEL);
+	glink = devm_kzalloc_obj(dev, *glink);
 	if (!glink)
 		return ERR_PTR(-ENOMEM);
 

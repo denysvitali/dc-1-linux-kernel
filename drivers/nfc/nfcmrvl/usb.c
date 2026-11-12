@@ -17,7 +17,6 @@ static struct usb_device_id nfcmrvl_table[] = {
 					USB_CLASS_VENDOR_SPEC, 4, 1) },
 	{ }	/* Terminating entry */
 };
-
 MODULE_DEVICE_TABLE(usb, nfcmrvl_table);
 
 #define NFCMRVL_USB_BULK_RUNNING	1
@@ -298,7 +297,7 @@ static int nfcmrvl_probe(struct usb_interface *intf,
 
 	nfc_info(&udev->dev, "intf %p id %p\n", intf, id);
 
-	drv_data = devm_kzalloc(&intf->dev, sizeof(*drv_data), GFP_KERNEL);
+	drv_data = devm_kzalloc_obj(&intf->dev, *drv_data);
 	if (!drv_data)
 		return -ENOMEM;
 

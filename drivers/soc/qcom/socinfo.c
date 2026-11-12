@@ -425,6 +425,7 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(IPQ8078) },
 	{ qcom_board_id(SDM636) },
 	{ qcom_board_id(SDA636) },
+	{ qcom_board_id(SDM850) },
 	{ qcom_board_id(SDM632) },
 	{ qcom_board_id(SDA632) },
 	{ qcom_board_id(SDA450) },
@@ -449,6 +450,7 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(IPQ8172) },
 	{ qcom_board_id(IPQ8173) },
 	{ qcom_board_id(IPQ8174) },
+	{ qcom_board_id(SM7250) },
 	{ qcom_board_id(IPQ6018) },
 	{ qcom_board_id(IPQ6028) },
 	{ qcom_board_id(SDM429W) },
@@ -540,8 +542,10 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(QCS9075) },
 	{ qcom_board_id(QCS615) },
 	{ qcom_board_id(SA8797P) },
+	{ qcom_board_id(SM8975) },
 	{ qcom_board_id(CQ7790M) },
 	{ qcom_board_id(CQ7790S) },
+	{ qcom_board_id(SM8950) },
 	{ qcom_board_id(CQ2390M) },
 	{ qcom_board_id(CQ2390S) },
 	{ qcom_board_id(IQ2390S) },
@@ -904,7 +908,7 @@ static int qcom_socinfo_probe(struct platform_device *pdev)
 		return PTR_ERR(info);
 	}
 
-	qs = devm_kzalloc(&pdev->dev, sizeof(*qs), GFP_KERNEL);
+	qs = devm_kzalloc_obj(&pdev->dev, *qs);
 	if (!qs)
 		return -ENOMEM;
 

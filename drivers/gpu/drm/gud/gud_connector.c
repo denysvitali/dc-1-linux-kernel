@@ -396,8 +396,16 @@ static int gud_connector_add_tv_mode(struct gud_device *gdrm, struct drm_connect
 	}
 
 	num_modes = ret / GUD_CONNECTOR_TV_MODE_NAME_LEN;
-	for (i = 0; i < num_modes; i++)
-		modes[i] = &buf[i * GUD_CONNECTOR_TV_MODE_NAME_LEN];
+	for (i = 0; i < num_modes; i++) {
+		char *mode = &buf[i * GUD_CONNECTOR_TV_MODE_NAME_LEN];
+
+		if (!memchr(mode, '\0', GUD_CONNECTOR_TV_MODE_NAME_LEN)) {
+			ret = -EIO;
+			goto free;
+		}
+
+		modes[i] = mode;
+	}
 
 	ret = drm_mode_create_tv_properties_legacy(connector->dev, num_modes, modes);
 free:
@@ -495,7 +503,7 @@ static int gud_connector_add_properties(struct gud_device *gdrm, struct gud_conn
 	num_properties = ret / sizeof(*properties);
 	ret = 0;
 
-	gconn->properties = kcalloc(num_properties, sizeof(*gconn->properties), GFP_KERNEL);
+	gconn->properties = kzalloc_objs(*gconn->properties, num_properties);
 	if (!gconn->properties) {
 		ret = -ENOMEM;
 		goto out;

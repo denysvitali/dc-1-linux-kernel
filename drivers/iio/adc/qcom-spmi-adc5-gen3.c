@@ -55,9 +55,6 @@ struct adc5_channel_prop {
  *	requests from multiple clients.
  * @data: software configuration data.
  * @n_tm_channels: number of ADC channels used for TM measurements.
- * @handler: TM callback to be called for threshold violation interrupt
- *	on first SDAM.
- * @tm_aux: pointer to auxiliary TM device.
  */
 struct adc5_chip {
 	struct device *dev;
@@ -69,8 +66,6 @@ struct adc5_chip {
 	struct mutex lock;
 	const struct adc5_data *data;
 	unsigned int n_tm_channels;
-	void (*handler)(struct auxiliary_device *tm_aux);
-	struct auxiliary_device *tm_aux;
 };
 
 int adc5_gen3_read(struct adc5_device_data *adc, unsigned int sdam_index,
@@ -286,23 +281,21 @@ static irqreturn_t adc5_gen3_isr(int irq, void *dev_id)
 {
 	struct adc5_chip *adc = dev_id;
 	struct device *dev = adc->dev;
-	struct auxiliary_device *adev;
 	u8 status, eoc_status, val;
-	u8 tm_status[2];
 	int ret;
 
 	ret = adc5_gen3_read(&adc->dev_data, ADC5_GEN3_VADC_SDAM,
 			     ADC5_GEN3_STATUS1, &status, sizeof(status));
 	if (ret) {
 		dev_err(dev, "adc read status1 failed with %d\n", ret);
-		return IRQ_HANDLED;
+		return IRQ_NONE;
 	}
 
 	ret = adc5_gen3_read(&adc->dev_data, ADC5_GEN3_VADC_SDAM,
 			     ADC5_GEN3_EOC_STS, &eoc_status, sizeof(eoc_status));
 	if (ret) {
 		dev_err(dev, "adc read eoc status failed with %d\n", ret);
-		return IRQ_HANDLED;
+		return IRQ_NONE;
 	}
 
 	if (status & ADC5_GEN3_STATUS1_CONV_FAULT) {
@@ -315,30 +308,13 @@ static irqreturn_t adc5_gen3_isr(int irq, void *dev_id)
 		return IRQ_HANDLED;
 	}
 
+	dev_dbg(dev, "Interrupt status:%#x, EOC status:%#x\n", status, eoc_status);
+
 	/* CHAN0 is the preconfigured channel for immediate conversion */
-	if (eoc_status & ADC5_GEN3_EOC_CHAN_0)
-		complete(&adc->complete);
+	if (!(eoc_status & ADC5_GEN3_EOC_CHAN_0))
+		return IRQ_NONE;
 
-	ret = adc5_gen3_read(&adc->dev_data, ADC5_GEN3_VADC_SDAM,
-			     ADC5_GEN3_TM_HIGH_STS, tm_status, sizeof(tm_status));
-	if (ret) {
-		dev_err(dev, "adc read TM status failed with %d\n", ret);
-		return IRQ_HANDLED;
-	}
-
-	dev_dbg(dev, "Interrupt status:%#x, EOC status:%#x, high:%#x, low:%#x\n",
-		status, eoc_status, tm_status[0], tm_status[1]);
-
-	if (tm_status[0] || tm_status[1]) {
-		adev = adc->tm_aux;
-		if (!adev || !adev->dev.driver) {
-			dev_err(dev, "adc_tm auxiliary device not initialized\n");
-			return IRQ_HANDLED;
-		}
-
-		adc->handler(adev);
-	}
-
+	complete(&adc->complete);
 	return IRQ_HANDLED;
 }
 
@@ -585,13 +561,12 @@ static int adc5_get_fw_data(struct adc5_chip *adc)
 	if (!adc->nchannels)
 		return dev_err_probe(dev, -EINVAL, "No ADC channels found\n");
 
-	adc->iio_chans = devm_kcalloc(dev, adc->nchannels,
-				      sizeof(*adc->iio_chans), GFP_KERNEL);
+	adc->iio_chans = devm_kzalloc_objs(dev, *adc->iio_chans, adc->nchannels);
 	if (!adc->iio_chans)
 		return -ENOMEM;
 
-	adc->chan_props = devm_kcalloc(dev, adc->nchannels,
-				       sizeof(*adc->chan_props), GFP_KERNEL);
+	adc->chan_props = devm_kzalloc_objs(dev, *adc->chan_props,
+					    adc->nchannels);
 	if (!adc->chan_props)
 		return -ENOMEM;
 
@@ -639,7 +614,7 @@ static int adc5_gen3_add_aux_tm_device(struct adc5_chip *adc)
 	struct tm5_aux_dev_wrapper *aux_device;
 	int i, ret, i_tm = 0;
 
-	aux_device = devm_kzalloc(adc->dev, sizeof(*aux_device), GFP_KERNEL);
+	aux_device = devm_kzalloc_obj(adc->dev, *aux_device);
 	if (!aux_device)
 		return -ENOMEM;
 
@@ -647,9 +622,9 @@ static int adc5_gen3_add_aux_tm_device(struct adc5_chip *adc)
 	aux_device->aux_dev.dev.parent = adc->dev;
 	aux_device->aux_dev.dev.release = adc5_gen3_aux_device_release;
 
-	aux_device->tm_props = devm_kcalloc(adc->dev, adc->n_tm_channels,
-					    sizeof(*aux_device->tm_props),
-					    GFP_KERNEL);
+	aux_device->tm_props = devm_kzalloc_objs(adc->dev,
+						 *aux_device->tm_props,
+						 adc->n_tm_channels);
 	if (!aux_device->tm_props)
 		return -ENOMEM;
 
@@ -682,8 +657,6 @@ static int adc5_gen3_add_aux_tm_device(struct adc5_chip *adc)
 				       &aux_device->aux_dev);
 	if (ret)
 		return ret;
-
-	adc->tm_aux = &aux_device->aux_dev;
 
 	return 0;
 }
@@ -740,16 +713,6 @@ int adc5_gen3_therm_code_to_temp(struct device *dev,
 }
 EXPORT_SYMBOL_NS_GPL(adc5_gen3_therm_code_to_temp, "QCOM_SPMI_ADC5_GEN3");
 
-void adc5_gen3_register_tm_event_notifier(struct device *dev,
-					  void (*handler)(struct auxiliary_device *))
-{
-	struct iio_dev *indio_dev = dev_get_drvdata(dev->parent);
-	struct adc5_chip *adc = iio_priv(indio_dev);
-
-	adc->handler = handler;
-}
-EXPORT_SYMBOL_NS_GPL(adc5_gen3_register_tm_event_notifier, "QCOM_SPMI_ADC5_GEN3");
-
 static int adc5_gen3_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -777,8 +740,7 @@ static int adc5_gen3_probe(struct platform_device *pdev)
 
 	adc->dev_data.num_sdams = ret;
 
-	reg = devm_kcalloc(dev, adc->dev_data.num_sdams, sizeof(u32),
-			   GFP_KERNEL);
+	reg = devm_kzalloc_objs(dev, u32, adc->dev_data.num_sdams);
 	if (!reg)
 		return -ENOMEM;
 
@@ -788,9 +750,8 @@ static int adc5_gen3_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret,
 				     "Failed to read reg property\n");
 
-	adc->dev_data.base = devm_kcalloc(dev, adc->dev_data.num_sdams,
-					  sizeof(*adc->dev_data.base),
-					  GFP_KERNEL);
+	adc->dev_data.base = devm_kzalloc_objs(dev, *adc->dev_data.base,
+					       adc->dev_data.num_sdams);
 	if (!adc->dev_data.base)
 		return -ENOMEM;
 
@@ -816,14 +777,19 @@ static int adc5_gen3_probe(struct platform_device *pdev)
 			return -ENOMEM;
 	}
 
-	ret = devm_request_irq(dev, adc->dev_data.base[ADC5_GEN3_VADC_SDAM].irq,
-			       adc5_gen3_isr, 0,
-			       adc->dev_data.base[ADC5_GEN3_VADC_SDAM].irq_name,
-			       adc);
+	/*
+	 * This interrupt is shared with the ADC_TM auxiliary driver, which
+	 * is threaded and uses IRQF_ONESHOT. Since shared interrupts need
+	 * to agree on IRQF_ONESHOT configuration and there is a kernel
+	 * warning for using IRQF_ONESHOT with non-threaded interrupts,
+	 * make this also a threaded IRQ.
+	 */
+	ret = devm_request_threaded_irq(dev, adc->dev_data.base[ADC5_GEN3_VADC_SDAM].irq,
+					NULL, adc5_gen3_isr, IRQF_ONESHOT | IRQF_SHARED,
+					adc->dev_data.base[ADC5_GEN3_VADC_SDAM].irq_name,
+					adc);
 	if (ret)
-		return dev_err_probe(dev, ret,
-				     "Failed to request SDAM%d irq\n",
-				     ADC5_GEN3_VADC_SDAM);
+		return ret;
 
 	ret = adc5_get_fw_data(adc);
 	if (ret)

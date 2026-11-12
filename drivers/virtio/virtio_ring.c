@@ -559,6 +559,11 @@ static void virtqueue_init(struct vring_virtqueue *vq, u32 num)
 	vq->in_use = false;
 	vq->last_add_time_valid = false;
 #endif
+
+	if (virtqueue_is_in_order(vq)) {
+		vq->free_head = 0;
+		vq->batch_last.id = UINT_MAX;
+	}
 }
 
 
@@ -905,7 +910,6 @@ static unsigned detach_buf_split_in_order(struct vring_virtqueue *vq,
 {
 	struct vring_desc_extra *extra;
 	unsigned int i;
-	__virtio16 nextflag = cpu_to_virtio16(vq->vq.vdev, VRING_DESC_F_NEXT);
 
 	/* Clear data ptr. */
 	vq->split.desc_state[head].data = NULL;
@@ -915,7 +919,7 @@ static unsigned detach_buf_split_in_order(struct vring_virtqueue *vq,
 	/* Put back on free list: unmap first-level descriptors and find end */
 	i = head;
 
-	while (vq->split.vring.desc[i].flags & nextflag) {
+	while (extra[i].flags & VRING_DESC_F_NEXT) {
 		i = vring_unmap_one_split(vq, &extra[i]);
 		vq->vq.num_free++;
 	}
@@ -1571,6 +1575,11 @@ static int virtqueue_add_indirect_packed(struct vring_virtqueue *vq,
 						0 : VRING_DESC_F_WRITE);
 			desc[i].addr = cpu_to_le64(addr);
 			desc[i].len = cpu_to_le32(len);
+			/* The id field is unused in indirect descriptors but
+			 * must be initialized to prevent leaking kernel heap
+			 * memory to the device through the DMA-mapped table.
+			 */
+			desc[i].id = 0;
 
 			if (unlikely(vq->use_map_api)) {
 				extra[i].addr = premapped ? DMA_MAPPING_ERROR : addr;
@@ -1670,7 +1679,7 @@ static inline int virtqueue_add_packed(struct vring_virtqueue *vq,
 	struct scatterlist *sg;
 	unsigned int i, n, c, descs_used, err_idx, len;
 	__le16 head_flags, flags;
-	u16 head, id, prev, curr, avail_used_flags;
+	u16 head, id, prev, curr, avail_used_flags, unpub_flags;
 	int err;
 
 	START_USE(vq);
@@ -1798,15 +1807,30 @@ unmap_release:
 	curr = vq->free_head;
 
 	vq->packed.avail_used_flags = avail_used_flags;
+	unpub_flags = avail_used_flags ^ (1 << VRING_PACKED_DESC_F_AVAIL |
+					  1 << VRING_PACKED_DESC_F_USED);
 
 	for (n = 0; n < total_sg; n++) {
 		if (i == err_idx)
 			break;
+		/*
+		 * The mapping loop made every descriptor but the head
+		 * available. Stamp the previous wrap counter's AVAIL and USED
+		 * bits on those, so that a later and shorter chain at this head
+		 * does not leave one of them available beyond its own last
+		 * descriptor. Marking them used instead would hand
+		 * is_used_desc_packed() a completion we never made.
+		 */
+		if (i != head)
+			desc[i].flags = cpu_to_le16(unpub_flags);
 		vring_unmap_extra_packed(vq, &vq->packed.desc_extra[curr]);
 		curr = vq->packed.desc_extra[curr].next;
 		i++;
-		if (i >= vq->packed.vring.num)
+		if (i >= vq->packed.vring.num) {
 			i = 0;
+			unpub_flags ^= 1 << VRING_PACKED_DESC_F_AVAIL |
+				       1 << VRING_PACKED_DESC_F_USED;
+		}
 	}
 
 	END_USE(vq);
@@ -1828,7 +1852,7 @@ static inline int virtqueue_add_packed_in_order(struct vring_virtqueue *vq,
 	struct scatterlist *sg;
 	unsigned int i, n, sg_count, err_idx, total_in_len = 0;
 	__le16 head_flags, flags;
-	u16 head, avail_used_flags;
+	u16 head, avail_used_flags, unpub_flags;
 	bool avail_wrap_counter;
 	int err;
 
@@ -1955,14 +1979,29 @@ unmap_release:
 	i = head;
 	vq->packed.avail_used_flags = avail_used_flags;
 	vq->packed.avail_wrap_counter = avail_wrap_counter;
+	unpub_flags = avail_used_flags ^ (1 << VRING_PACKED_DESC_F_AVAIL |
+					  1 << VRING_PACKED_DESC_F_USED);
 
 	for (n = 0; n < total_sg; n++) {
 		if (i == err_idx)
 			break;
+		/*
+		 * The mapping loop made every descriptor but the head
+		 * available. Stamp the previous wrap counter's AVAIL and USED
+		 * bits on those, so that a later and shorter chain at this head
+		 * does not leave one of them available beyond its own last
+		 * descriptor. Marking them used instead would hand
+		 * is_used_desc_packed() a completion we never made.
+		 */
+		if (i != head)
+			desc[i].flags = cpu_to_le16(unpub_flags);
 		vring_unmap_extra_packed(vq, &vq->packed.desc_extra[i]);
 		i++;
-		if (i >= vq->packed.vring.num)
+		if (i >= vq->packed.vring.num) {
 			i = 0;
+			unpub_flags ^= 1 << VRING_PACKED_DESC_F_AVAIL |
+				       1 << VRING_PACKED_DESC_F_USED;
+		}
 	}
 
 	END_USE(vq);
@@ -3232,6 +3271,14 @@ EXPORT_SYMBOL_GPL(virtqueue_enable_cb);
 bool virtqueue_enable_cb_delayed(struct virtqueue *_vq)
 {
 	struct vring_virtqueue *vq = to_vvq(_vq);
+
+	/*
+	 * When the device is broken there is no point in polling used->idx,
+	 * the backend will never update it. Return true to let callers
+	 * exit their cleanup loops instead of spinning forever.
+	 */
+	if (unlikely(vq->broken))
+		return true;
 
 	if (vq->event_triggered)
 		data_race(vq->event_triggered = false);

@@ -628,8 +628,8 @@ static int rvu_setup_msix_resources(struct rvu *rvu)
 			return err;
 
 		/* Allocate memory for MSIX vector to RVU block LF mapping */
-		pfvf->msix_lfmap = devm_kcalloc(rvu->dev, pfvf->msix.max,
-						sizeof(u16), GFP_KERNEL);
+		pfvf->msix_lfmap = devm_kzalloc_objs(rvu->dev, u16,
+						     pfvf->msix.max);
 		if (!pfvf->msix_lfmap)
 			return -ENOMEM;
 
@@ -665,8 +665,7 @@ setup_vfmsix:
 				return err;
 
 			pfvf->msix_lfmap =
-				devm_kcalloc(rvu->dev, pfvf->msix.max,
-					     sizeof(u16), GFP_KERNEL);
+				devm_kzalloc_objs(rvu->dev, u16, pfvf->msix.max);
 			if (!pfvf->msix_lfmap)
 				return -ENOMEM;
 
@@ -1095,16 +1094,14 @@ cpt:
 	}
 
 	/* Allocate memory for PFVF data */
-	rvu->pf = devm_kcalloc(rvu->dev, hw->total_pfs,
-			       sizeof(struct rvu_pfvf), GFP_KERNEL);
+	rvu->pf = devm_kzalloc_objs(rvu->dev, struct rvu_pfvf, hw->total_pfs);
 	if (!rvu->pf) {
 		dev_err(rvu->dev,
 			"%s: Failed to allocate memory for PF's rvu_pfvf struct\n", __func__);
 		return -ENOMEM;
 	}
 
-	rvu->hwvf = devm_kcalloc(rvu->dev, hw->total_vfs,
-				 sizeof(struct rvu_pfvf), GFP_KERNEL);
+	rvu->hwvf = devm_kzalloc_objs(rvu->dev, struct rvu_pfvf, hw->total_vfs);
 	if (!rvu->hwvf) {
 		dev_err(rvu->dev,
 			"%s: Failed to allocate memory for VF's rvu_pfvf struct\n", __func__);
@@ -1128,8 +1125,7 @@ cpt:
 			continue;
 
 		/* Allocate memory for block LF/slot to pcifunc mapping info */
-		block->fn_map = devm_kcalloc(rvu->dev, block->lf.max,
-					     sizeof(u16), GFP_KERNEL);
+		block->fn_map = devm_kzalloc_objs(rvu->dev, u16, block->lf.max);
 		if (!block->fn_map) {
 			err = -ENOMEM;
 			goto msix_err;
@@ -1239,7 +1235,7 @@ int rvu_aq_alloc(struct rvu *rvu, struct admin_queue **ad_queue,
 	struct admin_queue *aq;
 	int err;
 
-	*ad_queue = devm_kzalloc(rvu->dev, sizeof(*aq), GFP_KERNEL);
+	*ad_queue = devm_kzalloc_obj(rvu->dev, *aq);
 	if (!*ad_queue)
 		return -ENOMEM;
 	aq = *ad_queue;
@@ -2585,12 +2581,6 @@ static int rvu_mbox_init(struct rvu *rvu, struct mbox_wq_info *mw,
 	if (!pf_bmap)
 		return -ENOMEM;
 
-	ng_rvu_mbox = kzalloc_obj(*ng_rvu_mbox);
-	if (!ng_rvu_mbox) {
-		err = -ENOMEM;
-		goto free_bitmap;
-	}
-
 	/* RVU VFs */
 	if (type == TYPE_AFVF)
 		bitmap_set(pf_bmap, 0, num);
@@ -2604,15 +2594,22 @@ static int rvu_mbox_init(struct rvu *rvu, struct mbox_wq_info *mw,
 		}
 	}
 
-	rvu->ng_rvu = ng_rvu_mbox;
+	if (!rvu->ng_rvu) {
+		ng_rvu_mbox = devm_kzalloc_obj(rvu->dev, *ng_rvu_mbox);
+		if (!ng_rvu_mbox) {
+			err = -ENOMEM;
+			goto free_bitmap;
+		}
 
-	rvu->ng_rvu->rvu_mbox_ops = &rvu_mbox_ops;
+		rvu->ng_rvu = ng_rvu_mbox;
+
+		rvu->ng_rvu->rvu_mbox_ops = &rvu_mbox_ops;
+		mutex_init(&rvu->mbox_lock);
+	}
 
 	err = cn20k_rvu_mbox_init(rvu, type, num);
 	if (err)
-		goto free_mem;
-
-	mutex_init(&rvu->mbox_lock);
+		goto free_bitmap;
 
 	mbox_regions = kcalloc(num, sizeof(void __iomem *), GFP_KERNEL);
 	if (!mbox_regions) {
@@ -2652,15 +2649,13 @@ static int rvu_mbox_init(struct rvu *rvu, struct mbox_wq_info *mw,
 		goto unmap_regions;
 	}
 
-	mw->mbox_wrk = devm_kcalloc(rvu->dev, num,
-				    sizeof(struct rvu_work), GFP_KERNEL);
+	mw->mbox_wrk = devm_kzalloc_objs(rvu->dev, struct rvu_work, num);
 	if (!mw->mbox_wrk) {
 		err = -ENOMEM;
 		goto exit;
 	}
 
-	mw->mbox_wrk_up = devm_kcalloc(rvu->dev, num,
-				       sizeof(struct rvu_work), GFP_KERNEL);
+	mw->mbox_wrk_up = devm_kzalloc_objs(rvu->dev, struct rvu_work, num);
 	if (!mw->mbox_wrk_up) {
 		err = -ENOMEM;
 		goto exit;
@@ -2702,12 +2697,16 @@ unmap_regions:
 free_regions:
 	kfree(mbox_regions);
 free_qmem:
-	cn20k_free_mbox_memory(rvu);
-free_mem:
-	kfree(rvu->ng_rvu);
+	cn20k_free_mbox_memory_type(rvu, type);
 free_bitmap:
 	bitmap_free(pf_bmap);
 	return err;
+}
+
+static void rvu_free_cn20k_mbox_memory(struct rvu *rvu)
+{
+	if (is_cn20k(rvu->pdev))
+		cn20k_free_mbox_memory(rvu);
 }
 
 static void rvu_mbox_destroy(struct mbox_wq_info *mw)
@@ -3148,8 +3147,7 @@ static int rvu_register_interrupts(struct rvu *rvu)
 	if (!rvu->irq_name)
 		return -ENOMEM;
 
-	rvu->irq_allocated = devm_kcalloc(rvu->dev, rvu->num_vec,
-					  sizeof(bool), GFP_KERNEL);
+	rvu->irq_allocated = devm_kzalloc_objs(rvu->dev, bool, rvu->num_vec);
 	if (!rvu->irq_allocated)
 		return -ENOMEM;
 
@@ -3331,8 +3329,8 @@ static int rvu_register_interrupts(struct rvu *rvu)
 		goto fail;
 
 	for (i = 0; i < rvu->num_vec; i++) {
-		if (strstr(&rvu->irq_name[i * NAME_SIZE], "Mbox") ||
-		    strstr(&rvu->irq_name[i * NAME_SIZE], "FLR"))
+		if (strnstr(&rvu->irq_name[i * NAME_SIZE], "Mbox", NAME_SIZE) ||
+		    strnstr(&rvu->irq_name[i * NAME_SIZE], "FLR", NAME_SIZE))
 			irq_set_affinity(pci_irq_vector(rvu->pdev, i),
 					 cpumask_of(0));
 	}
@@ -3366,13 +3364,12 @@ static int rvu_flr_init(struct rvu *rvu)
 	}
 
 	rvu->flr_wq = alloc_workqueue("rvu_afpf_flr",
-				      WQ_HIGHPRI | WQ_MEM_RECLAIM, 0);
+				      WQ_HIGHPRI | WQ_MEM_RECLAIM | WQ_PERCPU, 0);
 	if (!rvu->flr_wq)
 		return -ENOMEM;
 
 	num_devs = rvu->hw->total_pfs + pci_sriov_get_totalvfs(rvu->pdev);
-	rvu->flr_wrk = devm_kcalloc(rvu->dev, num_devs,
-				    sizeof(struct rvu_work), GFP_KERNEL);
+	rvu->flr_wrk = devm_kzalloc_objs(rvu->dev, struct rvu_work, num_devs);
 	if (!rvu->flr_wrk) {
 		destroy_workqueue(rvu->flr_wq);
 		return -ENOMEM;
@@ -3481,24 +3478,27 @@ static int rvu_enable_sriov(struct rvu *rvu)
 		return 0;
 	pci_read_config_word(pdev, pos + PCI_SRIOV_VF_DID, &rvu->vf_devid);
 
-	chans = rvu_get_num_lbk_chans();
-	if (chans < 0)
-		return chans;
-
 	vfs = pci_sriov_get_totalvfs(pdev);
-
-	/* Limit VFs in case we have more VFs than LBK channels available. */
-	if (vfs > chans)
-		vfs = chans;
-
 	if (!vfs)
 		return 0;
 
-	/* LBK channel number 63 is used for switching packets between
-	 * CGX mapped VFs. Hence limit LBK pairs till 62 only.
-	 */
-	if (vfs > 62)
-		vfs = 62;
+	if (rvu->vf_devid == PCI_DEVID_OCTEONTX2_RVU_AFVF) {
+		chans = rvu_get_num_lbk_chans();
+		if (chans < 0)
+			return chans;
+
+		/* The last LBK channel is reserved for switching packets between
+		 * CGX mapped VFs. Also, since LBK VFs work in pairs, limit VF
+		 * count to available LBK channels minus 2.
+		 */
+		vfs = min(vfs, chans - 2);
+
+		if (vfs <= 0) {
+			dev_warn(&pdev->dev,
+				 "Skipping SRIOV enablement, not enough LBK channels available\n");
+			return 0;
+		}
+	}
 
 	/* Save VFs number for reference in VF interrupts handlers.
 	 * Since interrupts might start arriving during SRIOV enablement
@@ -3519,6 +3519,7 @@ static int rvu_enable_sriov(struct rvu *rvu)
 	if (err) {
 		rvu_disable_afvf_intr(rvu);
 		rvu_mbox_destroy(&rvu->afvf_wq_info);
+		cn20k_free_mbox_memory_type(rvu, TYPE_AFVF);
 		return err;
 	}
 
@@ -3555,13 +3556,13 @@ static int rvu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return -EBUSY;
 	}
 
-	rvu = devm_kzalloc(dev, sizeof(*rvu), GFP_KERNEL);
+	rvu = devm_kzalloc_obj(dev, *rvu);
 	if (!rvu) {
 		atomic_set(&device_bound, 0);
 		return -ENOMEM;
 	}
 
-	rvu->hw = devm_kzalloc(dev, sizeof(struct rvu_hwinfo), GFP_KERNEL);
+	rvu->hw = devm_kzalloc_obj(dev, struct rvu_hwinfo);
 	if (!rvu->hw) {
 		devm_kfree(dev, rvu);
 		atomic_set(&device_bound, 0);
@@ -3681,6 +3682,7 @@ err_flr:
 err_mbox:
 	rvu_mbox_destroy(&rvu->afpf_wq_info);
 err_hwsetup:
+	rvu_free_cn20k_mbox_memory(rvu);
 	rvu_cgx_exit(rvu);
 	rvu_fwdata_exit(rvu);
 	rvu_mcs_exit(rvu);
@@ -3723,9 +3725,7 @@ static void rvu_remove(struct pci_dev *pdev)
 	pci_set_drvdata(pdev, NULL);
 
 	devm_kfree(&pdev->dev, rvu->hw);
-	if (is_cn20k(rvu->pdev))
-		cn20k_free_mbox_memory(rvu);
-	kfree(rvu->ng_rvu);
+	rvu_free_cn20k_mbox_memory(rvu);
 	devm_kfree(&pdev->dev, rvu);
 	atomic_set(&device_bound, 0);
 }

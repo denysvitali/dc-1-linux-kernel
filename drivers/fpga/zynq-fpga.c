@@ -557,7 +557,7 @@ static int zynq_fpga_probe(struct platform_device *pdev)
 	struct fpga_manager *mgr;
 	int err;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 	spin_lock_init(&priv->dma_lock);
@@ -598,7 +598,6 @@ static int zynq_fpga_probe(struct platform_device *pdev)
 	err = devm_request_irq(dev, priv->irq, zynq_fpga_isr, 0, dev_name(dev),
 			       priv);
 	if (err) {
-		dev_err(dev, "unable to request IRQ\n");
 		clk_disable_unprepare(priv->clk);
 		return err;
 	}

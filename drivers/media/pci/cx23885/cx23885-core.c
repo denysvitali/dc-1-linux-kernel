@@ -2246,6 +2246,10 @@ static void cx23885_finidev(struct pci_dev *pci_dev)
 	/* unregister stuff */
 	free_irq(pci_dev->irq, dev);
 
+	cancel_work_sync(&dev->cx25840_work);
+	cancel_work_sync(&dev->ir_rx_work);
+	cancel_work_sync(&dev->ir_tx_work);
+
 	pci_disable_device(pci_dev);
 
 	cx23885_dev_unregister(dev);
@@ -2279,16 +2283,10 @@ static int __maybe_unused cx23885_resume(struct device *dev_d)
 static const struct pci_device_id cx23885_pci_tbl[] = {
 	{
 		/* CX23885 */
-		.vendor       = 0x14f1,
-		.device       = 0x8852,
-		.subvendor    = PCI_ANY_ID,
-		.subdevice    = PCI_ANY_ID,
+		PCI_DEVICE(0x14f1, 0x8852),
 	}, {
 		/* CX23887 Rev 2 */
-		.vendor       = 0x14f1,
-		.device       = 0x8880,
-		.subvendor    = PCI_ANY_ID,
-		.subdevice    = PCI_ANY_ID,
+		PCI_DEVICE(0x14f1, 0x8880),
 	}, {
 		/* --- end of list --- */
 	}

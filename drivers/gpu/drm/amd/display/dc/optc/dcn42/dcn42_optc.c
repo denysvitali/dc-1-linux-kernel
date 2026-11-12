@@ -40,13 +40,16 @@
  * results in the parameters.
  */
 
-static bool optc42_get_crc(struct timing_generator *optc, uint8_t idx,
-		   uint32_t *r_cr, uint32_t *g_y, uint32_t *b_cb)
+bool optc42_get_crc(struct timing_generator *optc, uint8_t idx,
+	uint32_t *r_cr, uint32_t *g_y, uint32_t *b_cb)
 {
 	uint32_t field = 0;
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 
-	REG_GET(OTG_CRC_CNTL, OTG_CRC_EN, &field);
+	if (idx == 1 && optc1->tg_mask->OTG_CRC1_EN != 0)
+		REG_GET(OTG_CRC_CNTL, OTG_CRC1_EN, &field);
+	else
+		REG_GET(OTG_CRC_CNTL, OTG_CRC_EN, &field);
 
 	/* Early return if CRC is not enabled for this CRTC */
 	if (!field)
@@ -258,6 +261,7 @@ static struct timing_generator_funcs dcn42_tg_funcs = {
 		.setup_manual_trigger = optc2_setup_manual_trigger,
 		.get_hw_timing = optc1_get_hw_timing,
 		.init_odm = optc3_init_odm,
+		.is_odm_enabled = optc3_is_odm_enabled,
 		.set_long_vtotal = optc35_set_long_vtotal,
 		.is_two_pixels_per_container = optc1_is_two_pixels_per_container,
 		.get_optc_double_buffer_pending = optc3_get_optc_double_buffer_pending,

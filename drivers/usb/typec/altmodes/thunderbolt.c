@@ -274,7 +274,7 @@ static int tbt_altmode_probe(struct typec_altmode *alt)
 {
 	struct tbt_altmode *tbt;
 
-	tbt = devm_kzalloc(&alt->dev, sizeof(*tbt), GFP_KERNEL);
+	tbt = devm_kzalloc_obj(&alt->dev, *tbt);
 	if (!tbt)
 		return -ENOMEM;
 
@@ -284,6 +284,10 @@ static int tbt_altmode_probe(struct typec_altmode *alt)
 
 	alt->desc = "Thunderbolt3";
 	typec_altmode_set_drvdata(alt, tbt);
+
+	if (typec_cable_altmode_unsupported(alt))
+		return 0;
+
 	typec_altmode_set_ops(alt, &tbt_altmode_ops);
 
 	if (!alt->mode_selection && tbt_ready(alt)) {
@@ -302,6 +306,8 @@ static int tbt_altmode_probe(struct typec_altmode *alt)
 static void tbt_altmode_remove(struct typec_altmode *alt)
 {
 	struct tbt_altmode *tbt = typec_altmode_get_drvdata(alt);
+
+	disable_work_sync(&tbt->work);
 
 	for (int i = TYPEC_PLUG_SOP_PP; i >= 0; --i) {
 		if (tbt->plug[i])

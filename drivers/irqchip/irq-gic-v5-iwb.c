@@ -143,7 +143,7 @@ static int gicv5_iwb_irq_domain_translate(struct irq_domain *d, struct irq_fwspe
 			return -EINVAL;
 
 		/*
-		 * param[0] is be the wire
+		 * param[0] is the wire interrupt number
 		 * param[1] is the interrupt type
 		 */
 		*hwirq = fwspec->param[0];
@@ -269,6 +269,8 @@ static int gicv5_iwb_device_probe(struct platform_device *pdev)
 	if (IS_ERR(iwb_node))
 		return PTR_ERR(iwb_node);
 
+	acpi_device_clear_deps(&pdev->dev);
+
 	return 0;
 }
 
@@ -280,8 +282,8 @@ MODULE_DEVICE_TABLE(of, gicv5_iwb_of_match);
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id iwb_acpi_match[] = {
-	{ "ARMH0003", 0 },
-	{}
+	{ .id = "ARMH0003" },
+	{ }
 };
 #endif
 

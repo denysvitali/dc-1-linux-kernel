@@ -13,6 +13,7 @@
 #include <asm/kvm_host.h>
 #include <asm/kvm_hyptrace.h>
 #include <asm/kvm_mmu.h>
+#include <asm/kvm_pkvm.h>
 
 #include "hyp_trace.h"
 
@@ -37,8 +38,6 @@ static struct hyp_trace_clock {
 	u32			shift;
 	struct delayed_work	work;
 	struct completion	ready;
-	struct mutex		lock;
-	bool			running;
 } hyp_clock;
 
 static void __hyp_clock_work(struct work_struct *work)
@@ -61,14 +60,8 @@ static void __hyp_clock_work(struct work_struct *work)
 	if (hyp_clock->mult) {
 		u64 err, cur = delta_cycles;
 
-		if (WARN_ON_ONCE(cur >= hyp_clock->cyc_overflow64)) {
-			__uint128_t tmp = (__uint128_t)cur * hyp_clock->mult;
-
-			cur = tmp >> hyp_clock->shift;
-		} else {
-			cur *= hyp_clock->mult;
-			cur >>= hyp_clock->shift;
-		}
+		WARN_ON_ONCE(cur >= hyp_clock->cyc_overflow64);
+		cur = mul_u64_u32_shr(cur, hyp_clock->mult, hyp_clock->shift);
 		cur += hyp_clock->boot;
 
 		err = abs_diff(cur, boot);
@@ -86,7 +79,7 @@ static void __hyp_clock_work(struct work_struct *work)
 					    err / NSEC_PER_USEC);
 	}
 
-	rate = div64_u64(delta_cycles * NSEC_PER_SEC, delta_boot);
+	rate = mul_u64_u64_div_u64(delta_cycles, NSEC_PER_SEC, delta_boot);
 
 	clocks_calc_mult_shift(&hyp_clock->mult, &hyp_clock->shift,
 			       rate, NSEC_PER_SEC, CLOCK_MAX_CONVERSION_S);
@@ -110,12 +103,9 @@ static void hyp_trace_clock_enable(struct hyp_trace_clock *hyp_clock, bool enabl
 {
 	struct system_time_snapshot snap;
 
-	if (hyp_clock->running == enable)
-		return;
-
 	if (!enable) {
 		cancel_delayed_work_sync(&hyp_clock->work);
-		hyp_clock->running = false;
+		return;
 	}
 
 	ktime_get_snapshot_id(CLOCK_BOOTTIME, &snap);
@@ -128,7 +118,6 @@ static void hyp_trace_clock_enable(struct hyp_trace_clock *hyp_clock, bool enabl
 	INIT_DELAYED_WORK(&hyp_clock->work, __hyp_clock_work);
 	schedule_delayed_work(&hyp_clock->work, msecs_to_jiffies(CLOCK_INIT_MS));
 	wait_for_completion(&hyp_clock->ready);
-	hyp_clock->running = true;
 }
 
 /* Access to this struct within the trace_remote_callbacks are protected by the trace_remote lock */
@@ -157,10 +146,18 @@ static void __unshare_page(unsigned long va)
 
 static int hyp_trace_buffer_alloc_bpages_backing(struct hyp_trace_buffer *trace_buffer, size_t size)
 {
-	int nr_bpages = (PAGE_ALIGN(size) / PAGE_SIZE) + 1;
+	unsigned long nr_bpages;
 	size_t backing_size;
 	void *start;
+	int ret;
 
+	if (is_protected_kvm_enabled()) {
+		trace_buffer->desc->bpages_backing_start = 0;
+		trace_buffer->desc->bpages_backing_size = 0;
+		return 0;
+	}
+
+	nr_bpages = __calc_nr_pages_ring_buffer_desc(size);
 	backing_size = PAGE_ALIGN(sizeof(struct simple_buffer_page) * nr_bpages *
 				  num_possible_cpus());
 
@@ -168,14 +165,23 @@ static int hyp_trace_buffer_alloc_bpages_backing(struct hyp_trace_buffer *trace_
 	if (!start)
 		return -ENOMEM;
 
+	ret = __map_hyp(start, backing_size);
+	if (ret) {
+		free_pages_exact(start, backing_size);
+		return ret;
+	}
+
 	trace_buffer->desc->bpages_backing_start = (unsigned long)start;
 	trace_buffer->desc->bpages_backing_size = backing_size;
 
-	return __map_hyp(start, backing_size);
+	return ret;
 }
 
 static void hyp_trace_buffer_free_bpages_backing(struct hyp_trace_buffer *trace_buffer)
 {
+	if (!trace_buffer->desc->bpages_backing_start)
+		return;
+
 	free_pages_exact((void *)trace_buffer->desc->bpages_backing_start,
 			 trace_buffer->desc->bpages_backing_size);
 }
@@ -228,18 +234,22 @@ static int hyp_trace_buffer_share_hyp(struct hyp_trace_buffer *trace_buffer)
 static struct trace_buffer_desc *hyp_trace_load(unsigned long size, void *priv)
 {
 	struct hyp_trace_buffer *trace_buffer = priv;
+	size_t desc_size, tb_desc_size;
 	struct hyp_trace_desc *desc;
-	size_t desc_size;
 	int ret;
 
 	if (WARN_ON(trace_buffer->desc))
 		return ERR_PTR(-EINVAL);
 
-	desc_size = trace_buffer_desc_size(size, num_possible_cpus());
+	tb_desc_size = trace_buffer_desc_size(size, num_possible_cpus());
+	desc_size = size_add(tb_desc_size, offsetof(struct hyp_trace_desc, trace_buffer_desc));
 	if (desc_size == SIZE_MAX)
 		return ERR_PTR(-E2BIG);
 
 	desc_size = PAGE_ALIGN(desc_size);
+	if (!desc_size)
+		return ERR_PTR(-E2BIG);
+
 	desc = (struct hyp_trace_desc *)alloc_pages_exact(desc_size, GFP_KERNEL);
 	if (!desc)
 		return ERR_PTR(-ENOMEM);
@@ -255,7 +265,7 @@ static struct trace_buffer_desc *hyp_trace_load(unsigned long size, void *priv)
 	if (ret)
 		goto err_free_desc;
 
-	ret = trace_remote_alloc_buffer(&desc->trace_buffer_desc, desc_size, size,
+	ret = trace_remote_alloc_buffer(&desc->trace_buffer_desc, tb_desc_size, size,
 					cpu_possible_mask);
 	if (ret)
 		goto err_free_backing;
@@ -264,7 +274,7 @@ static struct trace_buffer_desc *hyp_trace_load(unsigned long size, void *priv)
 	if (ret)
 		goto err_free_buffer;
 
-	ret = kvm_call_hyp_nvhe(__tracing_load, (unsigned long)desc, desc_size);
+	ret = pkvm_call_hyp_req(__tracing_load, desc, desc_size);
 	if (ret)
 		goto err_unload_pages;
 
@@ -304,9 +314,15 @@ static void hyp_trace_unload(struct trace_buffer_desc *desc, void *priv)
 
 static int hyp_trace_enable_tracing(bool enable, void *priv)
 {
+	int ret;
+
 	hyp_trace_clock_enable(&hyp_clock, enable);
 
-	return kvm_call_hyp_nvhe(__tracing_enable, enable);
+	ret = kvm_call_hyp_nvhe(__tracing_enable, enable);
+	if (ret)
+		hyp_trace_clock_enable(&hyp_clock, !enable);
+
+	return ret;
 }
 
 static int hyp_trace_swap_reader_page(unsigned int cpu, void *priv)
@@ -391,13 +407,17 @@ static struct trace_remote_callbacks trace_remote_callbacks = {
 
 static const char *__hyp_enter_exit_reason_str(u8 reason);
 
-#include <asm/kvm_define_hypevents.h>
+struct remote_event_format_hyp_printk;
+static void __hyp_trace_printk(struct remote_event_format_hyp_printk *entry, struct trace_seq *seq);
+
+#include "define_hypevents.h"
 
 static const char *__hyp_enter_exit_reason_str(u8 reason)
 {
 	static const char strs[][12] = {
 		"smc",
 		"hvc",
+		"sys",
 		"psci",
 		"host_abort",
 		"guest_exit",
@@ -409,6 +429,61 @@ static const char *__hyp_enter_exit_reason_str(u8 reason)
 	return strs[min(reason, HYP_REASON_UNKNOWN)];
 }
 
+static void __hyp_trace_printk(struct remote_event_format_hyp_printk *entry, struct trace_seq *seq)
+{
+	const struct hyp_string_fmt *hyp_str_fmt;
+	const char *fmt;
+
+	trace_seq_putc(seq, ' ');
+
+	if (entry->fmt_id >= (__hyp_string_fmts_end - __hyp_string_fmts_start)) {
+		trace_seq_printf(seq, "Unknown hyp_string_fmt ID %u\n", entry->fmt_id);
+		return;
+	}
+
+	hyp_str_fmt = &__hyp_string_fmts_start[entry->fmt_id];
+	fmt = hyp_str_fmt->fmt;
+
+	switch (hyp_str_fmt->nr_args) {
+	case 0:
+		trace_seq_puts(seq, fmt);
+		break;
+	case 1:
+		trace_seq_printf(seq, fmt, entry->args[0]);
+		break;
+	case 2:
+		trace_seq_printf(seq, fmt, entry->args[0], entry->args[1]);
+		break;
+	case 3:
+		trace_seq_printf(seq, fmt, entry->args[0], entry->args[1], entry->args[2]);
+		break;
+	case 4:
+		trace_seq_printf(seq, fmt, entry->args[0], entry->args[1], entry->args[2],
+				 entry->args[3]);
+		break;
+	case 5:
+		trace_seq_printf(seq, fmt, entry->args[0], entry->args[1], entry->args[2],
+				 entry->args[3], entry->args[4]);
+		break;
+	case 6:
+		trace_seq_printf(seq, fmt, entry->args[0], entry->args[1], entry->args[2],
+				 entry->args[3], entry->args[4], entry->args[5]);
+		break;
+	case 7:
+		trace_seq_printf(seq, fmt, entry->args[0], entry->args[1], entry->args[2],
+				 entry->args[3], entry->args[4], entry->args[5], entry->args[6]);
+		break;
+	default:
+		trace_seq_printf(seq, fmt, entry->args[0], entry->args[1],
+				 entry->args[2], entry->args[3], entry->args[4], entry->args[5],
+				 entry->args[6], entry->args[7]);
+		break;
+	}
+
+	if (trace_seq_used(seq) && seq->buffer[trace_seq_used(seq) - 1] != '\n')
+		trace_seq_putc(seq, '\n');
+}
+
 static void __init hyp_trace_init_events(void)
 {
 	struct hyp_event_id *hyp_event_id = __hyp_event_ids_start;
@@ -418,6 +493,9 @@ static void __init hyp_trace_init_events(void)
 	/* Events on both sides hypervisor are sorted */
 	for (; event < __hyp_events_end; event++, hyp_event_id++, id++)
 		event->id = hyp_event_id->id = id;
+
+	WARN(__hyp_string_fmts_end - __hyp_string_fmts_start > U16_MAX + 1,
+	     "Too many trace_hyp_printk() callsites\n");
 }
 
 int __init kvm_hyp_trace_init(void)

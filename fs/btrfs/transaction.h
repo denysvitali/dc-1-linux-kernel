@@ -7,12 +7,12 @@
 #define BTRFS_TRANSACTION_H
 
 #include <linux/atomic.h>
+#include <linux/build_bug.h>
 #include <linux/refcount.h>
 #include <linux/list.h>
 #include <linux/time64.h>
 #include <linux/mutex.h>
 #include <linux/wait.h>
-#include <linux/xarray.h>
 #include "btrfs_inode.h"
 #include "delayed-ref.h"
 
@@ -23,6 +23,7 @@ struct btrfs_fs_info;
 struct btrfs_root_item;
 struct btrfs_root;
 struct btrfs_path;
+struct extent_buffer;
 
 /*
  * Signal that a direct IO write is in progress, to avoid deadlock for sync
@@ -46,7 +47,6 @@ enum btrfs_trans_state {
 
 #define BTRFS_TRANS_HAVE_FREE_BGS	0
 #define BTRFS_TRANS_DIRTY_BG_RUN	1
-#define BTRFS_TRANS_CACHE_ENOSPC	2
 
 struct btrfs_transaction {
 	u64 transid;
@@ -77,32 +77,15 @@ struct btrfs_transaction {
 	struct list_head dev_update_list;
 	struct list_head switch_commits;
 	struct list_head dirty_bgs;
-
-	/*
-	 * There is no explicit lock which protects io_bgs, rather its
-	 * consistency is implied by the fact that all the sites which modify
-	 * it do so under some form of transaction critical section, namely:
-	 *
-	 * - btrfs_start_dirty_block_groups - This function can only ever be
-	 *   run by one of the transaction committers. Refer to
-	 *   BTRFS_TRANS_DIRTY_BG_RUN usage in btrfs_commit_transaction
-	 *
-	 * - btrfs_write_dirty_blockgroups - this is called by
-	 *   commit_cowonly_roots from transaction critical section
-	 *   (TRANS_STATE_COMMIT_DOING)
-	 *
-	 * - btrfs_cleanup_dirty_bgs - called on transaction abort
-	 */
-	struct list_head io_bgs;
 	struct list_head dropped_roots;
 	struct extent_io_tree pinned_extents;
 
 	/*
-	 * we need to make sure block group deletion doesn't race with
-	 * free space cache writeout.  This mutex keeps them from stomping
-	 * on each other
+	 * We need to make sure block group deletion doesn't race with the
+	 * dirty block group item updates done outside the commit critical
+	 * section. This mutex keeps them from stomping on each other.
 	 */
-	struct mutex cache_write_mutex;
+	struct mutex dirty_bgs_update_mutex;
 	spinlock_t dirty_bgs_lock;
 	/* Protected by spin lock fs_info->unused_bgs_lock. */
 	struct list_head deleted_bgs;
@@ -118,23 +101,17 @@ struct btrfs_transaction {
 	wait_queue_head_t pending_wait;
 };
 
-enum {
-	ENUM_BIT(__TRANS_FREEZABLE),
-	ENUM_BIT(__TRANS_START),
-	ENUM_BIT(__TRANS_ATTACH),
-	ENUM_BIT(__TRANS_JOIN),
-	ENUM_BIT(__TRANS_JOIN_NOLOCK),
-	ENUM_BIT(__TRANS_DUMMY),
-	ENUM_BIT(__TRANS_JOIN_NOSTART),
-};
+/*
+ * Number of extent buffers a transaction handle tracks for writeback
+ * inhibition. The CLOCK reference bits pack into a u32 so this must not exceed
+ * 32, and keeping it a power of two lets the compiler reduce the CLOCK hand
+ * modulo to a mask.
+ */
+#define BTRFS_INHIBITED_EBS_SLOTS				8
 
-#define TRANS_START		(__TRANS_START | __TRANS_FREEZABLE)
-#define TRANS_ATTACH		(__TRANS_ATTACH)
-#define TRANS_JOIN		(__TRANS_JOIN | __TRANS_FREEZABLE)
-#define TRANS_JOIN_NOLOCK	(__TRANS_JOIN_NOLOCK)
-#define TRANS_JOIN_NOSTART	(__TRANS_JOIN_NOSTART)
-
-#define TRANS_EXTWRITERS	(__TRANS_START | __TRANS_ATTACH)
+static_assert(BTRFS_INHIBITED_EBS_SLOTS <= 32);
+static_assert(BTRFS_INHIBITED_EBS_SLOTS != 0 &&
+	      (BTRFS_INHIBITED_EBS_SLOTS & (BTRFS_INHIBITED_EBS_SLOTS - 1)) == 0);
 
 struct btrfs_trans_handle {
 	u64 transid;
@@ -163,8 +140,14 @@ struct btrfs_trans_handle {
 	struct btrfs_fs_info *fs_info;
 	struct list_head new_bgs;
 	struct btrfs_block_rsv delayed_rsv;
-	/* Extent buffers with writeback inhibited by this handle. */
-	struct xarray writeback_inhibited_ebs;
+
+	/* Extent buffers this handle has inhibited writeback on. */
+	struct extent_buffer *inhibited_ebs[BTRFS_INHIBITED_EBS_SLOTS];
+	/* CLOCK reference bit per slot. */
+	u32 inhibited_ebs_referenced;
+	u32 nr_inhibited_ebs;
+	/* CLOCK hand. */
+	u32 inhibited_ebs_hand;
 };
 
 /*
@@ -269,7 +252,7 @@ do {										\
  * Call btrfs_abort_transaction() as early as possible when an error condition
  * is detected, that way the exact stack trace is reported for some errors.
  *
- * Error number must be negative as it encodes wheather it's the first abort.
+ * Error number must be negative as it encodes whether it's the first abort.
  */
 #define btrfs_abort_transaction(trans, error)		\
 do {								\
@@ -286,6 +269,17 @@ do {								\
 				  __LINE__, __error);		\
 } while (0)
 
+#ifdef CONFIG_BTRFS_FS_RUN_SANITY_TESTS
+bool btrfs_is_dummy_transaction(const struct btrfs_trans_handle *trans);
+void btrfs_init_dummy_trans(struct btrfs_trans_handle *trans,
+			    struct btrfs_fs_info *fs_info);
+#else
+static inline bool btrfs_is_dummy_transaction(const struct btrfs_trans_handle *trans)
+{
+	return false;
+}
+#endif
+
 int btrfs_end_transaction(struct btrfs_trans_handle *trans);
 struct btrfs_trans_handle *btrfs_start_transaction(struct btrfs_root *root,
 						   unsigned int num_items);
@@ -293,7 +287,6 @@ struct btrfs_trans_handle *btrfs_start_transaction_fallback_global_rsv(
 					struct btrfs_root *root,
 					unsigned int num_items);
 struct btrfs_trans_handle *btrfs_join_transaction(struct btrfs_root *root);
-struct btrfs_trans_handle *btrfs_join_transaction_spacecache(struct btrfs_root *root);
 struct btrfs_trans_handle *btrfs_join_transaction_nostart(struct btrfs_root *root);
 struct btrfs_trans_handle *btrfs_attach_transaction(struct btrfs_root *root);
 struct btrfs_trans_handle *btrfs_attach_transaction_barrier(

@@ -335,7 +335,7 @@ static const struct dw_pcie_host_ops artpec6_pcie_host_ops = {
 	.init = artpec6_pcie_host_init,
 };
 
-static void artpec6_pcie_ep_init(struct dw_pcie_ep *ep)
+static int artpec6_pcie_ep_init(struct dw_pcie_ep *ep)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	struct artpec6_pcie *artpec6_pcie = to_artpec6_pcie(pci);
@@ -344,6 +344,8 @@ static void artpec6_pcie_ep_init(struct dw_pcie_ep *ep)
 	artpec6_pcie_init_phy(artpec6_pcie);
 	artpec6_pcie_deassert_core_reset(artpec6_pcie);
 	artpec6_pcie_wait_for_phy(artpec6_pcie);
+
+	return 0;
 }
 
 static int artpec6_pcie_raise_irq(struct dw_pcie_ep *ep, u8 func_no,
@@ -399,11 +401,11 @@ static int artpec6_pcie_probe(struct platform_device *pdev)
 	variant = (enum artpec_pcie_variants)data->variant;
 	mode = (enum dw_pcie_device_mode)data->mode;
 
-	artpec6_pcie = devm_kzalloc(dev, sizeof(*artpec6_pcie), GFP_KERNEL);
+	artpec6_pcie = devm_kzalloc_obj(dev, *artpec6_pcie);
 	if (!artpec6_pcie)
 		return -ENOMEM;
 
-	pci = devm_kzalloc(dev, sizeof(*pci), GFP_KERNEL);
+	pci = devm_kzalloc_obj(dev, *pci);
 	if (!pci)
 		return -ENOMEM;
 

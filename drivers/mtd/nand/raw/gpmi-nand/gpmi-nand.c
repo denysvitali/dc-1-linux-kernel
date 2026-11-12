@@ -7,6 +7,7 @@
  */
 #include <linux/cleanup.h>
 #include <linux/clk.h>
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/sched/task_stack.h>
@@ -732,6 +733,31 @@ static int common_nfc_set_geometry(struct gpmi_nand_data *this)
 	return err;
 }
 
+#ifdef CONFIG_DEBUG_FS
+static void bch_remove_debugfs(void *data)
+{
+	struct gpmi_nand_data *this = data;
+
+	debugfs_remove_recursive(this->dbg_root);
+	this->dbg_root = NULL;
+}
+
+static void bch_create_debugfs(struct gpmi_nand_data *this)
+{
+	struct bch_geometry *bch_geo = &this->bch_geometry;
+
+	this->dbg_root = debugfs_create_dir("gpmi-nand", NULL);
+	this->dbg_bch_geo.data = (void *)bch_geo;
+	this->dbg_bch_geo.size = sizeof(struct bch_geometry);
+	this->raw_mode = true;
+	debugfs_create_blob("bch_geometry", 0444, this->dbg_root, &this->dbg_bch_geo);
+	debugfs_create_bool("raw_mode", 0444, this->dbg_root, &this->raw_mode);
+	devm_add_action_or_reset(this->dev, bch_remove_debugfs, this);
+}
+#else
+static void bch_create_debugfs(struct gpmi_nand_data *this) {}
+#endif /* CONFIG_DEBUG_FS */
+
 /* Configures the geometry for BCH.  */
 static int bch_set_geometry(struct gpmi_nand_data *this)
 {
@@ -1361,7 +1387,7 @@ static int gpmi_alloc_dma_buffer(struct gpmi_nand_data *this)
 		goto error_alloc;
 
 	this->auxiliary_virt = dma_alloc_coherent(dev, geo->auxiliary_size,
-					&this->auxiliary_phys, GFP_DMA);
+					&this->auxiliary_phys, GFP_KERNEL);
 	if (!this->auxiliary_virt)
 		goto error_alloc;
 
@@ -2245,7 +2271,7 @@ static int nand_boot_init(struct gpmi_nand_data  *this)
 {
 	nand_boot_set_geometry(this);
 
-	/* This is ROM arch-specific initilization before the BBT scanning. */
+	/* This is ROM arch-specific initialization before the BBT scanning. */
 	if (GPMI_IS_MX23(this))
 		return mx23_boot_init(this);
 	return 0;
@@ -2281,6 +2307,9 @@ static int gpmi_init_last(struct gpmi_nand_data *this)
 	ret = gpmi_set_geometry(this);
 	if (ret)
 		return ret;
+
+	/* save BCH geometry to debugfs if CONFIG_DEBUG_FS is enabled */
+	bch_create_debugfs(this);
 
 	/* Init the nand_ecc_ctrl{} */
 	ecc->read_page	= gpmi_ecc_read_page;
@@ -2758,7 +2787,7 @@ static int gpmi_nand_probe(struct platform_device *pdev)
 	struct gpmi_nand_data *this;
 	int ret;
 
-	this = devm_kzalloc(&pdev->dev, sizeof(*this), GFP_KERNEL);
+	this = devm_kzalloc_obj(&pdev->dev, *this);
 	if (!this)
 		return -ENOMEM;
 

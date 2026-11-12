@@ -201,8 +201,7 @@ static int da8xx_rproc_get_internal_memories(struct platform_device *pdev,
 	struct resource *res;
 	int i;
 
-	drproc->mem = devm_kcalloc(dev, num_mems, sizeof(*drproc->mem),
-				   GFP_KERNEL);
+	drproc->mem = devm_kzalloc_objs(dev, *drproc->mem, num_mems);
 	if (!drproc->mem)
 		return -ENOMEM;
 
@@ -298,7 +297,7 @@ static int da8xx_rproc_probe(struct platform_device *pdev)
 					handle_event, 0, "da8xx-remoteproc",
 					rproc);
 	if (ret)
-		return dev_err_probe(dev, ret, "devm_request_threaded_irq error\n");
+		return ret;
 
 	/*
 	 * rproc_add() can end up enabling the DSP's clk with the DSP

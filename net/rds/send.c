@@ -114,8 +114,13 @@ static void release_in_xmit(struct rds_conn_path *cp)
 	 * hot path and finding waiters is very rare.  We don't want to walk
 	 * the system-wide hashed waitqueue buckets in the fast path only to
 	 * almost never find waiters.
+	 *
+	 * wq_has_sleeper() supplies the full barrier that orders the wait
+	 * queue read after the bit clear; clear_bit_unlock() alone is only
+	 * a release and would let this check read a stale empty queue,
+	 * losing the wake-up.
 	 */
-	if (waitqueue_active(&cp->cp_waitq))
+	if (wq_has_sleeper(&cp->cp_waitq))
 		wake_up_all(&cp->cp_waitq);
 }
 
@@ -200,6 +205,14 @@ int rds_send_xmit(struct rds_conn_path *cp)
 restart:
 	batch_count = 0;
 
+	/* The drop processing after over_batch relies on
+	 * rds_send_remove_from_sock() emptying to_be_dropped entry by
+	 * entry; warn if that post-condition ever stops holding, and
+	 * re-initialize the list head.
+	 */
+	WARN_ON_ONCE(!list_empty(&to_be_dropped));
+	INIT_LIST_HEAD(&to_be_dropped);
+
 	/*
 	 * sendmsg calls here after having queued its message on the send
 	 * queue.  We only have one task feeding the connection at a time.  If
@@ -231,8 +244,11 @@ restart:
 	WRITE_ONCE(cp->cp_send_gen, send_gen);
 
 	/*
-	 * rds_conn_shutdown() sets the conn state and then tests RDS_IN_XMIT,
-	 * we do the opposite to avoid races.
+	 * rds_conn_shutdown() sets the conn state and then acquires
+	 * RDS_IN_XMIT; we take the lock first and then check the state.
+	 * Ownership is decided by the atomic RMW on the cp_flags word:
+	 * if the teardown won the bit we back off here, and if we won
+	 * it the teardown waits until we release it.
 	 */
 	if (!rds_conn_path_up(cp)) {
 		release_in_xmit(cp);
@@ -339,9 +355,21 @@ restart:
 			    (rm->rdma.op_active &&
 			    test_bit(RDS_MSG_RETRANSMITTED, &rm->m_flags))) {
 				spin_lock_irqsave(&cp->cp_lock, flags);
-				if (test_and_clear_bit(RDS_MSG_ON_CONN, &rm->m_flags))
-					list_move(&rm->m_conn_item, &to_be_dropped);
-				spin_unlock_irqrestore(&cp->cp_lock, flags);
+				if (test_and_clear_bit(RDS_MSG_ON_CONN,
+						       &rm->m_flags)) {
+					/* our ref is put after the batch */
+					list_move(&rm->m_conn_item,
+						  &to_be_dropped);
+					spin_unlock_irqrestore(&cp->cp_lock,
+							       flags);
+				} else {
+					/* already off the conn list; drop
+					 * the ref taken above ourselves
+					 */
+					spin_unlock_irqrestore(&cp->cp_lock,
+							       flags);
+					rds_message_put(rm);
+				}
 				continue;
 			}
 
@@ -971,11 +999,8 @@ static int rds_rm_size(struct msghdr *msg, int num_sgs,
 				return -EINVAL;
 			if (vct->indx >= vct->len) {
 				vct->len += vct->incr;
-				tmp_iov =
-					krealloc(vct->vec,
-						 vct->len *
-						 sizeof(struct rds_iov_vector),
-						 GFP_KERNEL);
+				tmp_iov = krealloc_array(vct->vec, vct->len,
+							 sizeof(*vct->vec), GFP_KERNEL);
 				if (!tmp_iov) {
 					vct->len -= vct->incr;
 					return -ENOMEM;
@@ -1231,7 +1256,11 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 		lock_sock(sk);
 		daddr = rs->rs_conn_addr;
 		dport = rs->rs_conn_port;
-		scope_id = rs->rs_bound_scope_id;
+		/* The connected peer's scope for a link-local peer, else
+		 * the bound scope, as an explicit send to that peer would
+		 * compute below.
+		 */
+		scope_id = rs->rs_conn_scope_id ?: rs->rs_bound_scope_id;
 		release_sock(sk);
 	}
 
@@ -1317,7 +1346,8 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 	/* rds_conn_create has a spinlock that runs with IRQ off.
 	 * Caching the conn in the socket helps a lot. */
 	if (rs->rs_conn && ipv6_addr_equal(&rs->rs_conn->c_faddr, &daddr) &&
-	    rs->rs_tos == rs->rs_conn->c_tos) {
+	    rs->rs_tos == rs->rs_conn->c_tos &&
+	    rs->rs_conn->c_dev_if == scope_id) {
 		conn = rs->rs_conn;
 	} else {
 		conn = rds_conn_create_outgoing(sock_net(sock->sk),

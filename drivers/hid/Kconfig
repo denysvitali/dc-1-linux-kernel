@@ -433,6 +433,19 @@ config HOLTEK_FF
 	  Say Y here if you have a Holtek On Line Grip based game controller
 	  and want to have force feedback support for it.
 
+config HID_HYPERX
+	tristate "HyperX microphones"
+	depends on USB_HID
+	help
+	  Support for the mute button of HyperX microphones.
+
+	  The button is handled in the device firmware and only reports the
+	  resulting mute state through a vendor-defined collection, so without
+	  this driver userspace never learns that the microphone was muted.
+
+	  Supported devices:
+	  - HyperX QuadCast 2
+
 config HID_VIVALDI_COMMON
 	tristate
 	help
@@ -485,6 +498,19 @@ config HID_GT683R
 	Currently the following devices are know to be supported:
 	  - MSI GT683R
 
+config HID_MSI
+	tristate "MSI Claw Gamepad Support"
+	depends on USB_HID
+	select NEW_LEDS
+	select LEDS_CLASS
+	select LEDS_CLASS_MULTICOLOR
+	help
+	Support for the MSI Claw RGB and controller configuration
+
+	Say Y here to include configuration interface support for the MSI Claw Line
+	of Handheld Console Controllers. Say M here to compile this driver as a
+	module. The module will be called hid-msi.
+
 config HID_KEYTOUCH
 	tristate "Keytouch HID devices"
 	help
@@ -500,15 +526,6 @@ config HID_KYE
 	- EasyPen i405X tablet
 	- MousePen i608X tablet
 	- EasyPen M610X tablet
-
-config HID_KYSONA
-	tristate "Kysona devices"
-	depends on USB_HID
-	help
-	Support for Kysona mice.
-
-	Say Y here if you have a Kysona M600 mouse
-	and want to be able to read its battery capacity.
 
 config HID_UCLOGIC
 	tristate "UC-Logic"
@@ -841,12 +858,16 @@ config HID_NINTENDO
 	tristate "Nintendo Joy-Con, NSO, and Pro Controller support"
 	depends on NEW_LEDS
 	depends on LEDS_CLASS
+	depends on USB_HID
 	select POWER_SUPPLY
 	help
-	Adds support for the Nintendo Switch Joy-Cons, NSO, Pro Controller.
-	All controllers support bluetooth, and the Pro Controller also supports
-	its USB mode. This also includes support for the Nintendo Switch Online
-	Controllers which include the NES, Genesis, SNES, and N64 controllers.
+	Adds support for the Nintendo Switch Joy-Cons, NSO, Pro Controller, as
+	well as Nintendo Switch 2 Joy-Cons, Pro Controller, and NSO GameCube
+	controllers. All Switch controllers support bluetooth, and the Pro
+	Controller also supports its USB mode. This also includes support for
+	the Nintendo Switch Online Controllers which include the NES, Genesis,
+	SNES, and N64 controllers. Switch 2 controllers currently only support
+	USB mode.
 
 	To compile this driver as a module, choose M here: the
 	module will be called hid-nintendo.
@@ -856,10 +877,21 @@ config NINTENDO_FF
 	depends on HID_NINTENDO
 	select INPUT_FF_MEMLESS
 	help
-	Say Y here if you have a Nintendo Switch controller and want to enable
-	force feedback support for it. This works for both joy-cons, the pro
-	controller, and the NSO N64 controller. For the pro controller, both
-	rumble motors can be controlled individually.
+	Say Y here if you have a Nintendo Switch or Switch 2 controller and want
+	to enable force feedback support for it. This works for Joy-Cons, the Pro
+	Controllers, and the NSO N64 and GameCube controller. For the Pro
+	Controller, both rumble motors can be controlled individually.
+
+config NINTENDO_SWITCH2_USB
+	tristate "Wired Nintendo Switch 2 controller support"
+	depends on HID_NINTENDO
+	depends on USB
+	help
+	Say Y here if you want to enable support for wired Nintendo Switch 2
+	controllers.
+
+	To compile this driver as a module, choose M here: the
+	module will be called hid-nintendo-switch2-usb.
 
 config HID_NTI
 	tristate "NTI keyboard adapters"
@@ -1048,6 +1080,7 @@ config HID_PXRC
 
 config HID_RAPOO
 	tristate "Rapoo non-fully HID-compliant devices"
+	depends on USB_HID
 	help
 	Support for Rapoo devices that are not fully compliant with the
 	HID standard.
@@ -1078,6 +1111,15 @@ config HID_ROCCAT
 	Support for Roccat devices.
 	Say Y here if you have a Roccat mouse or keyboard and want
 	support for its special functionalities.
+
+config HID_ROCCAT_KONE_KUNIT_TEST
+	bool "KUnit tests for the Roccat Kone driver" if !KUNIT_ALL_TESTS
+	depends on HID_ROCCAT=y && KUNIT=y
+	default KUNIT_ALL_TESTS
+	help
+	  Enable the KUnit regression tests for the Roccat Kone driver,
+	  covering bounds checking of device-supplied profile indices.
+	  If unsure, say N.
 
 config HID_SAITEK
 	tristate "Saitek (Mad Catz) non-fully HID-compliant devices"
@@ -1174,7 +1216,8 @@ config HID_STEELSERIES
 	depends on USB_HID
 	help
 	Support for Steelseries SRW-S1 steering wheel, and the Steelseries
-	Arctis 1 Wireless for XBox headset.
+	Arctis 1 Wireless for XBox, Arctis 7 (2018), Arctis 9, and Arctis
+	Nova headsets.
 
 config HID_SUNPLUS
 	tristate "Sunplus wireless desktop"
@@ -1214,6 +1257,16 @@ config HID_HYPERV_MOUSE
 	depends on HYPERV_VMBUS
 	help
 	Select this option to enable the Hyper-V mouse driver.
+
+config HID_HYPERV_MOUSE_KUNIT_TEST
+	bool "KUnit tests for Hyper-V mouse driver" if !KUNIT_ALL_TESTS
+	depends on KUNIT && (HID_HYPERV_MOUSE = KUNIT || KUNIT = y)
+	default KUNIT_ALL_TESTS
+	help
+	  Builds unit tests for the Hyper-V synthetic HID driver.
+	  These tests exercise the initial device-info parser with
+	  malformed host-provided HID descriptors and are only useful
+	  for kernel developers running KUnit.
 
 config HID_SMARTJOYPLUS
 	tristate "SmartJoy PLUS PS2/USB adapter support"
@@ -1311,6 +1364,18 @@ config HID_UNIVERSAL_PIDFF
 	  high precision direct drive devices.
 
 	  Supports Moza Racing, Cammus, VRS, FFBeast and more.
+
+config HID_PULSAR
+	tristate "Pulsar gaming mouse support"
+	depends on USB_HID
+	select POWER_SUPPLY
+	help
+	  Support for Pulsar gaming mice (X2 V2, X2H, X2A, Xlite V3)
+	  connected via 1kHz/4kHz USB dongle or wired.
+	  Provides battery level, voltage, and charging status
+	  monitoring via the power supply framework.
+
+	  Additional supported devices: Kysona M600, ATK VXE R1 SE+
 
 config HID_WACOM
 	tristate "Wacom Intuos/Graphire tablet support (USB)"

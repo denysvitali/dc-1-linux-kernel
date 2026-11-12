@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <stdlib.h>
 
 #include "builtin.h"
 #include "util/color.h"
@@ -56,6 +57,7 @@ struct timechart {
 	struct per_pid		*all_data;
 	struct power_event	*power_events;
 	struct wake_event	*wake_events;
+	struct perf_session	*session;
 	int			proc_num;
 	unsigned int		numcpus;
 	u64			min_freq,	/* Lowest CPU frequency seen */
@@ -67,6 +69,7 @@ struct timechart {
 				with_backtrace,
 				topology;
 	bool			force;
+	bool			use_tui;
 	/* IO related settings */
 	bool			io_only,
 				skip_eagain;
@@ -299,7 +302,7 @@ static void pid_put_sample(struct timechart *tchart, int pid, int type,
 	sample->type = type;
 	sample->next = c->samples;
 	sample->cpu = cpu;
-	sample->backtrace = backtrace ? strdup(backtrace) : NULL;
+	sample->backtrace = backtrace;
 	c->samples = sample;
 
 	if (sample->type == TYPE_RUNNING && end > start && start > 0) {
@@ -349,10 +352,6 @@ static int process_exit_event(const struct perf_tool *tool,
 	pid_exit(tchart, event->fork.pid, event->fork.time);
 	return 0;
 }
-
-#ifdef SUPPORT_OLD_POWER_EVENTS
-static int use_old_power_events;
-#endif
 
 static void c_state_start(int cpu, u64 timestamp, int state)
 {
@@ -428,12 +427,14 @@ static void sched_wakeup(struct timechart *tchart, int cpu, u64 timestamp,
 	struct per_pid *p;
 	struct wake_event *we = zalloc(sizeof(*we));
 
-	if (!we)
+	if (!we) {
+		free((char *)backtrace);
 		return;
+	}
 
 	we->time = timestamp;
 	we->waker = waker;
-	we->backtrace = backtrace ? strdup(backtrace) : NULL;
+	we->backtrace = backtrace;
 
 	if ((flags & TRACE_FLAG_HARDIRQ) || (flags & TRACE_FLAG_SOFTIRQ))
 		we->waker = -1;
@@ -460,20 +461,28 @@ static void sched_switch(struct timechart *tchart, int cpu, u64 timestamp,
 			 const char *backtrace)
 {
 	struct per_pid *p = NULL, *prev_p;
+	bool backtrace_used = false;
 
 	prev_p = find_create_pid(tchart, prev_pid);
 
 	p = find_create_pid(tchart, next_pid);
 
-	if (prev_p->current && prev_p->current->state != TYPE_NONE)
+	if (prev_p->current && prev_p->current->state != TYPE_NONE) {
 		pid_put_sample(tchart, prev_pid, TYPE_RUNNING, cpu,
 			       prev_p->current->state_since, timestamp,
 			       backtrace);
+		backtrace_used = true;
+	}
 	if (p && p->current) {
-		if (p->current->state != TYPE_NONE)
+		if (p->current->state != TYPE_NONE) {
+			if (backtrace && backtrace_used)
+				backtrace = strdup(backtrace);
+
 			pid_put_sample(tchart, next_pid, p->current->state, cpu,
 				       p->current->state_since, timestamp,
 				       backtrace);
+			backtrace_used = true;
+		}
 
 		p->current->state_since = timestamp;
 		p->current->state = TYPE_RUNNING;
@@ -487,14 +496,16 @@ static void sched_switch(struct timechart *tchart, int cpu, u64 timestamp,
 		if (prev_state == 0)
 			prev_p->current->state = TYPE_WAITING;
 	}
+
+	if (!backtrace_used)
+		free((char *)backtrace);
 }
 
 /*
  * Returns a malloc'd backtrace string built via open_memstream, or NULL
  * on error.  Caller must free() the returned pointer.
  */
-static char *cat_backtrace(union perf_event *event,
-			   struct perf_sample *sample,
+static char *cat_backtrace(struct perf_sample *sample,
 			   struct machine *machine)
 {
 	struct addr_location al;
@@ -516,9 +527,8 @@ static char *cat_backtrace(union perf_event *event,
 		goto exit;
 
 	if (machine__resolve(machine, &al, sample) < 0) {
-		pr_err("problem processing %s (%u) event at offset %#" PRIx64 ", skipping it.\n",
-		       perf_event__name(event->header.type), event->header.type,
-		       sample->file_offset);
+		pr_err("problem processing SAMPLE (%u) event at offset %#" PRIx64 ", skipping it.\n",
+		       PERF_RECORD_SAMPLE, sample->file_offset);
 		goto exit;
 	}
 
@@ -574,13 +584,12 @@ exit:
 }
 
 typedef int (*tracepoint_handler)(struct timechart *tchart,
-				  struct perf_sample *sample,
-				  const char *backtrace);
+				  struct perf_sample *sample);
 
 static int process_sample_event(const struct perf_tool *tool,
-				union perf_event *event,
+				union perf_event *event __maybe_unused,
 				struct perf_sample *sample,
-				struct machine *machine)
+				struct machine *machine __maybe_unused)
 {
 	struct timechart *tchart = container_of(tool, struct timechart, tool);
 	struct evsel *evsel = sample->evsel;
@@ -595,10 +604,8 @@ static int process_sample_event(const struct perf_tool *tool,
 
 	if (evsel->handler != NULL) {
 		tracepoint_handler f = evsel->handler;
-		char *backtrace = cat_backtrace(event, sample, machine);
 
-		ret = f(tchart, sample, backtrace);
-		free(backtrace);
+		ret = f(tchart, sample);
 	}
 
 	return ret;
@@ -606,8 +613,7 @@ static int process_sample_event(const struct perf_tool *tool,
 
 static int
 process_sample_cpu_idle(struct timechart *tchart __maybe_unused,
-			struct perf_sample *sample,
-			const char *backtrace __maybe_unused)
+			struct perf_sample *sample)
 {
 	u32 state  = perf_sample__intval(sample, "state");
 	u32 cpu_id = perf_sample__intval(sample, "cpu_id");
@@ -627,8 +633,7 @@ process_sample_cpu_idle(struct timechart *tchart __maybe_unused,
 
 static int
 process_sample_cpu_frequency(struct timechart *tchart,
-			     struct perf_sample *sample,
-			     const char *backtrace __maybe_unused)
+			     struct perf_sample *sample)
 {
 	u32 state  = perf_sample__intval(sample, "state");
 	u32 cpu_id = perf_sample__intval(sample, "cpu_id");
@@ -645,12 +650,12 @@ process_sample_cpu_frequency(struct timechart *tchart,
 
 static int
 process_sample_sched_wakeup(struct timechart *tchart,
-			    struct perf_sample *sample,
-			    const char *backtrace)
+			    struct perf_sample *sample)
 {
 	u8 flags  = perf_sample__intval(sample, "common_flags");
 	int waker = perf_sample__intval(sample, "common_pid");
 	int wakee = perf_sample__intval(sample, "pid");
+	char *backtrace;
 
 	/* perf.data is untrusted input — CPU may be absent or corrupted */
 	if (sample->cpu >= MAX_CPUS) {
@@ -658,18 +663,20 @@ process_sample_sched_wakeup(struct timechart *tchart,
 			 sample->file_offset, sample->cpu);
 		return -1;
 	}
+
+	backtrace = cat_backtrace(sample, &tchart->session->machines.host);
 	sched_wakeup(tchart, sample->cpu, sample->time, waker, wakee, flags, backtrace);
 	return 0;
 }
 
 static int
 process_sample_sched_switch(struct timechart *tchart,
-			    struct perf_sample *sample,
-			    const char *backtrace)
+			    struct perf_sample *sample)
 {
 	int prev_pid   = perf_sample__intval(sample, "prev_pid");
 	int next_pid   = perf_sample__intval(sample, "next_pid");
 	u64 prev_state = perf_sample__intval(sample, "prev_state");
+	char *backtrace;
 
 	/* perf.data is untrusted input — CPU may be absent or corrupted */
 	if (sample->cpu >= MAX_CPUS) {
@@ -677,6 +684,8 @@ process_sample_sched_switch(struct timechart *tchart,
 			 sample->file_offset, sample->cpu);
 		return -1;
 	}
+
+	backtrace = cat_backtrace(sample, &tchart->session->machines.host);
 	sched_switch(tchart, sample->cpu, sample->time, prev_pid, next_pid,
 		     prev_state, backtrace);
 	return 0;
@@ -685,8 +694,7 @@ process_sample_sched_switch(struct timechart *tchart,
 #ifdef SUPPORT_OLD_POWER_EVENTS
 static int
 process_sample_power_start(struct timechart *tchart __maybe_unused,
-			   struct perf_sample *sample,
-			   const char *backtrace __maybe_unused)
+			   struct perf_sample *sample)
 {
 	u64 cpu_id = perf_sample__intval(sample, "cpu_id");
 	u64 value  = perf_sample__intval(sample, "value");
@@ -703,8 +711,7 @@ process_sample_power_start(struct timechart *tchart __maybe_unused,
 
 static int
 process_sample_power_end(struct timechart *tchart,
-			 struct perf_sample *sample,
-			 const char *backtrace __maybe_unused)
+			 struct perf_sample *sample)
 {
 	/* perf.data is untrusted input — CPU may be absent or corrupted */
 	if (sample->cpu >= MAX_CPUS) {
@@ -718,8 +725,7 @@ process_sample_power_end(struct timechart *tchart,
 
 static int
 process_sample_power_frequency(struct timechart *tchart,
-			       struct perf_sample *sample,
-			       const char *backtrace __maybe_unused)
+			       struct perf_sample *sample)
 {
 	u64 cpu_id = perf_sample__intval(sample, "cpu_id");
 	u64 value  = perf_sample__intval(sample, "value");
@@ -892,8 +898,7 @@ static int pid_end_io_sample(struct timechart *tchart, int pid, int type,
 
 static int
 process_enter_read(struct timechart *tchart,
-		   struct perf_sample *sample,
-		   const char *backtrace __maybe_unused)
+		   struct perf_sample *sample)
 {
 	long fd = perf_sample__intval(sample, "fd");
 	return pid_begin_io_sample(tchart, sample->tid, IOTYPE_READ,
@@ -902,8 +907,7 @@ process_enter_read(struct timechart *tchart,
 
 static int
 process_exit_read(struct timechart *tchart,
-		  struct perf_sample *sample,
-		  const char *backtrace __maybe_unused)
+		  struct perf_sample *sample)
 {
 	long ret = perf_sample__intval(sample, "ret");
 	return pid_end_io_sample(tchart, sample->tid, IOTYPE_READ,
@@ -912,8 +916,7 @@ process_exit_read(struct timechart *tchart,
 
 static int
 process_enter_write(struct timechart *tchart,
-		    struct perf_sample *sample,
-		    const char *backtrace __maybe_unused)
+		    struct perf_sample *sample)
 {
 	long fd = perf_sample__intval(sample, "fd");
 	return pid_begin_io_sample(tchart, sample->tid, IOTYPE_WRITE,
@@ -922,8 +925,7 @@ process_enter_write(struct timechart *tchart,
 
 static int
 process_exit_write(struct timechart *tchart,
-		   struct perf_sample *sample,
-		   const char *backtrace __maybe_unused)
+		   struct perf_sample *sample)
 {
 	long ret = perf_sample__intval(sample, "ret");
 	return pid_end_io_sample(tchart, sample->tid, IOTYPE_WRITE,
@@ -932,8 +934,7 @@ process_exit_write(struct timechart *tchart,
 
 static int
 process_enter_sync(struct timechart *tchart,
-		   struct perf_sample *sample,
-		   const char *backtrace __maybe_unused)
+		   struct perf_sample *sample)
 {
 	long fd = perf_sample__intval(sample, "fd");
 	return pid_begin_io_sample(tchart, sample->tid, IOTYPE_SYNC,
@@ -942,8 +943,7 @@ process_enter_sync(struct timechart *tchart,
 
 static int
 process_exit_sync(struct timechart *tchart,
-		  struct perf_sample *sample,
-		  const char *backtrace __maybe_unused)
+		  struct perf_sample *sample)
 {
 	long ret = perf_sample__intval(sample, "ret");
 	return pid_end_io_sample(tchart, sample->tid, IOTYPE_SYNC,
@@ -952,8 +952,7 @@ process_exit_sync(struct timechart *tchart,
 
 static int
 process_enter_tx(struct timechart *tchart,
-		 struct perf_sample *sample,
-		 const char *backtrace __maybe_unused)
+		 struct perf_sample *sample)
 {
 	long fd = perf_sample__intval(sample, "fd");
 	return pid_begin_io_sample(tchart, sample->tid, IOTYPE_TX,
@@ -962,8 +961,7 @@ process_enter_tx(struct timechart *tchart,
 
 static int
 process_exit_tx(struct timechart *tchart,
-		struct perf_sample *sample,
-		const char *backtrace __maybe_unused)
+		struct perf_sample *sample)
 {
 	long ret = perf_sample__intval(sample, "ret");
 	return pid_end_io_sample(tchart, sample->tid, IOTYPE_TX,
@@ -972,8 +970,7 @@ process_exit_tx(struct timechart *tchart,
 
 static int
 process_enter_rx(struct timechart *tchart,
-		 struct perf_sample *sample,
-		 const char *backtrace __maybe_unused)
+		 struct perf_sample *sample)
 {
 	long fd = perf_sample__intval(sample, "fd");
 	return pid_begin_io_sample(tchart, sample->tid, IOTYPE_RX,
@@ -982,8 +979,7 @@ process_enter_rx(struct timechart *tchart,
 
 static int
 process_exit_rx(struct timechart *tchart,
-		struct perf_sample *sample,
-		const char *backtrace __maybe_unused)
+		struct perf_sample *sample)
 {
 	long ret = perf_sample__intval(sample, "ret");
 	return pid_end_io_sample(tchart, sample->tid, IOTYPE_RX,
@@ -992,8 +988,7 @@ process_exit_rx(struct timechart *tchart,
 
 static int
 process_enter_poll(struct timechart *tchart,
-		   struct perf_sample *sample,
-		   const char *backtrace __maybe_unused)
+		   struct perf_sample *sample)
 {
 	long fd = perf_sample__intval(sample, "fd");
 	return pid_begin_io_sample(tchart, sample->tid, IOTYPE_POLL,
@@ -1002,8 +997,7 @@ process_enter_poll(struct timechart *tchart,
 
 static int
 process_exit_poll(struct timechart *tchart,
-		  struct perf_sample *sample,
-		  const char *backtrace __maybe_unused)
+		  struct perf_sample *sample)
 {
 	long ret = perf_sample__intval(sample, "ret");
 	return pid_end_io_sample(tchart, sample->tid, IOTYPE_POLL,
@@ -1114,12 +1108,12 @@ static void draw_wakeups(struct timechart *tchart)
 					c = c->next;
 				}
 				c = p->all;
-				while (c) {
-					if (p->pid == we->waker && !from) {
+				while (c && (!from || !to)) {
+					if (c->Y && p->pid == we->waker && !from) {
 						from = c->Y;
 						task_from = strdup(c->comm);
 					}
-					if (p->pid == we->wakee && !to) {
+					if (c->Y && p->pid == we->wakee && !to) {
 						to = c->Y;
 						task_to = strdup(c->comm);
 					}
@@ -1552,6 +1546,73 @@ static void write_svg_file(struct timechart *tchart, const char *filename)
 	svg_close();
 }
 
+static void timechart__release(struct timechart *tchart)
+{
+	struct per_pid *p = tchart->all_data;
+	struct power_event *pwr = tchart->power_events;
+	struct wake_event *we = tchart->wake_events;
+
+	while (p) {
+		struct per_pid *next_pid = p->next;
+		struct per_pidcomm *c = p->all;
+
+		while (c) {
+			struct per_pidcomm *next_comm = c->next;
+			struct cpu_sample *cs = c->samples;
+			struct io_sample *ios = c->io_samples;
+
+			while (cs) {
+				struct cpu_sample *next = cs->next;
+
+				zfree(&cs->backtrace);
+				cs->next = NULL;
+				free(cs);
+
+				cs = next;
+			}
+
+			while (ios) {
+				struct io_sample *next = ios->next;
+
+				ios->next = NULL;
+				free(ios);
+
+				ios = next;
+			}
+
+			zfree(&c->comm);
+			c->next = NULL;
+			free(c);
+
+			c = next_comm;
+		}
+
+		p->next = NULL;
+		free(p);
+
+		p = next_pid;
+	}
+
+	while (pwr) {
+		struct power_event *next = pwr->next;
+
+		pwr->next = NULL;
+		free(pwr);
+
+		pwr = next;
+	}
+
+	while (we) {
+		struct wake_event *next = we->next;
+
+		zfree(&we->backtrace);
+		we->next = NULL;
+		free(we);
+
+		we = next;
+	}
+}
+
 static int process_header(struct perf_file_section *section __maybe_unused,
 			  struct perf_header *ph,
 			  int feat,
@@ -1663,6 +1724,7 @@ static int __cmd_timechart(struct timechart *tchart, const char *output_name)
 	if (IS_ERR(session))
 		return PTR_ERR(session);
 
+	tchart->session = session;
 	symbol__init(perf_session__env(session));
 
 	(void)perf_header__process_sections(&session->header,
@@ -1693,6 +1755,41 @@ static int __cmd_timechart(struct timechart *tchart, const char *output_name)
 		(tchart->last_time - tchart->first_time) / (double)NSEC_PER_SEC, output_name);
 out_delete:
 	perf_session__delete(session);
+	return ret;
+}
+
+/*
+ * Launch the interactive textual based python script via 'perf script' that
+ * finds the script, sets up the python environment and passes the global
+ * input_name (set by -i) to the script as '-i <input_name>'.
+ */
+static int timechart__tui(struct timechart *tchart)
+{
+	struct process_filter *filt;
+	const char **script_argv;
+	int script_argc = 0, nr_args = 5, ret;
+
+	for (filt = process_filter; filt; filt = filt->next)
+		nr_args += 2;
+
+	script_argv = calloc(nr_args + 1, sizeof(*script_argv));
+	if (!script_argv)
+		return -ENOMEM;
+
+	script_argv[script_argc++] = "script";
+	script_argv[script_argc++] = "ttimechart";
+	script_argv[script_argc++] = "--";
+	if (tchart->power_only)
+		script_argv[script_argc++] = "-P";
+	if (tchart->tasks_only)
+		script_argv[script_argc++] = "-T";
+	for (filt = process_filter; filt; filt = filt->next) {
+		script_argv[script_argc++] = "-p";
+		script_argv[script_argc++] = filt->name;
+	}
+
+	ret = cmd_script(script_argc, script_argv);
+	free(script_argv);
 	return ret;
 }
 
@@ -1770,6 +1867,7 @@ static int timechart__io_record(int argc, const char **argv, const char *output_
 		"syscalls:sys_exit_select",
 	};
 	unsigned int poll_events_nr = ARRAY_SIZE(poll_events);
+	int ret;
 
 	rec_argc = common_args_nr +
 		disk_events_nr * 4 +
@@ -1788,7 +1886,7 @@ static int timechart__io_record(int argc, const char **argv, const char *output_
 
 	p = rec_argv;
 	for (i = 0; i < common_args_nr; i++)
-		*p++ = strdup(common_args[i]);
+		*p++ = common_args[i];
 
 	for (i = 0; i < disk_events_nr; i++) {
 		if (!is_valid_tracepoint(disk_events[i])) {
@@ -1797,7 +1895,7 @@ static int timechart__io_record(int argc, const char **argv, const char *output_
 		}
 
 		*p++ = "-e";
-		*p++ = strdup(disk_events[i]);
+		*p++ = disk_events[i];
 		*p++ = "--filter";
 		*p++ = filter;
 	}
@@ -1808,7 +1906,7 @@ static int timechart__io_record(int argc, const char **argv, const char *output_
 		}
 
 		*p++ = "-e";
-		*p++ = strdup(net_events[i]);
+		*p++ = net_events[i];
 		*p++ = "--filter";
 		*p++ = filter;
 	}
@@ -1819,7 +1917,7 @@ static int timechart__io_record(int argc, const char **argv, const char *output_
 		}
 
 		*p++ = "-e";
-		*p++ = strdup(poll_events[i]);
+		*p++ = poll_events[i];
 		*p++ = "--filter";
 		*p++ = filter;
 	}
@@ -1827,7 +1925,11 @@ static int timechart__io_record(int argc, const char **argv, const char *output_
 	for (i = 0; i < (unsigned int)argc; i++)
 		*p++ = argv[i];
 
-	return cmd_record(rec_argc, rec_argv);
+	ret = cmd_record(rec_argc, rec_argv);
+
+	free(rec_argv);
+	free(filter);
+	return ret;
 }
 
 
@@ -1838,6 +1940,7 @@ static int timechart__record(struct timechart *tchart, int argc, const char **ar
 	const char **rec_argv;
 	const char **p;
 	unsigned int record_elems;
+	int ret;
 
 	const char * const common_args[] = {
 		"record", "-a", "-R", "-c", "1", "-o", output_data,
@@ -1873,7 +1976,6 @@ static int timechart__record(struct timechart *tchart, int argc, const char **ar
 #ifdef SUPPORT_OLD_POWER_EVENTS
 	if (!is_valid_tracepoint("power:cpu_idle") &&
 	    is_valid_tracepoint("power:power_start")) {
-		use_old_power_events = 1;
 		power_args_nr = 0;
 	} else {
 		old_power_args_nr = 0;
@@ -1902,24 +2004,27 @@ static int timechart__record(struct timechart *tchart, int argc, const char **ar
 
 	p = rec_argv;
 	for (i = 0; i < common_args_nr; i++)
-		*p++ = strdup(common_args[i]);
+		*p++ = common_args[i];
 
 	for (i = 0; i < backtrace_args_no; i++)
-		*p++ = strdup(backtrace_args[i]);
+		*p++ = backtrace_args[i];
 
 	for (i = 0; i < tasks_args_nr; i++)
-		*p++ = strdup(tasks_args[i]);
+		*p++ = tasks_args[i];
 
 	for (i = 0; i < power_args_nr; i++)
-		*p++ = strdup(power_args[i]);
+		*p++ = power_args[i];
 
 	for (i = 0; i < old_power_args_nr; i++)
-		*p++ = strdup(old_power_args[i]);
+		*p++ = old_power_args[i];
 
 	for (j = 0; j < (unsigned int)argc; j++)
 		*p++ = argv[j];
 
-	return cmd_record(rec_argc, rec_argv);
+	ret = cmd_record(rec_argc, rec_argv);
+
+	free(rec_argv);
+	return ret;
 }
 
 static int
@@ -2011,6 +2116,8 @@ int cmd_timechart(int argc, const char **argv)
 		     "merge events that are merge-dist us apart",
 		     parse_time),
 	OPT_BOOLEAN('f', "force", &tchart.force, "don't complain, do it"),
+	OPT_BOOLEAN(0, "tui", &tchart.use_tui,
+		    "interactive terminal timechart using the ttimechart python script"),
 	OPT_PARENT(timechart_common_options),
 	};
 	const char * const timechart_subcommands[] = { "record", NULL };
@@ -2078,10 +2185,16 @@ int cmd_timechart(int argc, const char **argv)
 	} else if (argc)
 		usage_with_options(timechart_usage, timechart_options);
 
+	if (tchart.use_tui) {
+		ret = timechart__tui(&tchart);
+		goto out;
+	}
+
 	setup_pager();
 
 	ret = __cmd_timechart(&tchart, output_name);
 out:
+	timechart__release(&tchart);
 	zfree(&cpus_cstate_start_times);
 	zfree(&cpus_cstate_state);
 	zfree(&cpus_pstate_start_times);

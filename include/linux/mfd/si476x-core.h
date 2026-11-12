@@ -14,6 +14,7 @@
 
 #include <linux/kfifo.h>
 #include <linux/atomic.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/regmap.h>
 #include <linux/mutex.h>
@@ -93,10 +94,10 @@ enum si476x_power_state {
  * of the @rds_fifo_drainer.
  * @rds_drainer_status_lock: Lock used to guard access to the
  * @rds_drainer_is_working variable.
- * @command: Wait queue for wainting on the command comapletion.
+ * @command: Wait queue for waiting on the command completion.
  * @cts: Clear To Send flag set upon receiving first status with CTS
  * set.
- * @tuning: Wait queue used for wainting for tune/seek comand
+ * @tuning: Wait queue used for waiting for tune/seek command
  * completion.
  * @stc: Similar to @cts, but for the STC bit of the status value.
  * @power_up_parameters: Parameters used as argument for POWER_UP
@@ -104,7 +105,7 @@ enum si476x_power_state {
  * @power_state: Current power state of the device.
  * @supplies: Structure containing handles to all power supplies used
  * by the device (NULL ones are ignored).
- * @gpio_reset: GPIO pin connectet to the RSTB pin of the chip.
+ * @reset: GPIO connected to the RSTB pin of the chip.
  * @pinmux: Chip's configurable pins configuration.
  * @diversity_mode: Chips role when functioning in diversity mode.
  * @is_alive: Chip is initialized and active.
@@ -142,7 +143,7 @@ struct si476x_core {
 
 	struct regulator_bulk_data supplies[4];
 
-	int gpio_reset;
+	struct gpio_desc *reset;
 
 	struct si476x_pinmux pinmux;
 	enum si476x_phase_diversity_mode diversity_mode;

@@ -321,7 +321,7 @@ static struct drm_plane **sun8i_layers_init(struct drm_device *drm,
 	unsigned int phy_index;
 	int i;
 
-	planes = devm_kcalloc(drm->dev, plane_cnt + 1, sizeof(*planes), GFP_KERNEL);
+	planes = devm_kzalloc_objs(drm->dev, *planes, plane_cnt + 1);
 	if (!planes)
 		return ERR_PTR(-ENOMEM);
 
@@ -529,7 +529,7 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
 		return ret;
 	}
 
-	mixer = devm_kzalloc(dev, sizeof(*mixer), GFP_KERNEL);
+	mixer = devm_kzalloc_obj(dev, *mixer);
 	if (!mixer)
 		return -ENOMEM;
 	dev_set_drvdata(dev, mixer);
@@ -785,7 +785,7 @@ static const struct sun8i_mixer_cfg sun8i_v3s_mixer_cfg = {
 		.de_type	= SUN8I_MIXER_DE2,
 		.vi_scaler_num	= 2,
 		.scaler_mask	= 0x3,
-		.scanline_yuv	= 2048,
+		.scanline_yuv	= 1024,
 	},
 	.de_type	= SUN8I_MIXER_DE2,
 	.mod_rate	= 150000000,

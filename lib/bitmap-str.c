@@ -8,6 +8,7 @@
 #include <linux/hex.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/overflow.h>
 #include <linux/string.h>
 
 #include "kstrtox.h"
@@ -75,8 +76,7 @@ static int bitmap_print_to_buf(bool list, char *buf, const unsigned long *maskp,
  * @off: in the string from which we are copying, We copy to @buf
  * @count: the maximum number of bytes to print
  *
- * The sprintf("%*pb[l]") is used indirectly via its cpumap wrapper
- * cpumap_print_to_pagebuf() or directly by drivers to export hexadecimal
+ * The sprintf("%*pb[l]") format is used by drivers to export hexadecimal
  * bitmask and decimal list to userspace by sysfs ABI.
  * Drivers might be using a normal attribute for this kind of ABIs. A
  * normal attribute typically has show entry as below::
@@ -115,9 +115,9 @@ static int bitmap_print_to_buf(bool list, char *buf, const unsigned long *maskp,
  * parameters such as off, count from bin_attribute show entry to this API.
  *
  * The role of cpumap_print_bitmask_to_buf() and cpumap_print_list_to_buf()
- * is similar with cpumap_print_to_pagebuf(),  the difference is that
- * scnprintf("%*pb[l]") mainly serves sysfs attribute with the assumption
- * the destination buffer is exactly one page and won't be more than one page.
+ * is similar to direct sysfs_emit("%*pb[l]") formatting, but the latter
+ * assumes the destination buffer is exactly one page and won't be more than
+ * one page.
  * cpumap_print_bitmask_to_buf() and cpumap_print_list_to_buf(), on the other
  * hand, mainly serves bin_attribute which doesn't work with exact one page,
  * and it can break the size limit of converted decimal list and hexadecimal
@@ -187,10 +187,12 @@ struct region {
 
 static void bitmap_set_region(const struct region *r, unsigned long *bitmap)
 {
-	unsigned int start;
+	unsigned int start = r->start;
 
-	for (start = r->start; start <= r->end; start += r->group_len)
+	do {
 		bitmap_set(bitmap, start, min(r->end - start + 1, r->off));
+	} while (!check_add_overflow(start, r->group_len, &start) &&
+		 start <= r->end);
 }
 
 static int bitmap_check_region(const struct region *r)
@@ -300,7 +302,14 @@ check_pattern:
 	if (*str != '/')
 		return ERR_PTR(-EINVAL);
 
-	return bitmap_getnum(str + 1, &r->group_len, lastbit);
+	str = bitmap_getnum(str + 1, &r->group_len, lastbit);
+	if (IS_ERR(str))
+		return str;
+
+	if (!end_of_region(*str))
+		return ERR_PTR(-EINVAL);
+
+	return end_of_str(*str) ? NULL : str;
 
 no_end:
 	r->end = r->start;
@@ -415,8 +424,12 @@ static const char *bitmap_get_x32_reverse(const char *start,
 			goto out;
 	}
 
-	if (hex_to_bin(*end--) >= 0)
-		return ERR_PTR(-EOVERFLOW);
+	/*
+	 * Eight digits have been consumed and the next character is not a
+	 * separator: another hex digit means the chunk does not fit in 32
+	 * bits, anything else is an illegal character.
+	 */
+	return ERR_PTR(hex_to_bin(*end) >= 0 ? -EOVERFLOW : -EINVAL);
 out:
 	*num = ret;
 	return end;

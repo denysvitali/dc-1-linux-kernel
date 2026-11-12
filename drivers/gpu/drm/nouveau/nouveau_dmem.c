@@ -221,8 +221,8 @@ static vm_fault_t nouveau_dmem_migrate_to_ram(struct vm_fault *vmf)
 	args.start = ALIGN_DOWN(vmf->address, (PAGE_SIZE << order));
 	args.vma = vmf->vma;
 	args.end = args.start + (PAGE_SIZE << order);
-	args.src = kcalloc(nr, sizeof(*args.src), GFP_KERNEL);
-	args.dst = kcalloc(nr, sizeof(*args.dst), GFP_KERNEL);
+	args.src = kzalloc_objs(*args.src, nr);
+	args.dst = kzalloc_objs(*args.dst, nr);
 
 	if (!args.src || !args.dst) {
 		ret = VM_FAULT_OOM;
@@ -267,7 +267,7 @@ static vm_fault_t nouveau_dmem_migrate_to_ram(struct vm_fault *vmf)
 	nouveau_fence_new(&fence, dmem->migrate.chan);
 	migrate_vma_pages(&args);
 	nouveau_dmem_fence_done(&fence);
-	dma_unmap_page(drm->dev->dev, dma_info.dma_addr, PAGE_SIZE,
+	dma_unmap_page(drm->dev->dev, dma_info.dma_addr, dma_info.size,
 				DMA_BIDIRECTIONAL);
 done:
 	migrate_vma_finalize(&args);
@@ -279,11 +279,25 @@ err:
 
 static void nouveau_dmem_folio_split(struct folio *head, struct folio *tail)
 {
+	struct nouveau_dmem_chunk *chunk;
+	struct nouveau_dmem *dmem;
+
 	if (tail == NULL)
 		return;
 	tail->pgmap = head->pgmap;
 	tail->mapping = head->mapping;
 	folio_set_zone_device_data(tail, folio_zone_device_data(head));
+
+	/*
+	 * The split hands out a new independently-freeable folio that will
+	 * later be released via nouveau_dmem_folio_free(); account for it so
+	 * chunk->callocated stays balanced.
+	 */
+	chunk = nouveau_page_to_chunk(&head->page);
+	dmem = chunk->drm->dmem;
+	spin_lock(&dmem->lock);
+	chunk->callocated++;
+	spin_unlock(&dmem->lock);
 }
 
 static const struct dev_pagemap_ops nouveau_dmem_pagemap_ops = {
@@ -325,8 +339,8 @@ nouveau_dmem_chunk_alloc(struct nouveau_drm *drm, struct page **ppage,
 	chunk->pagemap.ops = &nouveau_dmem_pagemap_ops;
 	chunk->pagemap.owner = drm->dev;
 
-	ret = nouveau_bo_new_pin(&drm->client, NOUVEAU_GEM_DOMAIN_VRAM, DMEM_CHUNK_SIZE,
-				 &chunk->bo);
+	ret = nouveau_bo_new_pin(&drm->client, NOUVEAU_GEM_DOMAIN_VRAM,
+				 DMEM_CHUNK_SIZE * NR_CHUNKS, &chunk->bo);
 	if (ret)
 		goto out_release;
 
@@ -479,8 +493,8 @@ nouveau_dmem_evict_chunk(struct nouveau_dmem_chunk *chunk)
 	struct nouveau_dmem_dma_info *dma_info;
 	struct nouveau_fence *fence;
 
-	src_pfns = kvcalloc(npages, sizeof(*src_pfns), GFP_KERNEL | __GFP_NOFAIL);
-	dst_pfns = kvcalloc(npages, sizeof(*dst_pfns), GFP_KERNEL | __GFP_NOFAIL);
+	src_pfns = kvzalloc_objs(*src_pfns, npages, GFP_KERNEL | __GFP_NOFAIL);
+	dst_pfns = kvzalloc_objs(*dst_pfns, npages, GFP_KERNEL | __GFP_NOFAIL);
 	dma_info = kvzalloc_objs(*dma_info, npages, GFP_KERNEL | __GFP_NOFAIL);
 
 	migrate_device_range(src_pfns, chunk->pagemap.range.start >> PAGE_SHIFT,
@@ -772,7 +786,7 @@ static unsigned long nouveau_dmem_migrate_copy_one(struct nouveau_drm *drm,
 	return mpfn;
 
 out_dma_unmap:
-	dma_unmap_page(dev, dma_info->dma_addr, PAGE_SIZE, DMA_BIDIRECTIONAL);
+	dma_unmap_page(dev, dma_info->dma_addr, dma_info->size, DMA_BIDIRECTIONAL);
 out_free_page:
 	nouveau_dmem_page_free_locked(drm, dpage);
 out:
@@ -848,10 +862,10 @@ nouveau_dmem_migrate_vma(struct nouveau_drm *drm,
 		if (max > (unsigned long)HPAGE_PMD_NR)
 			max = (unsigned long)HPAGE_PMD_NR;
 
-	args.src = kcalloc(max, sizeof(*args.src), GFP_KERNEL);
+	args.src = kzalloc_objs(*args.src, max);
 	if (!args.src)
 		goto out;
-	args.dst = kcalloc(max, sizeof(*args.dst), GFP_KERNEL);
+	args.dst = kzalloc_objs(*args.dst, max);
 	if (!args.dst)
 		goto out_free_src;
 

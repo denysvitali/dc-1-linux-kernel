@@ -140,13 +140,13 @@ static int intersection_range_check(void)
 
 	intxn1 = bitmap_alloc(nnodes, GFP_KERNEL);
 	if (!intxn1) {
-		WARN_ON_ONCE("Failed to allocate intxn1\n");
+		WARN_ONCE(1, "Failed to allocate intxn1\n");
 		return -ENOMEM;
 	}
 
 	intxn2 = bitmap_alloc(nnodes, GFP_KERNEL);
 	if (!intxn2) {
-		WARN_ON_ONCE("Failed to allocate intxn2\n");
+		WARN_ONCE(1, "Failed to allocate intxn2\n");
 		bitmap_free(intxn1);
 		return -ENOMEM;
 	}
@@ -244,7 +244,7 @@ static int span_iteration_check(void)
 	unsigned long start, last;
 	struct interval_tree_span_iter span, mas_span;
 
-	DEFINE_MTREE(tree);
+	struct maple_tree tree;
 
 	MA_STATE(mas, &tree, 0, 0);
 

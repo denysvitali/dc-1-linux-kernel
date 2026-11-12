@@ -117,6 +117,7 @@ struct xt_hashlimit_htable {
 	refcount_t use;
 	u_int8_t family;
 	bool rnd_initialized;
+	bool ratematch;
 
 	struct hashlimit_cfg3 cfg;	/* config */
 
@@ -293,7 +294,7 @@ static int htable_create(struct net *net, struct hashlimit_cfg3 *cfg,
 		if (size < 16)
 			size = 16;
 	}
-	hinfo = kvmalloc_flex(*hinfo, hash, size);
+	hinfo = kvmalloc_flex(*hinfo, hash, size, GFP_KERNEL_ACCOUNT);
 	if (hinfo == NULL)
 		return -ENOMEM;
 	*out_hinfo = hinfo;
@@ -318,11 +319,12 @@ static int htable_create(struct net *net, struct hashlimit_cfg3 *cfg,
 	hinfo->count = 0;
 	hinfo->family = family;
 	hinfo->rnd_initialized = false;
-	hinfo->name = kstrdup(name, GFP_KERNEL);
+	hinfo->name = kstrdup(name, GFP_KERNEL_ACCOUNT);
 	if (!hinfo->name) {
 		kvfree(hinfo);
 		return -ENOMEM;
 	}
+	hinfo->ratematch = !!(cfg->mode & XT_HASHLIMIT_RATE_MATCH);
 	spin_lock_init(&hinfo->lock);
 
 	switch (revision) {
@@ -872,7 +874,10 @@ static int hashlimit_mt_check_common(const struct xt_mtchk_param *par,
 	}
 
 	/* Check for overflow. */
-	if (revision >= 3 && cfg->mode & XT_HASHLIMIT_RATE_MATCH) {
+	if (cfg->mode & XT_HASHLIMIT_RATE_MATCH) {
+		if (revision < 3)
+			return -EINVAL;
+
 		if (cfg->avg == 0 || cfg->avg > U32_MAX) {
 			pr_info_ratelimited("invalid rate\n");
 			return -ERANGE;
@@ -904,6 +909,15 @@ static int hashlimit_mt_check_common(const struct xt_mtchk_param *par,
 		if (ret < 0) {
 			mutex_unlock(&hashlimit_mutex);
 			return ret;
+		}
+	} else {
+		if ((cfg->mode & XT_HASHLIMIT_RATE_MATCH &&
+		     !(*hinfo)->ratematch) ||
+		    (!(cfg->mode & XT_HASHLIMIT_RATE_MATCH) &&
+		      (*hinfo)->ratematch)) {
+			mutex_unlock(&hashlimit_mutex);
+			htable_put(*hinfo);
+			return -EINVAL;
 		}
 	}
 	mutex_unlock(&hashlimit_mutex);
@@ -1063,7 +1077,7 @@ static void *dl_seq_start(struct seq_file *s, loff_t *pos)
 	if (*pos >= htable->cfg.size)
 		return NULL;
 
-	bucket = kmalloc(sizeof(unsigned int), GFP_ATOMIC);
+	bucket = kmalloc_obj(unsigned int, GFP_ATOMIC);
 	if (!bucket)
 		return ERR_PTR(-ENOMEM);
 

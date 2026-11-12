@@ -144,9 +144,9 @@ static int irq_pending(struct pt_regs *regs)
 
 void noinstr do_io_irq(struct pt_regs *regs)
 {
-	bool from_idle, percpu_needs_fixup;
 	struct pt_regs *old_regs;
 	irqentry_state_t state;
+	bool from_idle;
 
 	percpu_entry(regs);
 	state = irqentry_enter(regs);
@@ -166,7 +166,6 @@ void noinstr do_io_irq(struct pt_regs *regs)
 	if (from_idle)
 		account_idle_time_irq();
 
-	set_cpu_flag(CIF_NOHZ_DELAY);
 	do {
 		regs->tpi_info = get_lowcore()->tpi_info;
 		if (get_lowcore()->tpi_info.adapter_IO)
@@ -175,21 +174,20 @@ void noinstr do_io_irq(struct pt_regs *regs)
 			do_irq_async(regs, IO_INTERRUPT);
 	} while (machine_is_lpar() && irq_pending(regs));
 
-	percpu_needs_fixup = percpu_code_check(regs);
 	irq_exit_rcu();
 	set_irq_regs(old_regs);
 	irqentry_exit(regs, state);
 
 	if (from_idle)
 		regs->psw.mask &= ~(PSW_MASK_EXT | PSW_MASK_IO | PSW_MASK_WAIT);
-	percpu_exit(regs, percpu_needs_fixup);
+	percpu_exit(regs);
 }
 
 void noinstr do_ext_irq(struct pt_regs *regs)
 {
-	bool from_idle, percpu_needs_fixup;
 	struct pt_regs *old_regs;
 	irqentry_state_t state;
+	bool from_idle;
 
 	percpu_entry(regs);
 	state = irqentry_enter(regs);
@@ -215,14 +213,13 @@ void noinstr do_ext_irq(struct pt_regs *regs)
 
 	do_irq_async(regs, EXT_INTERRUPT);
 
-	percpu_needs_fixup = percpu_code_check(regs);
 	irq_exit_rcu();
 	set_irq_regs(old_regs);
 	irqentry_exit(regs, state);
 
 	if (from_idle)
 		regs->psw.mask &= ~(PSW_MASK_EXT | PSW_MASK_IO | PSW_MASK_WAIT);
-	percpu_exit(regs, percpu_needs_fixup);
+	percpu_exit(regs);
 }
 
 static void show_msi_interrupt(struct seq_file *p, int irq)
@@ -369,9 +366,6 @@ static irqreturn_t do_ext_interrupt(int irq, void *dummy)
 	int index;
 
 	ext_code.int_code = regs->int_code;
-	if (ext_code.code != EXT_IRQ_CLK_COMP)
-		set_cpu_flag(CIF_NOHZ_DELAY);
-
 	index = ext_hash(ext_code.code);
 	rcu_read_lock();
 	hlist_for_each_entry_rcu(p, &ext_int_hash[index], entry) {

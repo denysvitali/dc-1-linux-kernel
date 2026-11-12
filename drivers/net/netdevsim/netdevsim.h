@@ -42,8 +42,8 @@
 struct nsim_sa {
 	struct xfrm_state *xs;
 	__be32 ipaddr[4];
-	u32 key[4];
-	u32 salt;
+	__be32 key[4];
+	__be32 salt;
 	bool used;
 	bool crypt;
 	bool rx;
@@ -87,10 +87,13 @@ struct nsim_ethtool_pauseparam {
 	bool report_stats_tx;
 };
 
+#define NSIM_RSS_INDIR_SIZE		128
+
 struct nsim_ethtool {
 	u32 get_err;
 	u32 set_err;
 	u32 channels;
+	u8 rss_key[NETDEV_RSS_KEY_LEN];
 	struct nsim_ethtool_pauseparam pauseparam;
 	struct ethtool_coalesce coalesce;
 	struct ethtool_ringparam ring;
@@ -122,7 +125,6 @@ struct netdevsim {
 		struct dentry *rereg;
 		struct mutex rereg_lock;
 		u32 spi;
-		u32 assoc_cnt;
 	} psp;
 
 	struct nsim_bus_dev *nsim_bus_dev;
@@ -292,7 +294,6 @@ enum nsim_dev_port_type {
 };
 
 #define NSIM_DEV_VF_PORT_INDEX_BASE 128
-#define NSIM_DEV_VF_PORT_INDEX_MAX UINT_MAX
 
 struct nsim_dev_port {
 	struct list_head list;
@@ -472,6 +473,7 @@ nsim_psp_handle_ext(struct sk_buff *skb, struct skb_ext *psp_ext) {}
 int nsim_setup_tc(struct net_device *dev, enum tc_setup_type type,
 		  void *type_data);
 
+#define NSIM_BUS_DEV_MAX_VFS 4
 struct nsim_bus_dev {
 	struct device dev;
 	struct list_head list;
@@ -480,7 +482,6 @@ struct nsim_bus_dev {
 	struct net *initial_net; /* Purpose of this is to carry net pointer
 				  * during the probe time only.
 				  */
-	unsigned int max_vfs;
 	unsigned int num_vfs;
 	bool init;
 };

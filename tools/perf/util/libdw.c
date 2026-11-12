@@ -7,6 +7,7 @@
 #include "callchain.h"
 #include <fcntl.h>
 #include <unistd.h>
+#include <string.h>
 #include <elfutils/libdwfl.h>
 
 static const Dwfl_Callbacks offline_callbacks = {
@@ -35,7 +36,7 @@ struct Dwfl *dso__libdw_dwfl(struct dso *dso)
 	if (dwfl)
 		return dwfl;
 
-	dso_name = dso__long_name(dso);
+	dso_name = dso__symsrc_filename(dso) ?: dso__long_name(dso);
 	/*
 	 * Initialize Dwfl session.
 	 * We need to open the DSO file to report it to libdw.
@@ -82,13 +83,39 @@ struct libdw_a2l_cb_args {
 static int libdw_a2l_cb(Dwarf_Die *die, void *_args)
 {
 	struct libdw_a2l_cb_args *args  = _args;
-	struct symbol *inline_sym = new_inline_sym(args->dso, args->sym, die_name(die));
 	const char *call_fname = die_get_call_file(die);
 	int call_lineno = die_get_call_lineno(die);
 	char *call_srcline = srcline__unknown;
+	struct symbol *inline_sym;
 
-	if (!inline_sym)
-		goto abort_enomem;
+	if (dwarf_tag(die) == DW_TAG_subprogram && args->sym) {
+		/*
+		 * cu_walk_functions_at() opens the walk with the
+		 * containing DW_TAG_subprogram DIE (the non-inlined outer
+		 * function). That's just the base symbol -- use it
+		 * directly. Avoids a fragile name-vs-name compare in
+		 * new_inline_sym() that misfires when GCC IPA passes
+		 * (.isra/.constprop/.part/.cold) rename the ELF symbol
+		 * while DWARF keeps the pre-clone linkage name, which
+		 * left the outer frame spuriously tagged "(inlined)".
+		 */
+		inline_sym = args->sym;
+	} else {
+		/*
+		 * Prefer DW_AT_linkage_name so C++ inline frames keep
+		 * their namespace/class qualification. new_inline_sym()
+		 * runs the name through dso__demangle_sym(), so the
+		 * mangled linkage name is turned back into
+		 * "Namespace::Class::method". Fall back to DW_AT_name
+		 * (unqualified) when no linkage name is present, e.g.
+		 * for C code or extern "C" functions.
+		 */
+		const char *funcname = die_get_linkage_name(die) ?: die_name(die);
+
+		inline_sym = new_inline_sym(args->dso, args->sym, funcname);
+		if (!inline_sym)
+			goto abort_enomem;
+	}
 
 	/* Assign caller information to the parent. */
 	if (call_fname)
@@ -141,32 +168,55 @@ int libdw__addr2line(u64 addr, char **file, unsigned int *line_nr,
 		     struct dso *dso, bool unwind_inlines,
 		     struct inline_node *node, struct symbol *sym)
 {
-	Dwfl *dwfl = dso__libdw_dwfl(dso);
+	Dwfl *dwfl;
 	Dwfl_Module *mod;
 	Dwfl_Line *dwline;
 	Dwarf_Addr bias;
 	const char *src;
 	int lineno = 0;
+	int ret = 0;
 
-	if (!dwfl)
+	if (!dso__has_srcline(dso))
 		return 0;
+
+	mutex_lock(dso__lock(dso));
+	dwfl = dso__libdw_dwfl(dso);
+	if (!dwfl) {
+		ret = -1;
+		goto out;
+	}
 
 	mod = dwfl_addrmodule(dwfl, addr);
-	if (!mod)
-		return 0;
+	if (!mod) {
+		ret = 0;
+		goto out;
+	}
 
 	/*
 	 * Get/ignore the dwarf information. Determine the bias, difference
 	 * between the regular ELF addr2line addresses and those to use with
 	 * libdw.
 	 */
-	if (!dwfl_module_getdwarf(mod, &bias))
-		return 0;
+	if (!dwfl_module_getdwarf(mod, &bias)) {
+		/*
+		 * Free the Dwfl session so the mmap'd ELF binary is unmapped
+		 * immediately, and mark the DSO as lacking srcline/DWARF info
+		 * so neither libdw nor slower fallback backends (addr2line
+		 * subprocess, libbfd) are repeatedly invoked on stripped DSOs.
+		 */
+		dso__free_libdw(dso);
+		dso__set_has_srcline(dso, false);
+		ret = 0;
+		goto out;
+	}
 
 	/* Find source line information for the address. */
 	dwline = dwfl_module_getsrc(mod, addr + bias);
-	if (!dwline)
-		return 0;
+	if (!dwline) {
+		/* conclusively missing information -> abort fallbacks */
+		ret = 0;
+		goto out;
+	}
 
 	/* Get line information. */
 	src = dwfl_lineinfo(dwline, /*addr=*/NULL, &lineno, /*col=*/NULL, /*mtime=*/NULL,
@@ -193,7 +243,8 @@ int libdw__addr2line(u64 addr, char **file, unsigned int *line_nr,
 				free(*file);
 				*file = NULL;
 			}
-			return 0;
+			ret = -ENOMEM;
+			goto out;
 		}
 
 		/* Walk from the parent down to the leaf. */
@@ -209,8 +260,13 @@ int libdw__addr2line(u64 addr, char **file, unsigned int *line_nr,
 				*file = NULL;
 			}
 			inline_node__clear_frames(node);
-			return 0;
+			ret = args.err;
+			goto out;
 		}
 	}
-	return 1;
+	ret = 1;
+
+out:
+	mutex_unlock(dso__lock(dso));
+	return ret;
 }

@@ -878,11 +878,12 @@ static unsigned long chosen_node_offset = -FDT_ERR_NOTFOUND;
 /*
  * The main usage of linux,usable-memory-range is for crash dump kernel.
  * Originally, the number of usable-memory regions is one. Now there may
- * be two regions, low region and high region.
- * To make compatibility with existing user-space and older kdump, the low
- * region is always the last range of linux,usable-memory-range if exist.
+ * be 2 + CRASHK_CMA_RANGES_MAX regions, low region, high region and cma
+ * regions. To make compatibility with existing user-space and older kdump,
+ * the high and low region are always the first two ranges of
+ * linux,usable-memory-range if exist.
  */
-#define MAX_USABLE_RANGES		2
+#define MAX_USABLE_RANGES		(2 + CRASHK_CMA_RANGES_MAX)
 
 /**
  * early_init_dt_check_for_usable_mem_range - Decode usable memory range
@@ -928,7 +929,7 @@ void __init early_init_dt_check_for_usable_mem_range(void)
 static void __init early_init_dt_check_kho(void)
 {
 	unsigned long node = chosen_node_offset;
-	u64 fdt_start, fdt_size, scratch_start, scratch_size;
+	u64 fdt_start, fdt_size, bootmem_start, bootmem_size;
 
 	if (!IS_ENABLED(CONFIG_KEXEC_HANDOVER) || (long)node < 0)
 		return;
@@ -937,11 +938,11 @@ static void __init early_init_dt_check_kho(void)
 				      &fdt_start, &fdt_size))
 		return;
 
-	if (!of_flat_dt_get_addr_size(node, "linux,kho-scratch",
-				      &scratch_start, &scratch_size))
+	if (!of_flat_dt_get_addr_size(node, "linux,kho-bootmem",
+				      &bootmem_start, &bootmem_size))
 		return;
 
-	kho_populate(fdt_start, fdt_size, scratch_start, scratch_size);
+	kho_populate(fdt_start, fdt_size, bootmem_start, bootmem_size);
 }
 
 #ifdef CONFIG_SERIAL_EARLYCON

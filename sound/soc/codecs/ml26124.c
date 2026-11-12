@@ -224,7 +224,6 @@ static const struct reg_default ml26124_reg[] = {
 	/* Analog Path Control Register */
 	{0x54, 0x00},	/* Speaker AMP Output Control */
 	{0x5a, 0x00},	/* Mic IF Control */
-	{0xe8, 0x01},	/* Mic Select Control */
 
 	/* Audio Interface Control Register */
 	{0x60, 0x00},	/* SAI-Trans Control */
@@ -287,6 +286,9 @@ static const struct reg_default ml26124_reg[] = {
 	{0xd0, 0x01},	/* VIDEO AMP Gain Control */
 	{0xd2, 0x01},	/* VIDEO AMP Setup 1 */
 	{0xd4, 0x01},	/* VIDEO AMP Control2 */
+
+	/* Analog Path Control Register */
+	{0xe8, 0x01},	/* Mic Select Control */
 };
 
 /* Get sampling rate value of sampling rate setting register (0x0) */
@@ -490,11 +492,17 @@ static int ml26124_set_bias_level(struct snd_soc_component *component,
 	return 0;
 }
 
+static const u64 ml26124_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF;
+
 static const struct snd_soc_dai_ops ml26124_dai_ops = {
 	.hw_params	= ml26124_hw_params,
 	.mute_stream	= ml26124_mute,
 	.set_fmt	= ml26124_set_dai_fmt,
 	.set_sysclk	= ml26124_set_dai_sysclk,
+	.auto_selectable_formats	= &ml26124_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -555,7 +563,7 @@ static int ml26124_i2c_probe(struct i2c_client *i2c)
 	struct ml26124_priv *priv;
 	int ret;
 
-	priv = devm_kzalloc(&i2c->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&i2c->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

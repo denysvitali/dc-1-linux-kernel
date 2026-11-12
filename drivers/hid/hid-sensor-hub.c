@@ -239,12 +239,17 @@ int sensor_hub_get_feature(struct hid_sensor_hub_device *hsdev, u32 report_id,
 			   u32 field_index, int buffer_size, void *buffer)
 {
 	struct hid_report *report;
+	struct hid_field *field;
 	struct sensor_hub_data *data = hid_get_drvdata(hsdev->hdev);
-	int report_size;
+	size_t field_size;
+	size_t report_size;
+	size_t copied = 0;
+	size_t to_copy;
 	int ret = 0;
-	u8 *val_ptr;
-	int buffer_index = 0;
-	int i;
+	unsigned int i;
+
+	if (!buffer || buffer_size <= 0)
+		return -EINVAL;
 
 	memset(buffer, 0, buffer_size);
 
@@ -258,26 +263,29 @@ int sensor_hub_get_feature(struct hid_sensor_hub_device *hsdev, u32 report_id,
 	hid_hw_request(hsdev->hdev, report, HID_REQ_GET_REPORT);
 	hid_hw_wait(hsdev->hdev);
 
+	field = report->field[field_index];
+
 	/* calculate number of bytes required to read this field */
-	report_size = DIV_ROUND_UP(report->field[field_index]->report_size,
-				   8) *
-				   report->field[field_index]->report_count;
-	if (!report_size) {
+	field_size = DIV_ROUND_UP(field->report_size, 8);
+	/* HID core stores each parsed report value in a __s32 slot. */
+	if (!field_size || field_size > sizeof(field->value[0])) {
 		ret = -EINVAL;
 		goto done_proc;
 	}
-	ret = min(report_size, buffer_size);
-
-	val_ptr = (u8 *)report->field[field_index]->value;
-	for (i = 0; i < report->field[field_index]->report_count; ++i) {
-		if (buffer_index >= ret)
-			break;
-
-		memcpy(&((u8 *)buffer)[buffer_index], val_ptr,
-		       report->field[field_index]->report_size / 8);
-		val_ptr += sizeof(__s32);
-		buffer_index += (report->field[field_index]->report_size / 8);
+	if (field->report_count > SIZE_MAX / field_size) {
+		ret = -EINVAL;
+		goto done_proc;
 	}
+
+	report_size = field_size * field->report_count;
+	report_size = min_t(size_t, report_size, buffer_size);
+
+	for (i = 0; i < field->report_count && copied < report_size; ++i) {
+		to_copy = min(field_size, report_size - copied);
+		memcpy(&((u8 *)buffer)[copied], &field->value[i], to_copy);
+		copied += to_copy;
+	}
+	ret = copied;
 
 done_proc:
 	mutex_unlock(&data->mutex);
@@ -677,7 +685,7 @@ static int sensor_hub_probe(struct hid_device *hdev,
 	struct hid_sensor_hub_device *last_hsdev = NULL;
 	struct hid_sensor_hub_device *collection_hsdev = NULL;
 
-	sd = devm_kzalloc(&hdev->dev, sizeof(*sd), GFP_KERNEL);
+	sd = devm_kzalloc_obj(&hdev->dev, *sd);
 	if (!sd) {
 		hid_err(hdev, "cannot allocate Sensor data\n");
 		return -ENOMEM;
@@ -709,10 +717,9 @@ static int sensor_hub_probe(struct hid_device *hdev,
 		ret = -EINVAL;
 		goto err_stop_hw;
 	}
-	sd->hid_sensor_hub_client_devs = devm_kcalloc(&hdev->dev,
-						      dev_cnt,
-						      sizeof(struct mfd_cell),
-						      GFP_KERNEL);
+	sd->hid_sensor_hub_client_devs = devm_kzalloc_objs(&hdev->dev,
+							   struct mfd_cell,
+							   dev_cnt);
 	if (sd->hid_sensor_hub_client_devs == NULL) {
 		hid_err(hdev, "Failed to allocate memory for mfd cells\n");
 		ret = -ENOMEM;
@@ -725,8 +732,7 @@ static int sensor_hub_probe(struct hid_device *hdev,
 		if (collection->type == HID_COLLECTION_PHYSICAL ||
 		    collection->type == HID_COLLECTION_APPLICATION) {
 
-			hsdev = devm_kzalloc(&hdev->dev, sizeof(*hsdev),
-					     GFP_KERNEL);
+			hsdev = devm_kzalloc_obj(&hdev->dev, *hsdev);
 			if (!hsdev) {
 				hid_err(hdev, "cannot allocate hid_sensor_hub_device\n");
 				ret = -ENOMEM;
@@ -736,9 +742,8 @@ static int sensor_hub_probe(struct hid_device *hdev,
 			hsdev->vendor_id = hdev->vendor;
 			hsdev->product_id = hdev->product;
 			hsdev->usage = collection->usage;
-			hsdev->mutex_ptr = devm_kzalloc(&hdev->dev,
-							sizeof(struct mutex),
-							GFP_KERNEL);
+			hsdev->mutex_ptr = devm_kzalloc_obj(&hdev->dev,
+							    struct mutex);
 			if (!hsdev->mutex_ptr) {
 				ret = -ENOMEM;
 				goto err_stop_hw;

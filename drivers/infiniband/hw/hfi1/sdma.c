@@ -11,6 +11,7 @@
 #include <linux/timer.h>
 #include <linux/vmalloc.h>
 #include <linux/highmem.h>
+#include <linux/sysfs.h>
 
 #include "hfi.h"
 #include "common.h"
@@ -1049,7 +1050,7 @@ ssize_t sdma_get_cpu_to_sde_map(struct sdma_engine *sde, char *buf)
 	if (cpumask_empty(&sde->cpu_mask))
 		snprintf(buf, PAGE_SIZE, "%s\n", "empty");
 	else
-		cpumap_print_to_pagebuf(true, buf, &sde->cpu_mask);
+		sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&sde->cpu_mask));
 	mutex_unlock(&process_to_sde_mutex);
 	return strnlen(buf, PAGE_SIZE);
 }
@@ -1568,6 +1569,9 @@ void sdma_exit(struct hfi1_devdata *dd)
 		 * it is not running.
 		 */
 		sdma_finalput(&sde->state);
+		cancel_work_sync(&sde->err_halt_worker);
+		tasklet_kill(&sde->sdma_hw_clean_up_task);
+		cancel_work_sync(&sde->flush_worker);
 	}
 }
 

@@ -710,12 +710,11 @@ static int max11410_parse_channels(struct max11410_state *st,
 
 	/* Reserve space for soft timestamp channel */
 	num_ch++;
-	channels = devm_kcalloc(dev, num_ch, sizeof(*channels), GFP_KERNEL);
+	channels = devm_kzalloc_objs(dev, *channels, num_ch);
 	if (!channels)
 		return -ENOMEM;
 
-	st->channels = devm_kcalloc(dev, num_ch, sizeof(*st->channels),
-				    GFP_KERNEL);
+	st->channels = devm_kzalloc_objs(dev, *st->channels, num_ch);
 	if (!st->channels)
 		return -ENOMEM;
 
@@ -779,9 +778,9 @@ static int max11410_parse_channels(struct max11410_state *st,
 		if (sig_path == MAX11410_PGA_SIG_PATH_PGA) {
 			__set_bit(IIO_CHAN_INFO_SCALE,
 				  &chanspec.info_mask_separate_available);
-			cfg->scale_avail = devm_kcalloc(dev, MAX11410_SCALE_AVAIL_SIZE * 2,
-							sizeof(*cfg->scale_avail),
-							GFP_KERNEL);
+			cfg->scale_avail = devm_kzalloc_objs(dev,
+							     *cfg->scale_avail,
+							     MAX11410_SCALE_AVAIL_SIZE * 2);
 			if (!cfg->scale_avail)
 				return -ENOMEM;
 
@@ -1025,7 +1024,7 @@ static const struct of_device_id max11410_spi_of_id[] = {
 MODULE_DEVICE_TABLE(of, max11410_spi_of_id);
 
 static const struct spi_device_id max11410_id[] = {
-	{ "max11410" },
+	{ .name = "max11410" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, max11410_id);

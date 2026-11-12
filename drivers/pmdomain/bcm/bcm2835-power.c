@@ -175,7 +175,7 @@ static int bcm2835_asb_control(struct bcm2835_power *power, u32 reg, bool enable
 	writel(PM_PASSWORD | val, base + reg);
 
 	if (readl_poll_timeout_atomic(base + reg, val,
-				      !!(val & ASB_ACK) != enable, 0, 5))
+				      !!(val & ASB_ACK) != enable, 0, 100))
 		return -ETIMEDOUT;
 
 	return 0;
@@ -621,7 +621,7 @@ static int bcm2835_power_probe(struct platform_device *pdev)
 	int ret = 0, i;
 	u32 id;
 
-	power = devm_kzalloc(dev, sizeof(*power), GFP_KERNEL);
+	power = devm_kzalloc_obj(dev, *power);
 	if (!power)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, power);
@@ -648,10 +648,9 @@ static int bcm2835_power_probe(struct platform_device *pdev)
 		}
 	}
 
-	power->pd_xlate.domains = devm_kcalloc(dev,
-					       ARRAY_SIZE(power_domain_names),
-					       sizeof(*power->pd_xlate.domains),
-					       GFP_KERNEL);
+	power->pd_xlate.domains = devm_kzalloc_objs(dev,
+						    *power->pd_xlate.domains,
+						    ARRAY_SIZE(power_domain_names));
 	if (!power->pd_xlate.domains)
 		return -ENOMEM;
 
@@ -677,7 +676,12 @@ static int bcm2835_power_probe(struct platform_device *pdev)
 	if (ret)
 		goto fail;
 
-	of_genpd_add_provider_onecell(dev->parent->of_node, &power->pd_xlate);
+	ret = of_genpd_add_provider_onecell(dev->parent->of_node,
+					    &power->pd_xlate);
+	if (ret) {
+		dev_err_probe(dev, ret, "failed to add genpd provider\n");
+		goto fail;
+	}
 
 	dev_info(dev, "Broadcom BCM2835 power domains driver");
 	return 0;

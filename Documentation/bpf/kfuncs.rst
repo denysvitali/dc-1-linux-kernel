@@ -164,19 +164,32 @@ suffix should be used.
 2.3.3 __uninit Annotation
 -------------------------
 
-This annotation is used to indicate that the argument will be treated as
-uninitialized.
+Use ``__uninit`` on a pointer parameter for an output buffer whose incoming
+contents the kfunc does not read.
 
-An example is given below::
+For generic memory buffers, the kfunc may leave bytes untouched, including
+on error returns. The writable range is determined by the pointed-to type
+or the associated ``__sz`` or ``__szk`` size argument.
 
-        __bpf_kfunc int bpf_dynptr_from_skb(..., struct bpf_dynptr_kern *ptr__uninit)
+The annotation does not change the accepted pointer types. A stack-backed
+struct passed as a generic memory buffer must still be scalar-only.
+
+Generic stack buffers may be uninitialized before the call. The call does
+not make previously uninitialized bytes readable unless the program is
+allowed to read uninitialized stack memory (normally requiring
+``CAP_PERFMON``). Other callers must initialize those bytes themselves
+before reading them. Stack bounds and variable-offset restrictions still
+apply.
+
+For dynptr parameters, ``__uninit`` indicates that the kfunc constructs a
+dynptr in the supplied storage. For example::
+
+        __bpf_kfunc int bpf_dynptr_from_skb(..., struct bpf_dynptr *ptr__uninit)
         {
         ...
         }
 
-Here, the dynptr will be treated as an uninitialized dynptr. Without this
-annotation, the verifier will reject the program if the dynptr passed in is
-not initialized.
+Without this annotation, a dynptr argument must already be initialized.
 
 2.3.4 __nullable Annotation
 ---------------------------
@@ -250,6 +263,94 @@ Or::
                 ...
         }
 
+2.3.7 __const_map and __map Annotations
+---------------------------------------
+
+These annotations are used for ``struct bpf_map *`` arguments and distinguish a
+verifier-known map from an opaque one.
+
+``__const_map`` indicates a map must be known at the verification time, i.e. a
+concrete map fd the BPF program references directly.
+
+An example is given below::
+
+        __bpf_kfunc int bpf_wq_init(struct bpf_wq *wq, void *p__const_map,
+                                    unsigned int flags)
+        {
+                ...
+        }
+
+``__map`` indicates an opaque ``struct bpf_map *`` that may be resolved
+at run time. The argument may take either a map fd or a ``PTR_TO_BTF_ID``
+``struct bpf_map`` pointer.
+
+An example is given below::
+
+        __bpf_kfunc void *bpf_arena_alloc_pages(void *p__map, ...)
+        {
+                ...
+        }
+
+2.3.8 __arena and __arena__nullable Annotations
+-----------------------------------------------
+
+Both annotations indicate that the pointer argument points into the
+calling program's arena. The JIT rebases the value at the call site so
+the kfunc receives a directly dereferenceable kernel address, subject to
+the access rules described in :ref:`BPF_kfunc_arena_access` (at most
+``GUARD_SZ / 2``, 32 KiB, past the pointer in a single unchecked access).
+
+With ``__arena`` the rebase is unconditional and the argument is never
+NULL: a value whose lower 32 bits are zero arrives as the arena base
+address (arena offset 0). The kfunc must not check the argument for NULL.
+With ``__arena__nullable`` such a value arrives as NULL instead and the
+kfunc must check before dereferencing.
+
+An example is given below::
+
+        __bpf_kfunc int bpf_process_item(struct item *item__arena)
+        {
+        ...
+        }
+
+Calling such a kfunc requires the program to use an arena map and a JIT with
+arena argument support (currently x86-64 and arm64); verification fails
+otherwise. The program can pass any value without compromising the kernel. A
+value that does not point into the arena is a program bug.
+
+The suffixes have the same meaning on the arguments of struct_ops stub
+functions, with the conversion running in the opposite direction. The
+kernel caller passes the kernel arena address and the trampoline converts
+it while saving the arguments, so the callback receives an arena pointer
+it can dereference directly. With ``__arena`` the kernel caller must not
+pass NULL. With ``__arena__nullable`` a NULL kernel pointer arrives as NULL.
+However, there is no obligation to prove to the verifier that such a pointer is
+non-NULL before use, in-line with existing semantics of arena pointers used in
+a program (or obtained from any other source).
+
+2.3.9 __ctx_out Annotation
+--------------------------
+
+This annotation is used to indicate that the argument is an output
+parameter of the attached hook, passed through from the program's
+context. The verifier requires the register to be a trusted read-only
+pointer to fixed-size memory, which can only be produced by loading an
+argument described by the program's ctx_arg_info from the context. The
+program itself cannot write through the pointer; the kfunc may.
+
+An example is given below::
+
+        __bpf_kfunc int bpf_inode_init_xattr(struct xattr *xattrs,
+                                             int *xattr_count__ctx_out,
+                                             ...)
+        {
+        ...
+        }
+
+In this case, a program attached to the ``inode_init_security`` LSM hook
+can pass the hook's own ``xattr_count`` argument through to the kfunc,
+which claims xattr slots by writing through it.
+
 .. _BPF_kfunc_nodef:
 
 2.4 Using an existing kernel function
@@ -273,21 +374,28 @@ flags on a set of kfuncs as follows::
         BTF_KFUNCS_END(bpf_task_set)
 
 This set encodes the BTF ID of each kfunc listed above, and encodes the flags
-along with it. Ofcourse, it is also allowed to specify no flags.
+along with it. It is also allowed to specify no flags.
 
 kfunc definitions should also always be annotated with the ``__bpf_kfunc``
-macro. This prevents issues such as the compiler inlining the kfunc if it's a
-static kernel function, or the function being elided in an LTO build as it's
-not used in the rest of the kernel. Developers should not manually add
-annotations to their kfunc to prevent these issues. If an annotation is
-required to prevent such an issue with your kfunc, it is a bug and should be
-added to the definition of the macro so that other kfuncs are similarly
-protected. An example is given below::
+macro. This prevents issues such as the compiler inlining the kfunc, or the
+function being elided in an LTO build as it's not used in the rest of the
+kernel. Developers should not manually add annotations to their kfunc to prevent
+these issues. If an annotation is required to prevent such an issue with your
+kfunc, it is a bug and should be added to the definition of the macro so that
+other kfuncs are similarly protected. An example is given below::
 
         __bpf_kfunc struct task_struct *bpf_get_task_pid(s32 pid)
         {
         ...
         }
+
+Note that kfuncs must not be declared ``static``. A kfunc can be called from a
+BPF program ``*.c`` file outside the compilation unit that defines it, so its
+externally visible name must remain available for BTF ID lookup. ``static``
+linkage allows the compiler to rename the function, which can break this
+BTF-based kfunc resolution. Further note that sparse may warn that an otherwise
+unreferenced kfunc should be static. Such warnings should be ignored for kfunc
+definitions.
 
 2.5.1 KF_ACQUIRE flag
 ---------------------
@@ -298,6 +406,13 @@ is eventually released using a release kfunc, or transferred to a map using a
 referenced kptr (by invoking bpf_kptr_xchg). If not, the verifier fails the
 loading of the BPF program until no lingering references remain in all possible
 explored states of the program.
+
+A pointer to a struct in the arguments of a KF_ACQUIRE kfunc accepts only an
+object of that type. The same applies to the argument that a KF_RELEASE kfunc
+releases. For other arguments a kfunc also accepts memory of the program, if the
+struct has only scalar members. A struct without members, struct __sk_buff and
+struct xdp_md never accept memory. A KF_ACQUIRE kfunc which wants such memory
+has to pair the pointer with a __sz argument.
 
 2.5.2 KF_RET_NULL flag
 ----------------------
@@ -404,7 +519,7 @@ Example declaration:
 .. code-block:: c
 
 	__bpf_kfunc int bpf_task_work_schedule_signal(struct task_struct *task, struct bpf_task_work *tw,
-						      void *map__map, bpf_task_work_callback_t callback,
+						      void *map__const_map, bpf_task_work_callback_t callback,
 						      struct bpf_prog_aux *aux) { ... }
 
 Example usage in BPF program:
@@ -413,6 +528,16 @@ Example usage in BPF program:
 
 	/* note that the last argument is omitted */
         bpf_task_work_schedule_signal(task, &work->tw, &arrmap, task_work_callback);
+
+2.5.10 KF_PERFMON flag
+----------------------
+
+The KF_PERFMON flag is used for kfuncs that can expose kernel memory or kernel
+addresses to the BPF program, for example by reading through a pointer that the
+verifier does not check. Calling such a kfunc requires CAP_PERFMON, or
+CAP_SYS_ADMIN, in the same way that the equivalent BPF helpers are gated in
+bpf_base_func_proto(). A program loaded with CAP_BPF alone is rejected at load
+time.
 
 2.6 Registering the kfuncs
 --------------------------
@@ -437,6 +562,13 @@ type. An example is shown below::
         }
         late_initcall(init_subsystem);
 
+At kernel build time the ``resolve_btfids`` tool finds all kfuncs declared with
+``BTF_KFUNCS_START()`` and emits their BTF annotations into the kernel's BTF.
+For each kfunc it emits a ``bpf_kfunc`` BTF decl tag, a ``bpf_fastcall`` decl
+tag when the kfunc is flagged ``KF_FASTCALL``, and the ``address_space(1)`` type
+attribute on the return value and/or arguments that use arena pointers (see
+sections 2.3.8 and 2.8).
+
 2.7  Specifying no-cast aliases with ___init
 --------------------------------------------
 
@@ -457,7 +589,7 @@ For example, for the following type definition:
 
 The verifier would allow a ``struct bpf_cpumask *`` to be passed to a kfunc
 taking a ``cpumask_t *`` (which is a typedef of ``struct cpumask *``). For
-instance, both ``struct cpumask *`` and ``struct bpf_cpmuask *`` can be passed
+instance, both ``struct cpumask *`` and ``struct bpf_cpumask *`` can be passed
 to bpf_cpumask_test_cpu().
 
 In some cases, this type-aliasing behavior is not desired. ``struct
@@ -480,6 +612,8 @@ In order to accommodate such requirements, the verifier will enforce strict
 PTR_TO_BTF_ID type matching if two types have the exact same name, with one
 being suffixed with ``___init``.
 
+.. _BPF_kfunc_arena_access:
+
 2.8 Accessing arena memory through kfunc arguments
 --------------------------------------------------
 
@@ -493,6 +627,80 @@ The arena is followed by a ``GUARD_SZ / 2`` (32 KiB) guard region that
 is also covered by this recovery. A kfunc handed an arena pointer may
 therefore access up to ``GUARD_SZ / 2`` past it without bounds-checking
 against the arena. Larger accesses must verify the range explicitly.
+
+2.9 kfunc Return Values
+-----------------------
+
+A kfunc may return a scalar, a pointer, or a small struct or union by
+value. A scalar or pointer of up to 8 bytes is returned in R0, as usual.
+
+A struct or union returned by value must be composed only of scalars and arena
+pointers, where a scalar is an integer or an enum and an arena pointer is one
+carrying the ``btf_type_tag("arena")`` attribute. Those may be nested in
+structs and unions and in arrays of any number of dimensions, in any
+combination, as long as what the nesting bottoms out in is a scalar or an arena
+pointer. Its bytes are handed back to the program as the raw contents of R0
+(and R2), so a member of any other pointer type would be laundered into a
+scalar and escape the verifier's pointer provenance and reference tracking. A
+struct or union with such a member is therefore rejected at load time, and so
+is one with a floating-point member, which the ABI may not return in R0:R2 at
+all.
+
+An arena pointer member is handed back as a scalar too, but nothing is lost by
+that. The program must ``cast_kern()`` the value before it can be used, and the
+verifier allows that cast on any scalar, so a laundered arena address gives the
+program no reach it did not already have. The result is confined to the
+program's arena in either case.
+
+A kfunc may also return a value larger than 8 bytes and up to 16 bytes -- a
+struct or union of scalars and arena pointers, or an ``__int128``. Such a
+value is returned in the register pair R0:R2, matching the convention LLVM
+uses for the BPF target: the first 8 bytes in R0 and the second 8 bytes in R2.
+A struct or union of 8 bytes or less is returned in R0 alone.
+
+::
+
+        struct bpf_pair { __u64 a, b; };   /* 16 bytes */
+
+        __bpf_kfunc struct bpf_pair bpf_kfunc_get_pair(void)
+        {
+                struct bpf_pair p = { .a = 1, .b = 2 };
+
+                return p;      /* p.a in R0, p.b in R2 */
+        }
+
+Returning a value in the R0:R2 pair requires the JIT to place the second
+half of the return value into R2, which not every architecture supports
+right now. A kfunc with a return value larger than 8 bytes is therefore
+rejected at load time on a JIT that does not advertise this capability (see
+``bpf_jit_supports_kfunc_ret_reg_pair()``), and such a program is never run
+by the interpreter. A return value larger than 16 bytes is not supported.
+
+The same R0:R2 convention applies to a BPF subprogram, global or static, that
+returns an ``__int128`` or a struct or union larger than 8 bytes. It is only
+used when the program is JITed, since the interpreter propagates only R0 out of
+a subprogram: without a JIT the return value stays in R0 alone, and a caller
+reading R2 is rejected for reading an uninitialized register. A global
+subprogram is verified in isolation, so its by-value struct or union return is
+restricted to scalars and arena pointers just like a kfunc's; a static
+subprogram is verified inline and has no such restriction. The main program is
+not covered: its return value is the program's exit code, read out of R0
+alone, so a declared upper half is never looked at.
+
+A global subprogram must leave a scalar in *every* register of the pair, so
+both halves of the returned value have to be assigned. Leaving the upper half
+uninitialized is not merely untidy: the compiler is then free to leave R2
+holding whatever it happened to hold, which for a subprogram taking a pointer
+argument is typically that pointer. Handing the caller an unknown scalar built
+from a pointer is a leak, so the verifier rejects it with::
+
+        At subprogram exit the register R2 is not a scalar value (...)
+
+Initialize the whole return value, for example ``struct pair p = {};``, to
+avoid this. A static subprogram is exempt from the scalar-only rule: it is
+verified inline, so an unassigned R2 is simply passed back to the caller as
+uninitialized and only a caller that reads it fails. A stack pointer left in
+R2 is still rejected there, just as one in R0 is.
 
 .. _BPF_kfunc_lifecycle_expectations:
 

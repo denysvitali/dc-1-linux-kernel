@@ -106,6 +106,7 @@
 #include <linux/stackdepot.h>
 #include <linux/randomize_kstack.h>
 #include <linux/pidfs.h>
+#include <linux/fs_struct.h>
 #include <linux/ptdump.h>
 #include <linux/time_namespace.h>
 #include <linux/unaligned.h>
@@ -217,10 +218,6 @@ static bool __init obsolete_checksetup(char *line)
 				 * params and __setups of same names 8( */
 				if (line[n] == '\0' || line[n] == '=')
 					had_early_param = true;
-			} else if (!p->setup_func) {
-				pr_warn("Parameter %s is obsolete, ignored\n",
-					p->str);
-				return true;
 			} else if (p->setup_func(line + n))
 				return true;
 		}
@@ -279,7 +276,8 @@ static void * __init get_boot_config_from_initrd(size_t *_size)
 	u8 *hdr;
 	int i;
 
-	if (!initrd_end)
+	if (!initrd_end || initrd_end < initrd_start ||
+	    initrd_end - initrd_start < BOOTCONFIG_FOOTER_SIZE)
 		return NULL;
 
 	data = (char *)initrd_end - BOOTCONFIG_MAGIC_LEN;
@@ -296,15 +294,25 @@ static void * __init get_boot_config_from_initrd(size_t *_size)
 
 found:
 	hdr = (u8 *)(data - 8);
+	if ((unsigned long)hdr < initrd_start)
+		return NULL;
+
 	size = get_unaligned_le32(hdr);
 	csum = get_unaligned_le32(hdr + 4);
 
-	data = ((void *)hdr) - size;
-	if ((unsigned long)data < initrd_start) {
-		pr_err("bootconfig size %d is greater than initrd size %ld\n",
+	if (size > XBC_DATA_MAX) {
+		pr_err("bootconfig size %u is greater than max size %d\n",
+			size, XBC_DATA_MAX);
+		return NULL;
+	}
+
+	if (size > ((unsigned long)hdr - initrd_start)) {
+		pr_err("bootconfig size %u is greater than initrd size %lu\n",
 			size, initrd_end - initrd_start);
 		return NULL;
 	}
+
+	data = ((void *)hdr) - size;
 
 	if (xbc_calc_checksum(data, size) != csum) {
 		pr_err("bootconfig checksum failed\n");
@@ -327,9 +335,64 @@ static void * __init get_boot_config_from_initrd(size_t *_size)
 
 #ifdef CONFIG_BOOT_CONFIG
 
-/* Make an extra command line under given key word */
-static char * __init xbc_make_cmdline(const char *key)
+/* Check if a parameter name matches an obs_kernel_param entry */
+static bool __init match_obs_param(const char *param, const char *pattern)
 {
+	size_t n = strlen(pattern);
+
+	if (n > 0 && pattern[n - 1] == '=')
+		return parameqn(param, pattern, n - 1) && param[n - 1] == '\0';
+
+	return parameq(param, pattern);
+}
+
+/* Return true if the given param is only defined by early_param(). */
+static bool __init is_early_only_param(const char *param)
+{
+	const struct obs_kernel_param *p;
+	const struct kernel_param *kp;
+	bool has_early = false;
+
+	/* If handled by a regular module_param, it is not early-only */
+	for (kp = __start___param; kp < __stop___param; kp++) {
+		if (parameq(param, kp->name))
+			return false;
+	}
+
+	/* Check __setup / early_param table */
+	for (p = __setup_start; p < __setup_end; p++) {
+		if (match_obs_param(param, p->str)) {
+			if (!p->early)
+				return false;
+			has_early = true;
+		}
+	}
+	return has_early;
+}
+
+struct xbc_filter_data {
+	bool warn;
+};
+
+static bool __init xbc_kernel_param_filter(struct xbc_node *node,
+					   const char *key, void *data)
+{
+	struct xbc_filter_data *fdata = data;
+
+	if (is_early_only_param(key)) {
+		if (fdata && fdata->warn)
+			pr_warn("bootconfig: early_param 'kernel.%s' cannot be applied from bootconfig, skipping\n",
+				key);
+		return false;
+	}
+	return true;
+}
+
+/* Make an extra command line under given key word */
+static char * __init xbc_make_cmdline(const char *key, bool is_kernel)
+{
+	struct xbc_filter_data fdata = { .warn = true };
+	xbc_cmdline_filter_fn filter = is_kernel ? xbc_kernel_param_filter : NULL;
 	struct xbc_node *root;
 	char *new_cmdline;
 	int ret, len = 0;
@@ -338,8 +401,12 @@ static char * __init xbc_make_cmdline(const char *key)
 	if (!root)
 		return NULL;
 
-	/* Count required buffer size */
-	len = xbc_snprint_cmdline(NULL, 0, root);
+	/*
+	 * Pass 1: Count required buffer size. Emit warnings for skipped early
+	 * params in this pass so they are logged even if all parameters under
+	 * @key are skipped and len becomes 0.
+	 */
+	len = xbc_snprint_cmdline_filter(NULL, 0, root, filter, &fdata);
 	if (len <= 0)
 		return NULL;
 
@@ -349,7 +416,9 @@ static char * __init xbc_make_cmdline(const char *key)
 		return NULL;
 	}
 
-	ret = xbc_snprint_cmdline(new_cmdline, len + 1, root);
+	/* Pass 2: Render into buffer with warnings suppressed */
+	fdata.warn = false;
+	ret = xbc_snprint_cmdline_filter(new_cmdline, len + 1, root, filter, &fdata);
 	if (ret < 0 || ret > len) {
 		pr_err("Failed to print extra kernel cmdline.\n");
 		memblock_free(new_cmdline, len + 1);
@@ -359,45 +428,33 @@ static char * __init xbc_make_cmdline(const char *key)
 	return new_cmdline;
 }
 
-static int __init bootconfig_params(char *param, char *val,
-				    const char *unused, void *arg)
-{
-	if (strcmp(param, "bootconfig") == 0) {
-		bootconfig_found = true;
-	}
-	return 0;
-}
-
 static int __init warn_bootconfig(char *str)
 {
-	/* The 'bootconfig' has been handled by bootconfig_params(). */
+	/* The 'bootconfig' option is handled by setup_boot_config(). */
 	return 0;
 }
 
 static void __init setup_boot_config(void)
 {
-	static char tmp_cmdline[COMMAND_LINE_SIZE] __initdata;
 	const char *msg, *data;
-	int pos, ret;
+	int pos, ret, offs;
 	size_t size;
-	char *err;
+	bool from_embedded = false;
 
 	/* Cut out the bootconfig data even if we have no bootconfig option */
 	data = get_boot_config_from_initrd(&size);
 	/* If there is no bootconfig in initrd, try embedded one. */
-	if (!data)
+	if (!data) {
 		data = xbc_get_embedded_bootconfig(&size);
+		from_embedded = true;
+	}
 
-	strscpy(tmp_cmdline, boot_command_line, COMMAND_LINE_SIZE);
-	err = parse_args("bootconfig", tmp_cmdline, NULL, 0, 0, 0, NULL,
-			 bootconfig_params);
-
-	if (IS_ERR(err) || !(bootconfig_found || IS_ENABLED(CONFIG_BOOT_CONFIG_FORCE)))
+	bootconfig_found = bootconfig_cmdline_requested(boot_command_line, &offs);
+	if (!(bootconfig_found || IS_ENABLED(CONFIG_BOOT_CONFIG_FORCE)))
 		return;
 
-	/* parse_args() stops at the next param of '--' and returns an address */
-	if (err)
-		initargs_offs = err - tmp_cmdline;
+	/* Offset of the init arguments after a "--", located by the helper. */
+	initargs_offs = offs;
 
 	if (!data) {
 		/* If user intended to use bootconfig, show an error level message */
@@ -405,12 +462,6 @@ static void __init setup_boot_config(void)
 			pr_err("'bootconfig' found on command line, but no bootconfig found\n");
 		else
 			pr_info("No bootconfig data provided, so skipping bootconfig");
-		return;
-	}
-
-	if (size >= XBC_DATA_MAX) {
-		pr_err("bootconfig size %ld greater than max size %d\n",
-			(long)size, XBC_DATA_MAX);
 		return;
 	}
 
@@ -424,10 +475,26 @@ static void __init setup_boot_config(void)
 	} else {
 		xbc_get_info(&ret, NULL);
 		pr_info("Load bootconfig: %ld bytes %d nodes\n", (long)size, ret);
-		/* keys starting with "kernel." are passed via cmdline */
-		extra_command_line = xbc_make_cmdline("kernel");
+		/*
+		 * keys starting with "kernel." are passed via cmdline. When
+		 * this bootconfig came from the embedded source and
+		 * setup_arch() already prepended the rendered "kernel" subtree
+		 * to boot_command_line, rendering again here would duplicate
+		 * the keys in saved_command_line and make accumulating handlers
+		 * (console=, earlycon=, ...) re-register the same value. Skip
+		 * only when the prepend really happened.
+		 *
+		 * On arches that do not select ARCH_SUPPORTS_CMDLINE_FROM_BOOTCONFIG,
+		 * CONFIG_CMDLINE_FROM_BOOTCONFIG is unselectable and
+		 * xbc_embedded_cmdline_applied() collapses to a stub returning
+		 * false, so this path still runs and the embedded "kernel"
+		 * keys reach the cmdline via the runtime parser exactly as
+		 * before this series.
+		 */
+		if (!from_embedded || !xbc_embedded_cmdline_applied())
+			extra_command_line = xbc_make_cmdline("kernel", true);
 		/* Also, "init." keys are init arguments */
-		extra_init_args = xbc_make_cmdline("init");
+		extra_init_args = xbc_make_cmdline("init", false);
 	}
 	return;
 }
@@ -541,12 +608,12 @@ static int __init unknown_bootoption(char *param, char *val,
 		/* Environment option */
 		unsigned int i;
 		for (i = 0; envp_init[i]; i++) {
+			if (!strncmp(param, envp_init[i], len+1))
+				break;
 			if (i == MAX_INIT_ENVS) {
 				panic_later = "env";
 				panic_param = param;
 			}
-			if (!strncmp(param, envp_init[i], len+1))
-				break;
 		}
 		envp_init[i] = param;
 	} else {
@@ -574,7 +641,7 @@ static int __init init_setup(char *str)
 	 * the shell think it should execute a script with such name.
 	 * So we ignore all arguments entered _before_ init=... [MJ]
 	 */
-	for (i = 1; i < MAX_INIT_ARGS; i++)
+	for (i = 1; i <= MAX_INIT_ARGS; i++)
 		argv_init[i] = NULL;
 	return 1;
 }
@@ -587,7 +654,7 @@ static int __init rdinit_setup(char *str)
 	ramdisk_execute_command = str;
 	ramdisk_execute_command_set = true;
 	/* See "auto" comment in init_setup */
-	for (i = 1; i < MAX_INIT_ARGS; i++)
+	for (i = 1; i <= MAX_INIT_ARGS; i++)
 		argv_init[i] = NULL;
 	return 1;
 }
@@ -673,6 +740,11 @@ static __initdata DECLARE_COMPLETION(kthreadd_done);
 
 static noinline void __ref __noreturn rest_init(void)
 {
+	struct kernel_clone_args init_args = {
+		.flags		= (CLONE_VM | CLONE_UNTRACED),
+		.fn		= kernel_init,
+		.fn_arg		= NULL,
+	};
 	struct task_struct *tsk;
 	int pid;
 
@@ -683,7 +755,7 @@ static noinline void __ref __noreturn rest_init(void)
 	 * the init task will end up wanting to create kthreads, which, if
 	 * we schedule it before we create kthreadd, will OOPS.
 	 */
-	pid = user_mode_thread(kernel_init, NULL, CLONE_FS);
+	pid = kernel_clone(&init_args);
 	jagar_late_wdt_checkpoint(23);
 	/*
 	 * Pin init on the boot CPU. Task migration is not properly working
@@ -1024,13 +1096,13 @@ void start_kernel(void)
 				  __stop___param - __start___param,
 				  -1, -1, NULL, &unknown_bootoption);
 	print_unknown_bootoptions();
-	if (!IS_ERR_OR_NULL(after_dashes))
-		parse_args("Setting init args", after_dashes, NULL, 0, -1, -1,
-			   NULL, set_init_arg);
 	if (extra_init_args)
 		parse_args("Setting extra init args", extra_init_args,
 			   NULL, 0, -1, -1, NULL, set_init_arg);
 	jagar_late_wdt_checkpoint(20);
+	if (!IS_ERR_OR_NULL(after_dashes))
+		parse_args("Setting init args", after_dashes, NULL, 0, -1, -1,
+			   NULL, set_init_arg);
 
 	/* Architectural and non-timekeeping rng init, before allocator init */
 	random_init_early(command_line);
@@ -1636,7 +1708,7 @@ static void mark_readonly(void)
 		flush_module_init_free_work();
 		jump_label_init_ro();
 		mark_rodata_ro();
-		debug_checkwx();
+		pgtable_checkwx();
 		rodata_test();
 	} else if (IS_ENABLED(CONFIG_STRICT_KERNEL_RWX)) {
 		pr_info("Kernel memory protection disabled.\n");
@@ -1655,6 +1727,8 @@ void __weak free_initmem(void)
 static int __ref kernel_init(void *unused)
 {
 	int ret;
+
+	init_userspace_fs();
 
 	/*
 	 * Wait until kthreadd is all set-up.
@@ -1762,7 +1836,7 @@ static noinline void __init kernel_init_freeable(void)
 	 */
 	set_mems_allowed(node_states[N_MEMORY]);
 
-	cad_pid = get_pid(task_pid(current));
+	rcu_assign_pointer(cad_pid, get_pid(task_pid(current)));
 
 	smp_prepare_cpus(setup_max_cpus);
 

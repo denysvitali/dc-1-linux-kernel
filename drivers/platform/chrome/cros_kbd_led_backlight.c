@@ -188,7 +188,7 @@ static int keyboard_led_probe(struct platform_device *pdev)
 	if (!drvdata)
 		return -EINVAL;
 
-	keyboard_led = devm_kzalloc(&pdev->dev, sizeof(*keyboard_led), GFP_KERNEL);
+	keyboard_led = devm_kzalloc_obj(&pdev->dev, *keyboard_led);
 	if (!keyboard_led)
 		return -ENOMEM;
 
@@ -220,8 +220,8 @@ MODULE_DEVICE_TABLE(acpi, keyboard_led_acpi_match);
 #endif
 
 static const struct platform_device_id keyboard_led_id[] = {
-	{ "cros-keyboard-leds", 0 },
-	{}
+	{ .name = "cros-keyboard-leds" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, keyboard_led_id);
 

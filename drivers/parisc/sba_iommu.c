@@ -66,7 +66,6 @@
 #undef DEBUG_SBA_RESOURCE
 #undef ASSERT_PDIR_SANITY
 #undef DEBUG_LARGE_SG_ENTRIES
-#undef DEBUG_DMB_TRAP
 
 #ifdef DEBUG_SBA_INIT
 #define DBG_INIT(x...)	printk(x)
@@ -600,7 +599,7 @@ sba_io_pdir_entry(__le64 *pdir_ptr, space_t sid, phys_addr_t pba,
  * corresponding IO TLB entry. The Ike PCOM (Purge Command Register)
  * is to purge stale entries in the IO TLB when unmapping entries.
  *
- * The PCOM register supports purging of multiple pages, with a minium
+ * The PCOM register supports purging of multiple pages, with a minimum
  * of 1 page and a maximum of 2GB. Hardware requires the address be
  * aligned to the size of the range being purged. The size of the range
  * must be a power of 2. The "Cool perf optimization" in the
@@ -1695,12 +1694,6 @@ sba_common_init(struct sba_device *sba_dev)
 
 	for(i=0; i< sba_dev->num_ioc; i++) {
 		int res_size;
-#ifdef DEBUG_DMB_TRAP
-		extern void iterate_pages(unsigned long , unsigned long ,
-					  void (*)(pte_t * , unsigned long),
-					  unsigned long );
-		void set_data_memory_break(pte_t * , unsigned long);
-#endif
 		/* resource map size dictated by pdir_size */
 		res_size = sba_dev->ioc[i].pdir_size/sizeof(u64); /* entries */
 
@@ -1715,12 +1708,6 @@ sba_common_init(struct sba_device *sba_dev)
 
 		sba_dev->ioc[i].res_size = res_size;
 		sba_dev->ioc[i].res_map = (char *) __get_free_pages(GFP_KERNEL, get_order(res_size));
-
-#ifdef DEBUG_DMB_TRAP
-		iterate_pages( sba_dev->ioc[i].res_map, res_size,
-				set_data_memory_break, 0);
-#endif
-
 		if (NULL == sba_dev->ioc[i].res_map)
 		{
 			panic("%s:%s() could not allocate resource map\n",
@@ -1752,14 +1739,6 @@ sba_common_init(struct sba_device *sba_dev)
 				*p_start++ = -1;
 				
 		}
-
-#ifdef DEBUG_DMB_TRAP
-		iterate_pages( sba_dev->ioc[i].res_map, res_size,
-				set_data_memory_break, 0);
-		iterate_pages( sba_dev->ioc[i].pdir_base, sba_dev->ioc[i].pdir_size,
-				set_data_memory_break, 0);
-#endif
-
 		DBG_INIT("%s() %d res_map %x %p\n",
 			__func__, i, res_size, sba_dev->ioc[i].res_map);
 	}

@@ -255,6 +255,9 @@ void watchdog_hardlockup_check(unsigned int cpu, struct pt_regs *regs)
 			return;
 	}
 
+	if (hardlockup_panic)
+		console_verbose();
+
 	/*
 	 * NOTE: we call printk_cpu_sync_get_irqsave() after printing
 	 * the lockup message. While it would be nice to serialize
@@ -359,14 +362,14 @@ static void lockup_detector_update_enable(void)
 	if (watchdog_hardlockup_available && watchdog_hardlockup_user_enabled)
 		watchdog_enabled |= WATCHDOG_HARDLOCKUP_ENABLED;
 	if (watchdog_softlockup_user_enabled)
-		watchdog_enabled |= WATCHDOG_SOFTOCKUP_ENABLED;
+		watchdog_enabled |= WATCHDOG_SOFTLOCKUP_ENABLED;
 }
 
 #ifdef CONFIG_SOFTLOCKUP_DETECTOR
 
 /*
- * Delay the soflockup report when running a known slow code.
- * It does _not_ affect the timestamp of the last successdul reschedule.
+ * Delay the softlockup report when running a known slow code.
+ * It does _not_ affect the timestamp of the last successful reschedule.
  */
 #define SOFTLOCKUP_DELAY_REPORT	ULONG_MAX
 
@@ -742,7 +745,7 @@ static int is_softlockup(unsigned long touch_ts,
 			 unsigned long period_ts,
 			 unsigned long now)
 {
-	if ((watchdog_enabled & WATCHDOG_SOFTOCKUP_ENABLED) && watchdog_thresh) {
+	if ((watchdog_enabled & WATCHDOG_SOFTLOCKUP_ENABLED) && watchdog_thresh) {
 		/*
 		 * If period_ts has not been updated during a sample_period, then
 		 * in the subsequent few sample_periods, period_ts might also not
@@ -880,6 +883,10 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 		/* Start period for the next softlockup warning. */
 		update_report_ts();
 
+		thresh_count = duration / get_softlockup_thresh();
+		if (softlockup_panic && thresh_count >= softlockup_panic)
+			console_verbose();
+
 		printk_cpu_sync_get_irqsave(flags);
 		pr_emerg("BUG: soft lockup - CPU#%d stuck for %us! [%s:%d]\n",
 			smp_processor_id(), duration,
@@ -901,7 +908,6 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 
 		add_taint(TAINT_SOFTLOCKUP, LOCKDEP_STILL_OK);
 		sys_info(softlockup_si_mask & ~SYS_INFO_ALL_BT);
-		thresh_count = duration / get_softlockup_thresh();
 
 		if (softlockup_panic && thresh_count >= softlockup_panic)
 			panic("softlockup: hung tasks");
@@ -1098,11 +1104,11 @@ static void proc_watchdog_update(bool thresh_changed)
  * caller             | table->data points to            | 'which'
  * -------------------|----------------------------------|-------------------------------
  * proc_watchdog      | watchdog_user_enabled            | WATCHDOG_HARDLOCKUP_ENABLED |
- *                    |                                  | WATCHDOG_SOFTOCKUP_ENABLED
+ *                    |                                  | WATCHDOG_SOFTLOCKUP_ENABLED
  * -------------------|----------------------------------|-------------------------------
  * proc_nmi_watchdog  | watchdog_hardlockup_user_enabled | WATCHDOG_HARDLOCKUP_ENABLED
  * -------------------|----------------------------------|-------------------------------
- * proc_soft_watchdog | watchdog_softlockup_user_enabled | WATCHDOG_SOFTOCKUP_ENABLED
+ * proc_soft_watchdog | watchdog_softlockup_user_enabled | WATCHDOG_SOFTLOCKUP_ENABLED
  */
 static int proc_watchdog_common(int which, const struct ctl_table *table, int write,
 				void *buffer, size_t *lenp, loff_t *ppos)
@@ -1136,7 +1142,7 @@ static int proc_watchdog(const struct ctl_table *table, int write,
 			 void *buffer, size_t *lenp, loff_t *ppos)
 {
 	return proc_watchdog_common(WATCHDOG_HARDLOCKUP_ENABLED |
-				    WATCHDOG_SOFTOCKUP_ENABLED,
+				    WATCHDOG_SOFTLOCKUP_ENABLED,
 				    table, write, buffer, lenp, ppos);
 }
 
@@ -1159,7 +1165,7 @@ static int proc_nmi_watchdog(const struct ctl_table *table, int write,
 static int proc_soft_watchdog(const struct ctl_table *table, int write,
 			      void *buffer, size_t *lenp, loff_t *ppos)
 {
-	return proc_watchdog_common(WATCHDOG_SOFTOCKUP_ENABLED,
+	return proc_watchdog_common(WATCHDOG_SOFTLOCKUP_ENABLED,
 				    table, write, buffer, lenp, ppos);
 }
 #endif

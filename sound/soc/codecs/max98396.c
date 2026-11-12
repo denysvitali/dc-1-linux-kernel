@@ -790,10 +790,22 @@ static int max98396_dai_tdm_slot(struct snd_soc_dai *dai,
 #define MAX98396_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | \
 	SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
 
+static const u64 max98396_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops max98396_dai_ops = {
 	.set_fmt = max98396_dai_set_fmt,
 	.hw_params = max98396_dai_hw_params,
 	.set_tdm_slot = max98396_dai_tdm_slot,
+	.auto_selectable_formats = &max98396_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static int max98396_dac_event(struct snd_soc_dapm_widget *w,
@@ -1600,19 +1612,37 @@ static int max98396_resume(struct device *dev)
 	if (max98396->pvdd) {
 		ret = regulator_enable(max98396->pvdd);
 		if (ret < 0)
-			return ret;
+			goto err_core_supplies;
 	}
 
 	if (max98396->vbat) {
 		ret = regulator_enable(max98396->vbat);
 		if (ret < 0)
-			return ret;
+			goto err_pvdd;
 	}
 
 	regcache_cache_only(max98396->regmap, false);
 	max98396_reset(max98396, dev);
-	regcache_sync(max98396->regmap);
+	ret = regcache_sync(max98396->regmap);
+	if (ret < 0) {
+		regcache_cache_only(max98396->regmap, true);
+		regcache_mark_dirty(max98396->regmap);
+		goto err_vbat;
+	}
+
 	return 0;
+
+err_vbat:
+	if (max98396->vbat)
+		regulator_disable(max98396->vbat);
+err_pvdd:
+	if (max98396->pvdd)
+		regulator_disable(max98396->pvdd);
+err_core_supplies:
+	regulator_bulk_disable(MAX98396_NUM_CORE_SUPPLIES,
+			       max98396->core_supplies);
+
+	return ret;
 }
 
 static const struct dev_pm_ops max98396_pm = {
@@ -1733,7 +1763,7 @@ static int max98396_i2c_probe(struct i2c_client *i2c)
 	struct max98396_priv *max98396 = NULL;
 	int i, ret, reg;
 
-	max98396 = devm_kzalloc(&i2c->dev, sizeof(*max98396), GFP_KERNEL);
+	max98396 = devm_kzalloc_obj(&i2c->dev, *max98396);
 
 	if (!max98396) {
 		ret = -ENOMEM;

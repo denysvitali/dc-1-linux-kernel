@@ -32,7 +32,26 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/net.h>
+#include <linux/string.h>
 #include <net/sock.h>
+
+static const struct af_alg_allowlist_entry skcipher_allowlist[] = {
+	{ "adiantum(xchacha12,aes)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{ "adiantum(xchacha20,aes)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{ "cbc(aes)" }, /* iwd */
+	{ "cbc(des)" }, /* iwd */
+	{ "cbc(des3_ede)" }, /* iwd */
+	{ "cbc(paes)" }, /* caam and others */
+	{ "ctr(aes)" }, /* iwd */
+	{ "ecb(aes)" }, /* iwd, bluez */
+	{ "ecb(des)" }, /* iwd */
+	{ "hctr2(aes)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{ "xts(aes)", AF_ALG_UNPRIVILEGED }, /* cryptsetup benchmark */
+	{ "xts(camellia)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{ "xts(serpent)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{ "xts(twofish)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{},
+};
 
 static int skcipher_sendmsg(struct socket *sock, struct msghdr *msg,
 			    size_t size)
@@ -116,12 +135,16 @@ static int _skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
 	 * full block size buffers.
 	 */
 	if (ctx->more || len < ctx->used) {
-		if (len < bs) {
+		size_t excess = len % bs;
+
+		len -= excess;
+		iov_iter_revert(&msg->msg_iter, excess);
+
+		if (!len) {
 			err = -EINVAL;
 			goto free;
 		}
 
-		len -= len % bs;
 		cflags |= CRYPTO_SKCIPHER_REQ_NOTFINAL;
 	}
 
@@ -309,7 +332,17 @@ static struct proto_ops algif_skcipher_ops_nokey = {
 
 static void *skcipher_bind(const char *name)
 {
-	return crypto_alloc_skcipher(name, 0, AF_ALG_CRYPTOAPI_MASK);
+	u32 mask = AF_ALG_CRYPTOAPI_MASK;
+	int err;
+
+	err = af_alg_check_restriction(name, skcipher_allowlist);
+	if (err)
+		return ERR_PTR(err);
+
+	if (strcmp(name, "cbc(paes)") == 0)
+		mask = 0;
+
+	return crypto_alloc_skcipher(name, 0, mask);
 }
 
 static void skcipher_release(void *private)

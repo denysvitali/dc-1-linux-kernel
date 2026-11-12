@@ -75,7 +75,7 @@ static int elf_fdpic_map_file_by_direct_mmap(struct elf_fdpic_params *,
 					     struct file *, struct mm_struct *);
 
 #ifdef CONFIG_ELF_CORE
-static int elf_fdpic_core_dump(struct coredump_params *cprm);
+static bool elf_fdpic_core_dump(struct coredump_params *cprm);
 #endif
 
 static struct linux_binfmt elf_fdpic_format = {
@@ -263,7 +263,8 @@ static int load_elf_fdpic_binary(struct linux_binprm *bprm)
 			kdebug("Using ELF interpreter %s", interpreter_name);
 
 			/* replace the program with the interpreter */
-			interpreter = open_exec(interpreter_name);
+			interpreter = bprm_open_interpreter(bprm,
+							    interpreter_name);
 			retval = PTR_ERR(interpreter);
 			if (IS_ERR(interpreter)) {
 				interpreter = NULL;
@@ -298,6 +299,9 @@ static int load_elf_fdpic_binary(struct linux_binprm *bprm)
 		}
 
 	}
+
+	/* No PT_INTERP to substitute for: the override does not apply. */
+	bprm_drop_loader(bprm);
 
 	if (is_constdisp(&exec_params.hdr))
 		exec_params.flags |= ELF_FDPIC_FLAG_CONSTDISP;
@@ -509,7 +513,6 @@ static int create_elf_fdpic_tables(struct linux_binprm *bprm,
 	char *k_platform, *k_base_platform;
 	char __user *u_platform, *u_base_platform, *p;
 	int loop;
-	unsigned long flags = 0;
 	int ei_index;
 	elf_addr_t *elf_info;
 
@@ -649,9 +652,7 @@ static int create_elf_fdpic_tables(struct linux_binprm *bprm,
 	NEW_AUX_ENT(AT_PHENT,	sizeof(struct elf_phdr));
 	NEW_AUX_ENT(AT_PHNUM,	exec_params->hdr.e_phnum);
 	NEW_AUX_ENT(AT_BASE,	interp_params->elfhdr_addr);
-	if (bprm->interp_flags & BINPRM_FLAGS_PRESERVE_ARGV0)
-		flags |= AT_FLAGS_PRESERVE_ARGV0;
-	NEW_AUX_ENT(AT_FLAGS,	flags);
+	NEW_AUX_ENT(AT_FLAGS,	bprm_at_flags(bprm));
 	NEW_AUX_ENT(AT_ENTRY,	exec_params->entry_addr);
 	NEW_AUX_ENT(AT_UID,	(elf_addr_t) from_kuid_munged(cred->user_ns, cred->uid));
 	NEW_AUX_ENT(AT_EUID,	(elf_addr_t) from_kuid_munged(cred->user_ns, cred->euid));
@@ -1476,9 +1477,9 @@ static bool elf_fdpic_dump_segments(struct coredump_params *cprm,
  * and then they are actually written out.  If we run out of core limit
  * we just truncate.
  */
-static int elf_fdpic_core_dump(struct coredump_params *cprm)
+static bool elf_fdpic_core_dump(struct coredump_params *cprm)
 {
-	int has_dumped = 0;
+	bool ret = false;
 	int segs;
 	int i;
 	struct elfhdr *elf = NULL;
@@ -1503,7 +1504,7 @@ static int elf_fdpic_core_dump(struct coredump_params *cprm)
 	if (!psinfo)
 		goto end_coredump;
 
-	for (ct = current->signal->core_state->dumper.next;
+	for (ct = current->signal->core_state->tasks;
 					ct; ct = ct->next) {
 		tmp = elf_dump_thread_status(cprm->siginfo->si_signo,
 					     ct->task, &thread_status_size);
@@ -1535,7 +1536,7 @@ static int elf_fdpic_core_dump(struct coredump_params *cprm)
 	/* Set up header */
 	fill_elf_fdpic_header(elf, e_phnum);
 
-	has_dumped = 1;
+	cprm->state |= COREDUMP_STATE_STARTED;
 	/*
 	 * Set up the notes in similar form to SVR4 core dumps made
 	 * with info from their /proc.
@@ -1655,6 +1656,8 @@ static int elf_fdpic_core_dump(struct coredump_params *cprm)
 		       cprm->file->f_pos, offset);
 	}
 
+	ret = true;
+
 end_coredump:
 	while (thread_list) {
 		tmp = thread_list;
@@ -1665,7 +1668,7 @@ end_coredump:
 	kfree(elf);
 	kfree(psinfo);
 	kfree(shdr4extnum);
-	return has_dumped;
+	return ret;
 }
 
 #endif		/* CONFIG_ELF_CORE */

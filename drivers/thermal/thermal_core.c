@@ -889,7 +889,10 @@ unbind:
 	kfree(pos);
 }
 
-static struct class *thermal_class __ro_after_init;
+static const struct class thermal_class = {
+	.name = "thermal",
+};
+static bool thermal_class_unavailable __ro_after_init = true;
 
 static inline
 void print_bind_err_msg(struct thermal_zone_device *tz,
@@ -973,7 +976,7 @@ thermal_cooling_device_alloc(const char *type, const struct thermal_cooling_devi
 	    !ops->set_cur_state)
 		return ERR_PTR(-EINVAL);
 
-	if (!thermal_class)
+	if (thermal_class_unavailable)
 		return ERR_PTR(-ENODEV);
 
 	cdev = kzalloc_obj(*cdev);
@@ -1002,7 +1005,8 @@ out_kfree_cdev:
 	return ERR_PTR(ret);
 }
 
-int thermal_cooling_device_add(struct thermal_cooling_device *cdev, void *devdata)
+int thermal_cooling_device_add(struct thermal_cooling_device *cdev,
+			       struct device *parent, void *devdata)
 {
 	unsigned long current_state;
 	int ret;
@@ -1010,7 +1014,8 @@ int thermal_cooling_device_add(struct thermal_cooling_device *cdev, void *devdat
 	mutex_init(&cdev->lock);
 	INIT_LIST_HEAD(&cdev->thermal_instances);
 	cdev->updated = false;
-	cdev->device.class = thermal_class;
+	cdev->device.parent = parent;
+	cdev->device.class = &thermal_class;
 	cdev->device.release = thermal_cdev_release;
 	device_initialize(&cdev->device);
 	cdev->devdata = devdata;
@@ -1059,21 +1064,23 @@ out_put_device:
 }
 
 /**
- * thermal_cooling_device_register() - register a new thermal cooling device
+ * thermal_cooling_device_create() - register a new thermal cooling device
+ * @parent:	parent device (optional).
  * @type:	the thermal cooling device type.
  * @devdata:	device private data.
  * @ops:	standard thermal cooling devices callbacks.
  *
- * This interface function adds a new thermal cooling device (fan/processor/...)
- * to /sys/class/thermal/ folder as cooling_device[0-*]. It tries to bind itself
- * to all the thermal zone devices registered at the same time.
+ * Allocate and register a new thermal cooling device under the given parent (if
+ * not NULL) and with the given type, device data, and operations.  During the
+ * registration, it will be matched against all of the registered thermal zones
+ * and it will be bound to the matching ones.
  *
- * Return: a pointer to the created struct thermal_cooling_device or an
- * ERR_PTR. Caller must check return value with IS_ERR*() helpers.
+ * Return: A pointer to the created struct thermal_cooling_device or an ERR_PTR.
+ * Callers must use IS_ERR*() helpers to check the return value.
  */
-struct thermal_cooling_device *
-thermal_cooling_device_register(const char *type, void *devdata,
-				const struct thermal_cooling_device_ops *ops)
+struct thermal_cooling_device *thermal_cooling_device_create(
+			struct device *parent, const char *type, void *devdata,
+			const struct thermal_cooling_device_ops *ops)
 {
 	struct thermal_cooling_device *cdev;
 	int ret;
@@ -1082,13 +1089,13 @@ thermal_cooling_device_register(const char *type, void *devdata,
 	if (IS_ERR(cdev))
 		return cdev;
 
-	ret = thermal_cooling_device_add(cdev, devdata);
+	ret = thermal_cooling_device_add(cdev, parent, devdata);
 	if (ret)
 		return ERR_PTR(ret);
 
 	return cdev;
 }
-EXPORT_SYMBOL_GPL(thermal_cooling_device_register);
+EXPORT_SYMBOL_GPL(thermal_cooling_device_create);
 
 static void thermal_cooling_device_release(void *data)
 {
@@ -1447,7 +1454,7 @@ thermal_zone_device_register_with_trips(const char *type,
 	if (polling_delay && passive_delay > polling_delay)
 		return ERR_PTR(-EINVAL);
 
-	if (!thermal_class)
+	if (thermal_class_unavailable)
 		return ERR_PTR(-ENODEV);
 
 	tz = kzalloc_flex(*tz, trips, num_trips);
@@ -1483,7 +1490,7 @@ thermal_zone_device_register_with_trips(const char *type,
 	if (!tz->ops.critical)
 		tz->ops.critical = thermal_zone_device_critical;
 
-	tz->device.class = thermal_class;
+	tz->device.class = &thermal_class;
 	tz->device.release = thermal_zone_device_release;
 	tz->devdata = devdata;
 	tz->num_trips = num_trips;
@@ -1659,7 +1666,7 @@ EXPORT_SYMBOL_GPL(thermal_zone_device_unregister);
  *
  * Return: On success returns a reference to an unique thermal zone with
  * matching name equals to @name, an ERR_PTR otherwise (-EINVAL for invalid
- * paramenters, -ENODEV for not found and -EEXIST for multiple matches).
+ * parameters, -ENODEV for not found and -EEXIST for multiple matches).
  */
 struct thermal_zone_device *thermal_zone_get_zone_by_name(const char *name)
 {
@@ -1745,7 +1752,7 @@ static void __thermal_pm_prepare(void)
 
 void thermal_pm_prepare(void)
 {
-	if (!thermal_class)
+	if (thermal_class_unavailable)
 		return;
 
 	__thermal_pm_prepare();
@@ -1776,7 +1783,7 @@ void thermal_pm_complete(void)
 {
 	struct thermal_zone_device *tz;
 
-	if (!thermal_class)
+	if (thermal_class_unavailable)
 		return;
 
 	guard(mutex)(&thermal_list_lock);
@@ -1789,7 +1796,6 @@ void thermal_pm_complete(void)
 
 static int __init thermal_init(void)
 {
-	struct class *tc;
 	int result;
 
 	thermal_debug_init();
@@ -1808,13 +1814,12 @@ static int __init thermal_init(void)
 	if (result)
 		goto unregister_governors;
 
-	tc = class_create("thermal");
-	if (IS_ERR(tc)) {
-		result = PTR_ERR(tc);
+	result = class_register(&thermal_class);
+	if (result)
 		goto unregister_governors;
-	}
 
-	thermal_class = tc;
+	thermal_class_unavailable = false;
+
 	return 0;
 
 unregister_governors:

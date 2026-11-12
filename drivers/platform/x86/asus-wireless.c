@@ -132,13 +132,18 @@ static int asus_wireless_probe(struct platform_device *pdev)
 	const struct acpi_device_id *id;
 	int err;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	id = acpi_match_acpi_device(device_ids, adev);
+	if (!id)
+		return -ENODEV;
+
+	data = devm_kzalloc_obj(&pdev->dev, *data);
 	if (!data)
 		return -ENOMEM;
 
 	platform_set_drvdata(pdev, data);
 
 	data->adev = adev;
+	data->hswc_params = (const struct hswc_params *)id->driver_data;
 
 	data->idev = devm_input_allocate_device(&pdev->dev);
 	if (!data->idev)
@@ -152,12 +157,6 @@ static int asus_wireless_probe(struct platform_device *pdev)
 	err = input_register_device(data->idev);
 	if (err)
 		return err;
-
-	id = acpi_match_acpi_device(device_ids, adev);
-	if (!id)
-		return 0;
-
-	data->hswc_params = (const struct hswc_params *)id->driver_data;
 
 	data->wq = create_singlethread_workqueue("asus_wireless_workqueue");
 	if (!data->wq)

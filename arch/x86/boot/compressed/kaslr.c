@@ -32,6 +32,8 @@
 #include <asm/setup.h>	/* For COMMAND_LINE_SIZE */
 #undef _SETUP
 
+#include <asm/kexec_handover.h>
+
 extern unsigned long get_cmd_line_ptr(void);
 
 /* Simplified build-specific string for starting entropy. */
@@ -762,12 +764,12 @@ static void process_e820_entries(unsigned long minimum,
 }
 
 /*
- * If KHO is active, only process its scratch areas to ensure we are not
+ * If KHO is active, only process its bootmem areas to ensure we are not
  * stepping onto preserved memory.
  */
 static bool process_kho_entries(unsigned long minimum, unsigned long image_size)
 {
-	struct kho_scratch *kho_scratch;
+	struct kho_bootmem *kho_bootmem;
 	struct setup_data *ptr;
 	struct kho_data *kho;
 	int i, nr_areas = 0;
@@ -779,8 +781,8 @@ static bool process_kho_entries(unsigned long minimum, unsigned long image_size)
 	while (ptr) {
 		if (ptr->type == SETUP_KEXEC_KHO) {
 			kho = (struct kho_data *)(unsigned long)ptr->data;
-			kho_scratch = (void *)(unsigned long)kho->scratch_addr;
-			nr_areas = kho->scratch_size / sizeof(*kho_scratch);
+			kho_bootmem = (void *)(unsigned long)kho->bootmem_addr;
+			nr_areas = kho->bootmem_size / sizeof(*kho_bootmem);
 			break;
 		}
 
@@ -791,7 +793,7 @@ static bool process_kho_entries(unsigned long minimum, unsigned long image_size)
 		return false;
 
 	for (i = 0; i < nr_areas; i++) {
-		struct kho_scratch *area = &kho_scratch[i];
+		struct kho_bootmem *area = &kho_bootmem[i];
 		struct mem_vector region = {
 			.start = area->addr,
 			.size = area->size,
@@ -820,7 +822,7 @@ static unsigned long find_random_phys_addr(unsigned long minimum,
 	}
 
 	/*
-	 * During kexec handover only process KHO scratch areas that are known
+	 * During kexec handover only process KHO bootmem areas that are known
 	 * not to contain any data that must be preserved.
 	 */
 	if (!process_kho_entries(minimum, image_size) &&

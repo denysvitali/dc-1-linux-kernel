@@ -120,7 +120,8 @@ static int decode_layoutget(struct xdr_stream *xdr, struct rpc_rqst *req,
 				3*nfstime4_maxsz + \
 				nfs4_owner_maxsz + \
 				nfs4_group_maxsz + nfs4_label_maxsz + \
-				 decode_mdsthreshold_maxsz))
+				 decode_mdsthreshold_maxsz + \
+				 1)) /* uncacheable_file_data */
 #define nfs4_fattr_maxsz	(nfs4_fattr_bitmap_maxsz + \
 				nfs4_fattr_value_maxsz)
 #define decode_getattr_maxsz    (op_decode_hdr_maxsz + nfs4_fattr_maxsz)
@@ -4380,6 +4381,30 @@ static int decode_attr_open_arguments(struct xdr_stream *xdr, uint32_t *bitmap,
 	return 0;
 }
 
+static int decode_attr_uncacheable_file_data(struct xdr_stream *xdr, uint32_t *bitmap,
+				   uint32_t *res, uint64_t *flags)
+{
+	int status = 0;
+	__be32 *p;
+
+	if (unlikely(bitmap[2] & (FATTR4_WORD2_UNCACHEABLE_FILE_DATA - 1U)))
+		return -EIO;
+	if (likely(bitmap[2] & FATTR4_WORD2_UNCACHEABLE_FILE_DATA)) {
+		p = xdr_inline_decode(xdr, 4);
+		if (unlikely(!p))
+			return -EIO;
+		if (be32_to_cpup(p))
+			*res |= NFS_AUX_UNCACHEABLE_FILE_DATA;
+		else
+			*res &= ~NFS_AUX_UNCACHEABLE_FILE_DATA;
+		bitmap[2] &= ~FATTR4_WORD2_UNCACHEABLE_FILE_DATA;
+		*flags |= NFS_ATTR_FATTR_UNCACHEABLE_FILE_DATA;
+	}
+	dprintk("%s: uncacheable_file_data: =%s\n", __func__,
+		(*res & NFS_AUX_UNCACHEABLE_FILE_DATA) == 0 ? "false" : "true");
+	return status;
+}
+
 static int verify_attr_len(struct xdr_stream *xdr, unsigned int savep, uint32_t attrlen)
 {
 	unsigned int attrwords = XDR_QUADLEN(attrlen);
@@ -4725,6 +4750,8 @@ static int decode_getfattr_attrs(struct xdr_stream *xdr, uint32_t *bitmap,
 	uint32_t type;
 	int32_t err;
 
+	fattr->aux_flags = 0;
+
 	status = decode_attr_type(xdr, bitmap, &type);
 	if (status < 0)
 		goto xdr_error;
@@ -4843,6 +4870,12 @@ static int decode_getfattr_attrs(struct xdr_stream *xdr, uint32_t *bitmap,
 		goto xdr_error;
 	fattr->valid |= status;
 
+	status = decode_attr_uncacheable_file_data(xdr, bitmap, &fattr->aux_flags,
+					 &fattr->valid);
+	if (status < 0)
+		goto xdr_error;
+
+	status = 0;
 xdr_error:
 	dprintk("%s: xdr returned %d\n", __func__, -status);
 	return status;
@@ -5136,8 +5169,7 @@ static int decode_lock_denied(struct xdr_stream *xdr, struct file_lock *fl)
 	p = xdr_decode_hyper(p, &clientid); /* read 8 bytes */
 	namelen = be32_to_cpup(p); /* read 4 bytes */  /* have read all 32 bytes now */
 	p = xdr_inline_decode(xdr, namelen); /* variable size field */
-	if (likely(!p))
-		return -EIO;
+	/* We have an owner here, return DENIED */
 	return -NFS4ERR_DENIED;
 }
 
@@ -6154,7 +6186,7 @@ static int decode_layoutget(struct xdr_stream *xdr, struct rpc_rqst *req,
 		dprintk("NFS: server cheating in layoutget reply: "
 				"layout len %u > recvd %u\n",
 				res->layoutp->len, recvd);
-		status = -EINVAL;
+		status = -EMSGSIZE;
 		goto out;
 	}
 

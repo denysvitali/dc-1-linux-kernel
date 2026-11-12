@@ -119,7 +119,7 @@ static int mmap_violation_check(enum ima_hooks func, struct file *file,
 			*pathname = ima_d_path(&file->f_path, pathbuf,
 					       filename);
 		integrity_audit_msg(AUDIT_INTEGRITY_DATA, inode, *pathname,
-				    "mmap_file", "mmapped_writers", rc, 0);
+				    "mmap_file", "mmapped_writers", rc, 0, rc);
 	}
 	return rc;
 }
@@ -466,7 +466,7 @@ static int process_measurement(struct file *file, const struct cred *cred,
 
 		integrity_audit_msg(AUDIT_INTEGRITY_DATA, file_inode(file),
 				    pathname, "collect_data",
-				    "denied-hash-algorithm", rc, 0);
+				    "denied-hash-algorithm", rc, 0, rc);
 	}
 out_locked:
 	if ((mask & MAY_WRITE) && test_bit(IMA_DIGSIG, &iint->atomic_flags) &&
@@ -579,7 +579,8 @@ static int ima_file_mprotect(struct vm_area_struct *vma, unsigned long reqprot,
 	file = vma->vm_file;
 	pathname = ima_d_path(&file->f_path, &pathbuf, filename);
 	integrity_audit_msg(AUDIT_INTEGRITY_DATA, inode, pathname,
-			    "collect_data", "failed-mprotect", result, 0);
+			    "collect_data", "failed-mprotect", result, 0,
+			    result);
 	if (pathbuf)
 		__putname(pathbuf);
 
@@ -685,6 +686,43 @@ static int ima_file_check(struct file *file, int mask)
 	return process_measurement(file, current_cred(), &prop, NULL, 0,
 				   mask & (MAY_READ | MAY_WRITE | MAY_EXEC |
 					   MAY_APPEND), FILE_CHECK, 0, false);
+}
+
+/*
+ * ima_reset_action_flags - invalidate action flags after a content change
+ * @inode: inode of the file whose content is about to be truncated
+ *
+ * Clear IMA_DONE_MASK so the file is re-collected, re-measured,
+ * re-audited, and re-appraised on next access.
+ */
+static void ima_reset_action_flags(struct inode *inode)
+{
+	struct ima_iint_cache *iint;
+
+	if (!ima_policy_flag || !S_ISREG(inode->i_mode))
+		return;
+
+	iint = ima_iint_find(inode);
+	if (!iint)
+		return;
+
+	mutex_lock(&iint->mutex);
+	iint->flags &= ~IMA_DONE_MASK;
+	iint->measured_pcrs = 0;
+	mutex_unlock(&iint->mutex);
+	return;
+}
+
+static int ima_path_truncate(const struct path *path)
+{
+	ima_reset_action_flags(path->dentry->d_inode);
+	return 0;
+}
+
+static int ima_file_truncate(struct file *file)
+{
+	ima_reset_action_flags(file_inode(file));
+	return 0;
 }
 
 static int __ima_inode_hash(struct inode *inode, struct file *file, char *buf,
@@ -809,7 +847,7 @@ EXPORT_SYMBOL_GPL(ima_inode_hash);
  * Skip calling process_measurement(), but indicate which newly, created
  * tmpfiles are in policy.
  */
-static void ima_post_create_tmpfile(struct mnt_idmap *idmap,
+static void ima_post_create_tmpfile(const struct mnt_idmap *idmap,
 				    struct inode *inode)
 
 {
@@ -842,7 +880,7 @@ static void ima_post_create_tmpfile(struct mnt_idmap *idmap,
  * Mark files created via the mknodat syscall as new, so that the
  * file data can be written later.
  */
-static void ima_post_path_mknod(struct mnt_idmap *idmap, struct dentry *dentry)
+static void ima_post_path_mknod(const struct mnt_idmap *idmap, struct dentry *dentry)
 {
 	struct ima_iint_cache *iint;
 	struct inode *inode = dentry->d_inode;
@@ -1058,7 +1096,7 @@ static int ima_post_load_data(char *buf, loff_t size,
  * has been written to the passed location but not added to a measurement entry,
  * a negative value otherwise.
  */
-int process_buffer_measurement(struct mnt_idmap *idmap,
+int process_buffer_measurement(const struct mnt_idmap *idmap,
 			       struct inode *inode, const void *buf, int size,
 			       const char *eventname, enum ima_hooks func,
 			       int pcr, const char *func_data,
@@ -1158,9 +1196,9 @@ int process_buffer_measurement(struct mnt_idmap *idmap,
 
 out:
 	if (ret < 0)
-		integrity_audit_message(AUDIT_INTEGRITY_PCR, NULL, eventname,
-					func_measure_str(func),
-					audit_cause, ret, 0, ret);
+		integrity_audit_msg(AUDIT_INTEGRITY_PCR, NULL, eventname,
+				    func_measure_str(func),
+				    audit_cause, ret, 0, ret);
 
 	return ret;
 }
@@ -1220,6 +1258,28 @@ int ima_measure_critical_data(const char *event_label,
 					  digest_len);
 }
 EXPORT_SYMBOL_GPL(ima_measure_critical_data);
+
+/**
+ * ima_measure_raw_policy - Measure the raw policy write buffer
+ * @buf: pointer to the buffer containing the raw policy data
+ * @buf_len: size of the buffer
+ *
+ * Measure the raw policy buffer sent to the IMA policy securityfs file. The
+ * buffer is written from userspace, and the measurement is performed before
+ * parsing it. This measurement includes any data written on the policy file
+ * such as malformed policy rules and comments.
+ *
+ * Return 0 on success, a negative value otherwise.
+ */
+int ima_measure_raw_policy(const char *buf, size_t buf_len)
+{
+	if (!buf || !buf_len)
+		return -EINVAL;
+
+	return process_buffer_measurement(&nop_mnt_idmap, NULL, buf, buf_len,
+					  "ima_policy_written", POLICY_CHECK,
+					  0, NULL, false, NULL, 0);
+}
 
 #ifdef CONFIG_INTEGRITY_ASYMMETRIC_KEYS
 
@@ -1300,11 +1360,13 @@ static struct security_hook_list ima_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(file_release, ima_file_free),
 	LSM_HOOK_INIT(mmap_file, ima_file_mmap),
 	LSM_HOOK_INIT(file_mprotect, ima_file_mprotect),
+	LSM_HOOK_INIT(file_truncate, ima_file_truncate),
 	LSM_HOOK_INIT(kernel_load_data, ima_load_data),
 	LSM_HOOK_INIT(kernel_post_load_data, ima_post_load_data),
 	LSM_HOOK_INIT(kernel_read_file, ima_read_file),
 	LSM_HOOK_INIT(kernel_post_read_file, ima_post_read_file),
 	LSM_HOOK_INIT(path_post_mknod, ima_post_path_mknod),
+	LSM_HOOK_INIT(path_truncate, ima_path_truncate),
 #ifdef CONFIG_IMA_MEASURE_ASYMMETRIC_KEYS
 	LSM_HOOK_INIT(key_post_create_or_update, ima_post_key_create_or_update),
 #endif
@@ -1337,5 +1399,9 @@ DEFINE_LSM(ima) = {
 	.order = LSM_ORDER_LAST,
 	.blobs = &ima_blob_sizes,
 	/* Start IMA after the TPM is available */
+#ifndef CONFIG_IMA_INIT_LATE_SYNC
 	.initcall_late = init_ima,
+#else
+	.initcall_late_sync = init_ima,
+#endif
 };

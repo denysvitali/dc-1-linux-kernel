@@ -13,6 +13,35 @@
 #include "server.h"
 #include "stats.h"
 
+/*
+ * work->response_sz includes the RFC1002 length field while smb_get_msg()
+ * skips over it. Durable v1 and v2 response contexts are mutually exclusive,
+ * and POSIX CREATE contexts are only negotiated for SMB3.1.1.
+ */
+#define SMB2_CREATE_RSP_SIZE(lease_size, durable_size)			\
+	(sizeof(__be32) + offsetof(struct smb2_create_rsp, Buffer) +	\
+	 (lease_size) + (durable_size) +				\
+	 sizeof(struct create_mxac_rsp) +				\
+	 sizeof(struct create_disk_id_rsp) +				\
+	 AAPL_RSP_MAX_SIZE)
+
+#define SMB21_CREATE_RSP_SIZE						\
+	SMB2_CREATE_RSP_SIZE(sizeof(struct create_lease),		\
+			     sizeof(struct create_durable_rsp))
+
+#define SMB3_CREATE_DURABLE_RSP_SIZE					\
+	((sizeof(struct create_durable_rsp) >				\
+	  sizeof(struct create_durable_rsp_v2)) ?			\
+	 sizeof(struct create_durable_rsp) :				\
+	 sizeof(struct create_durable_rsp_v2))
+
+#define SMB3_CREATE_RSP_SIZE						\
+	SMB2_CREATE_RSP_SIZE(sizeof(struct create_lease_v2),		\
+			     SMB3_CREATE_DURABLE_RSP_SIZE)
+
+#define SMB311_CREATE_RSP_SIZE						\
+	(SMB3_CREATE_RSP_SIZE + sizeof(struct create_posix_rsp))
+
 static struct smb_version_values smb21_server_values = {
 	.version_string = SMB21_VERSION_STRING,
 	.protocol_id = SMB21_PROT_ID,
@@ -37,6 +66,8 @@ static struct smb_version_values smb21_server_values = {
 	.create_mxac_size = sizeof(struct create_mxac_rsp),
 	.create_disk_id_size = sizeof(struct create_disk_id_rsp),
 	.create_posix_size = sizeof(struct create_posix_rsp),
+	.create_aapl_size = AAPL_RSP_MAX_SIZE,
+	.create_rsp_size = SMB21_CREATE_RSP_SIZE,
 };
 
 static struct smb_version_values smb30_server_values = {
@@ -64,6 +95,8 @@ static struct smb_version_values smb30_server_values = {
 	.create_mxac_size = sizeof(struct create_mxac_rsp),
 	.create_disk_id_size = sizeof(struct create_disk_id_rsp),
 	.create_posix_size = sizeof(struct create_posix_rsp),
+	.create_aapl_size = AAPL_RSP_MAX_SIZE,
+	.create_rsp_size = SMB3_CREATE_RSP_SIZE,
 };
 
 static struct smb_version_values smb302_server_values = {
@@ -91,6 +124,8 @@ static struct smb_version_values smb302_server_values = {
 	.create_mxac_size = sizeof(struct create_mxac_rsp),
 	.create_disk_id_size = sizeof(struct create_disk_id_rsp),
 	.create_posix_size = sizeof(struct create_posix_rsp),
+	.create_aapl_size = AAPL_RSP_MAX_SIZE,
+	.create_rsp_size = SMB3_CREATE_RSP_SIZE,
 };
 
 static struct smb_version_values smb311_server_values = {
@@ -118,6 +153,8 @@ static struct smb_version_values smb311_server_values = {
 	.create_mxac_size = sizeof(struct create_mxac_rsp),
 	.create_disk_id_size = sizeof(struct create_disk_id_rsp),
 	.create_posix_size = sizeof(struct create_posix_rsp),
+	.create_aapl_size = AAPL_RSP_MAX_SIZE,
+	.create_rsp_size = SMB311_CREATE_RSP_SIZE,
 };
 
 static struct smb_version_ops smb2_0_server_ops = {
@@ -266,8 +303,10 @@ void init_smb3_02_server(struct ksmbd_conn *conn)
 	if (server_conf.flags & KSMBD_GLOBAL_FLAG_SMB3_MULTICHANNEL)
 		conn->vals->req_capabilities |= SMB2_GLOBAL_CAP_MULTI_CHANNEL;
 
-	if (server_conf.flags & KSMBD_GLOBAL_FLAG_DURABLE_HANDLE)
-		conn->vals->req_capabilities |= SMB2_GLOBAL_CAP_PERSISTENT_HANDLES;
+	/*
+	 * Durable handles are in-memory only.  Do not advertise persistent
+	 * handles until CA recovery and fencing are implemented.
+	 */
 }
 
 /**
@@ -290,10 +329,7 @@ int init_smb3_11_server(struct ksmbd_conn *conn)
 	if (server_conf.flags & KSMBD_GLOBAL_FLAG_SMB3_MULTICHANNEL)
 		conn->vals->req_capabilities |= SMB2_GLOBAL_CAP_MULTI_CHANNEL;
 
-	if (server_conf.flags & KSMBD_GLOBAL_FLAG_DURABLE_HANDLE)
-		conn->vals->req_capabilities |= SMB2_GLOBAL_CAP_PERSISTENT_HANDLES;
-
-	INIT_LIST_HEAD(&conn->preauth_sess_table);
+	/* See init_smb3_02_server(): persistent handles require CA recovery. */
 	return 0;
 }
 
@@ -326,6 +362,13 @@ void init_smb2_max_trans_size(unsigned int sz)
 
 void init_smb2_max_credits(unsigned int sz)
 {
+	/*
+	 * The command sequence window (and its backing bitmap) can track at
+	 * most SMB2_MAX_CREDITS outstanding sequence numbers, so the number of
+	 * credits granted on a connection must not exceed that.
+	 */
+	if (sz > SMB2_MAX_CREDITS)
+		sz = SMB2_MAX_CREDITS;
 	smb21_server_values.max_credits = sz;
 	smb30_server_values.max_credits = sz;
 	smb302_server_values.max_credits = sz;

@@ -9,6 +9,7 @@
 #include <linux/unaligned.h>
 
 #include <drm/bridge/mhl.h>
+#include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
@@ -2280,6 +2281,9 @@ static bool sii8620_mode_fixup(struct drm_bridge *bridge,
 }
 
 static const struct drm_bridge_funcs sii8620_bridge_funcs = {
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.attach = sii8620_attach,
 	.detach = sii8620_detach,
 	.mode_fixup = sii8620_mode_fixup,
@@ -2316,8 +2320,7 @@ static int sii8620_probe(struct i2c_client *client)
 					IRQF_TRIGGER_HIGH | IRQF_ONESHOT,
 					"sii8620", ctx);
 	if (ret < 0)
-		return dev_err_probe(dev, ret,
-				     "failed to install IRQ handler\n");
+		return ret;
 
 	ctx->gpio_reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(ctx->gpio_reset))
@@ -2370,7 +2373,7 @@ static const struct of_device_id sii8620_dt_match[] = {
 MODULE_DEVICE_TABLE(of, sii8620_dt_match);
 
 static const struct i2c_device_id sii8620_id[] = {
-	{ "sii8620" },
+	{ .name = "sii8620" },
 	{ }
 };
 

@@ -797,7 +797,7 @@ static int st_i2c_probe(struct platform_device *pdev)
 	struct i2c_adapter *adap;
 	int ret;
 
-	i2c_dev = devm_kzalloc(&pdev->dev, sizeof(*i2c_dev), GFP_KERNEL);
+	i2c_dev = devm_kzalloc_obj(&pdev->dev, *i2c_dev);
 	if (!i2c_dev)
 		return -ENOMEM;
 
@@ -825,8 +825,7 @@ static int st_i2c_probe(struct platform_device *pdev)
 			NULL, st_i2c_isr_thread,
 			IRQF_ONESHOT, pdev->name, i2c_dev);
 	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "Failed to request irq %i\n", i2c_dev->irq);
+		return ret;
 
 	pinctrl_pm_select_default_state(i2c_dev->dev);
 	/* In case idle state available, select it */

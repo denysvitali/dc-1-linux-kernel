@@ -423,6 +423,17 @@ static void devm_icc_release(struct device *dev, void *res)
 	icc_put(*(struct icc_path **)res);
 }
 
+/**
+ * devm_of_icc_get() - get a path handle from a DT node based on name
+ * @dev: device pointer for the consumer device
+ * @name: interconnect path name
+ *
+ * This function is the resource managed version of of_icc_get(). The path
+ * is released with icc_put() automatically when @dev is unbound.
+ *
+ * Return: icc_path pointer on success or ERR_PTR() on error. NULL is returned
+ * when the API is disabled or the "interconnects" DT property is missing.
+ */
 struct icc_path *devm_of_icc_get(struct device *dev, const char *name)
 {
 	struct icc_path **ptr, *path;
@@ -548,7 +559,7 @@ struct icc_path *of_icc_get_by_index(struct device *dev, int idx)
 	path->name = kasprintf(GFP_KERNEL, "%s-%s",
 			       src_data->node->name, dst_data->node->name);
 	if (!path->name) {
-		kfree(path);
+		icc_put(path);
 		path = ERR_PTR(-ENOMEM);
 	}
 
@@ -646,8 +657,9 @@ struct icc_path *icc_get(struct device *dev, const char *src, const char *dst)
 
 	path->name = kasprintf(GFP_KERNEL, "%s-%s", src_node->name, dst_node->name);
 	if (!path->name) {
-		kfree(path);
-		path = ERR_PTR(-ENOMEM);
+		mutex_unlock(&icc_lock);
+		icc_put(path);
+		return ERR_PTR(-ENOMEM);
 	}
 out:
 	mutex_unlock(&icc_lock);
@@ -785,12 +797,33 @@ static int __icc_enable(struct icc_path *path, bool enable)
 			  path->reqs[0].peak_bw);
 }
 
+/**
+ * icc_enable() - enable a path
+ * @path: interconnect path
+ *
+ * Mark all requests on the path as enabled and reapply the bandwidth that
+ * was last set with icc_set_bw().
+ * Passing a NULL @path is a no-op and returns 0.
+ *
+ * Return: 0 on success, or an appropriate error code otherwise.
+ */
 int icc_enable(struct icc_path *path)
 {
 	return __icc_enable(path, true);
 }
 EXPORT_SYMBOL_GPL(icc_enable);
 
+/**
+ * icc_disable() - disable a path
+ * @path: interconnect path
+ *
+ * Mark all requests on the path as disabled, so that they no longer count
+ * towards the aggregated bandwidth, and reapply the constraints. The
+ * requested bandwidth is kept and restored by icc_enable().
+ * Passing a NULL @path is a no-op and returns 0.
+ *
+ * Return: 0 on success, or an appropriate error code otherwise.
+ */
 int icc_disable(struct icc_path *path)
 {
 	return __icc_enable(path, false);

@@ -2,7 +2,7 @@
 #ifndef __LINUX_BITMAP_H
 #define __LINUX_BITMAP_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/align.h>
 #include <linux/bitops.h>
@@ -52,6 +52,7 @@ struct device;
  *  bitmap_complement(dst, src, nbits)          *dst = ~(*src)
  *  bitmap_equal(src1, src2, nbits)             Are *src1 and *src2 equal?
  *  bitmap_intersects(src1, src2, nbits)        Do *src1 and *src2 overlap?
+ *  bitmap_intersects_and(src1, src2, src3, nbits) Do *src1, *src2 and *src3 overlap?
  *  bitmap_subset(src1, src2, nbits)            Is *src1 a subset of *src2?
  *  bitmap_empty(src, nbits)                    Are all bits zero in *src?
  *  bitmap_full(src, nbits)                     Are all bits set in *src?
@@ -181,6 +182,9 @@ void __bitmap_replace(unsigned long *dst,
 		      const unsigned long *mask, unsigned int nbits);
 bool __bitmap_intersects(const unsigned long *bitmap1,
 			 const unsigned long *bitmap2, unsigned int nbits);
+bool __bitmap_intersects_and(const unsigned long *bitmap1,
+			     const unsigned long *bitmap2,
+			     const unsigned long *bitmap3, unsigned int nbits);
 bool __bitmap_subset(const unsigned long *bitmap1,
 		     const unsigned long *bitmap2, unsigned int nbits);
 unsigned int __bitmap_weight(const unsigned long *bitmap, unsigned int nbits);
@@ -209,6 +213,9 @@ unsigned long bitmap_find_next_zero_area_off(unsigned long *map,
  * The @align_mask should be one less than a power of 2; the effect is that
  * the bit offset of all zero areas this function finds is multiples of that
  * power of 2. A @align_mask of 0 means no alignment is required.
+ *
+ * Return: The bit offset of the found area or a value >= @size
+ * if no area is found.
  */
 static __always_inline
 unsigned long bitmap_find_next_zero_area(unsigned long *map,
@@ -440,6 +447,16 @@ bool bitmap_intersects(const unsigned long *src1, const unsigned long *src2, uns
 		return ((*src1 & *src2) & BITMAP_LAST_WORD_MASK(nbits)) != 0;
 	else
 		return __bitmap_intersects(src1, src2, nbits);
+}
+
+static __always_inline
+bool bitmap_intersects_and(const unsigned long *src1, const unsigned long *src2,
+			   const unsigned long *src3, unsigned int nbits)
+{
+	if (small_const_nbits(nbits))
+		return ((*src1 & *src2 & *src3) & BITMAP_LAST_WORD_MASK(nbits)) != 0;
+	else
+		return __bitmap_intersects_and(src1, src2, src3, nbits);
 }
 
 static __always_inline
@@ -697,14 +714,6 @@ void bitmap_gather(unsigned long *dst, const unsigned long *src,
 		__assign_bit(n++, dst, test_bit(bit, src));
 }
 
-static __always_inline
-void bitmap_next_set_region(unsigned long *bitmap, unsigned int *rs,
-			    unsigned int *re, unsigned int end)
-{
-	*rs = find_next_bit(bitmap, end, *rs);
-	*re = find_next_zero_bit(bitmap, end, *rs + 1);
-}
-
 /**
  * bitmap_release_region - release allocated bitmap region
  *	@bitmap: array of unsigned longs corresponding to the bitmap
@@ -894,6 +903,6 @@ void bitmap_write(unsigned long *map, unsigned long value,
 #define bitmap_set_value8(map, value, start)		\
 	bitmap_write(map, value, start, BITS_PER_BYTE)
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* __LINUX_BITMAP_H */

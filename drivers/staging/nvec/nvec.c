@@ -2,7 +2,7 @@
 /*
  * NVEC: NVIDIA compliant embedded controller interface
  *
- * Copyright (C) 2011 The AC100 Kernel Team <ac100@lists.lauchpad.net>
+ * Copyright (C) 2011 The AC100 Kernel Team <ac100@lists.launchpad.net>
  *
  * Authors:  Pierre-Hugues Husson <phhusson@free.fr>
  *           Ilya Petrov <ilya.muromec@gmail.com>
@@ -57,7 +57,7 @@
  * @NVEC_MSG_RX: The message is an incoming message (from EC)
  * @NVEC_MSG_TX: The message is an outgoing message (to EC)
  */
-enum nvec_msg_category  {
+enum nvec_msg_category {
 	NVEC_MSG_RX,
 	NVEC_MSG_TX,
 };
@@ -797,7 +797,7 @@ static int tegra_nvec_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	nvec = devm_kzalloc(dev, sizeof(struct nvec_chip), GFP_KERNEL);
+	nvec = devm_kzalloc_obj(dev, struct nvec_chip);
 	if (!nvec)
 		return -ENOMEM;
 

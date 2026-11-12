@@ -6,6 +6,7 @@
 
 #include <linux/dma-mapping.h>
 #include <linux/netdevice.h>
+#include <rdma/ib_verbs.h>
 
 #include "shm_channel.h"
 
@@ -47,16 +48,19 @@ enum gdma_queue_type {
 	GDMA_RQ,
 	GDMA_CQ,
 	GDMA_EQ,
+	GDMA_DIM,
 };
 
 enum gdma_work_request_flags {
 	GDMA_WR_NONE			= 0,
 	GDMA_WR_OOB_IN_SGL		= BIT(0),
 	GDMA_WR_PAD_BY_SGE0		= BIT(1),
+	GDMA_WR_IB_SGL			= BIT(2),
 };
 
 enum gdma_eqe_type {
 	GDMA_EQE_COMPLETION		= 3,
+	GDMA_EQE_THROTTLE		= 4,
 	GDMA_EQE_TEST_EVENT		= 64,
 	GDMA_EQE_HWC_INIT_EQ_ID_DB	= 129,
 	GDMA_EQE_HWC_INIT_DATA		= 130,
@@ -126,6 +130,17 @@ union gdma_doorbell_entry {
 		u64 tail_ptr	: 31;
 		u64 arm		: 1;
 	} eq;
+
+	struct {
+		u64 id           : 24;
+		u64 reserved     : 8;
+		u64 mod_usec     : 10;
+		u64 reserve1     : 5;
+		u64 mod_usec_vld : 1;
+		u64 mod_comps    : 8;
+		u64 reserve2     : 7;
+		u64 mod_comps_vld: 1;
+	} dim;
 }; /* HW DATA */
 
 struct gdma_msg_hdr {
@@ -170,6 +185,7 @@ struct gdma_general_req {
 #define GDMA_MESSAGE_V2 2
 #define GDMA_MESSAGE_V3 3
 #define GDMA_MESSAGE_V4 4
+#define GDMA_MESSAGE_V5 5
 
 struct gdma_general_resp {
 	struct gdma_resp_hdr hdr;
@@ -199,7 +215,10 @@ struct gdma_sge {
 }; /* HW DATA */
 
 struct gdma_wqe_request {
-	struct gdma_sge *sgl;
+	union {
+		struct gdma_sge *sgl;
+		struct ib_sge *ib_sgl;
+	};
 	u32 num_sge;
 
 	u32 inline_oob_size;
@@ -227,6 +246,14 @@ struct gdma_mem_info {
 	dma_addr_t dma_handle;
 	void *virt_addr;
 	u64 length;
+
+	/* Scattered fallback: when @nr_pages > 0 the ring is that many
+	 * PAGE_SIZE coherent allocations in @pages_va/@pages_dma, not
+	 * @virt_addr/@dma_handle.
+	 */
+	void **pages_va;
+	dma_addr_t *pages_dma;
+	unsigned int nr_pages;
 
 	/* Allocated by the PF driver */
 	u64 dma_region_handle;
@@ -265,6 +292,7 @@ struct gdma_dev {
 #define GDMA_EQE_SIZE 16
 #define GDMA_MAX_SQE_SIZE 512
 #define GDMA_MAX_RQE_SIZE 256
+#define GDMA_EQ_MAX_CHILD_CQ 2
 
 #define GDMA_COMP_DATA_SIZE 0x3C
 
@@ -291,6 +319,11 @@ struct gdma_event {
 };
 
 struct gdma_queue;
+
+struct gdma_eq_stats {
+	u64_stats_t throttle_count;
+	struct u64_stats_sync syncp;
+};
 
 struct mana_eq {
 	struct gdma_queue	*eq;
@@ -345,6 +378,10 @@ struct gdma_queue {
 			unsigned int irq;
 
 			u32 log2_throttle_limit;
+
+			struct gdma_eq_stats stats;
+
+			struct gdma_queue __rcu *child_cq[GDMA_EQ_MAX_CHILD_CQ];
 		} eq;
 
 		struct {
@@ -401,20 +438,83 @@ enum gdma_context_flags {
 	GC_IN_SERVICE		= 1,
 };
 
+struct gdma_context;
+
+/**
+ * struct gdma_bus_ops - transport-specific operations
+ *
+ * Lets the bus-agnostic GDMA core drive PCI and CDX devices without
+ * testing configuration symbols. Each bus driver installs its own
+ * instance in gdma_context.bus_ops at probe time.
+ *
+ * @bus_name: Bus token used to build the per-vector IRQ names.
+ * @adev_prefix: Prefix used for auxiliary-device match names.
+ * @msix_can_alloc_dyn: True if the bus can allocate MSI-X vectors after
+ *	probe time. Buses that size their vector pool at probe and cannot
+ *	grow it later leave this NULL.
+ * @msix_virq: Return the Linux IRQ number backing an MSI vector, or
+ *	-EINVAL if the vector has not been allocated yet.
+ * @msix_alloc_at: Allocate an MSI vector on demand and return its IRQ
+ *	number, updating @msi with the index actually assigned. Buses that
+ *	allocate their whole pool up front leave this NULL.
+ * @msix_free: Release a vector obtained from @msix_alloc_at. Only needed
+ *	by buses that implement @msix_alloc_at.
+ * @msix_vec_count: Return the number of entries in the device MSI-X table,
+ *	used to clamp the vector count the core asks for. Buses that cannot
+ *	report a table size leave this NULL and the clamp is skipped.
+ * @setup_hwc_irqs: Set up the interrupts the hardware channel needs before
+ *	it is created.
+ * @setup_remaining_irqs: Set up the remaining interrupts once the device
+ *	resource limits are known.
+ * @remove_irqs: Release the interrupts set up by @setup_hwc_irqs and
+ *	@setup_remaining_irqs.
+ * @dev_reset: Reset the device using the bus-level reset mechanism.
+ * @schedule_serv_work: Queue device servicing or recovery. Buses without
+ *	a servicing path leave this NULL.
+ * @drv_cap_flags1: Extra capability bits this transport can honour, OR'ed
+ *	into GDMA_DRV_CAP_FLAGS1 when the driver version is negotiated.
+ */
+struct gdma_bus_ops {
+	const char *bus_name;
+	const char *adev_prefix;
+	bool (*msix_can_alloc_dyn)(struct gdma_context *gc);
+	int (*msix_virq)(struct gdma_context *gc, int msi);
+	int (*msix_alloc_at)(struct gdma_context *gc, int *msi);
+	void (*msix_free)(struct gdma_context *gc, int msi, int irq);
+	int (*msix_vec_count)(struct gdma_context *gc);
+	int (*setup_hwc_irqs)(struct gdma_context *gc);
+	int (*setup_remaining_irqs)(struct gdma_context *gc);
+	void (*remove_irqs)(struct gdma_context *gc);
+	int (*dev_reset)(struct gdma_context *gc);
+	int (*schedule_serv_work)(struct gdma_context *gc,
+				  enum gdma_eqe_type type);
+	u64 drv_cap_flags1;
+};
+
 struct gdma_context {
 	struct device		*dev;
 	struct dentry		*mana_pci_debugfs;
+
+	/* Transport-specific operations, installed by the bus driver */
+	const struct gdma_bus_ops *bus_ops;
 
 	/* Hardware max number of queues */
 	unsigned int		max_num_queues;
 	/* Per-vPort max number of queues */
 	unsigned int		max_num_queues_vport;
+	/* Number of vPorts reported by the device, capped at
+	 * MAX_PORTS_IN_MANA_DEV
+	 */
+	u16			num_ports;
 	unsigned int		max_num_msix;
 	unsigned int		num_msix_usable;
 	struct xarray		irq_contexts;
 
 	/* L2 MTU */
 	u16 adapter_mtu;
+
+	/* NIC supports CQE x8 coalescing */
+	bool cqe8_coalescing_sup;
 
 	/* This maps a CQ index to the queue structure. */
 	unsigned int		max_num_cqs;
@@ -500,7 +600,19 @@ int mana_gd_poll_cq(struct gdma_queue *cq, struct gdma_comp *comp, int num_cqe);
 
 void mana_gd_ring_cq(struct gdma_queue *cq, u8 arm_bit);
 
+ssize_t mana_gd_read_ring(struct gdma_queue *q, char __user *buf,
+			  size_t count, loff_t *pos);
+
 int mana_schedule_serv_work(struct gdma_context *gc, enum gdma_eqe_type type);
+
+int mana_gd_alloc_service_wq(struct gdma_context *gc);
+
+void mana_gd_free_service_wq(struct gdma_context *gc);
+
+void mana_gd_ring_dim(struct gdma_queue *cq, u32 mod_usec, bool mod_usec_vld,
+		      u32 mod_comps, bool mod_comps_vld);
+
+bool mana_gd_detach_cq(struct gdma_context *gc, struct gdma_queue *queue);
 
 struct gdma_wqe {
 	u32 reserved	:24;
@@ -522,6 +634,7 @@ struct gdma_wqe {
 
 #define INLINE_OOB_SMALL_SIZE 8
 #define INLINE_OOB_LARGE_SIZE 24
+#define INLINE_OOB_EXTRA_LARGE_SIZE 32
 
 #define MANA_MAX_TX_WQE_SGL_ENTRIES 30
 
@@ -592,8 +705,12 @@ struct gdma_eqe {
 #define MANA_PF2_DEVICE_ID 0x00C1
 #define MANA_VF_DEVICE_ID 0x00BA
 
+#define MANA_CDX_DEVICE_ID 0x00C2
+
 struct gdma_posted_wqe_info {
 	u32 wqe_size_in_bu;
+	/* Unmasked WQE start offset in GDMA basic units. */
+	u32 wqe_offset;
 };
 
 /* GDMA_GENERATE_TEST_EQE */
@@ -650,22 +767,41 @@ enum {
 /* Driver supports self recovery on Hardware Channel timeouts */
 #define GDMA_DRV_CAP_FLAG_1_HWC_TIMEOUT_RECOVERY BIT(25)
 
+/* Driver supports dynamic interrupt moderation - DIM */
+#define GDMA_DRV_CAP_FLAG_1_DYN_INTERRUPT_MODERATION BIT(28)
+
+/* Driver supports non-contiguous queue buffers */
+#define GDMA_DRV_CAP_FLAG_1_NON_CONTIGUOUS_BUFFERS BIT(30)
+
+/* Driver supports handling throttled EQEs */
+#define GDMA_DRV_CAP_FLAG_1_THROTTLED_EVENT_QUEUE BIT_ULL(32)
+
+/* Capabilities in the PCI-only group below rely on dynamic MSI-X allocation
+ * and on the servicing and reset paths reached through
+ * mana_schedule_serv_work(). Transports that provide neither leave
+ * gdma_bus_ops.drv_cap_flags1 unset so the group is not advertised.
+ */
+#define GDMA_DRV_CAP_FLAGS1_PCI \
+	(GDMA_DRV_CAP_FLAG_1_DYNAMIC_IRQ_ALLOC_SUPPORT | \
+	 GDMA_DRV_CAP_FLAG_1_SELF_RESET_ON_EQE | \
+	 GDMA_DRV_CAP_FLAG_1_HANDLE_RECONFIG_EQE | \
+	 GDMA_DRV_CAP_FLAG_1_PROBE_RECOVERY | \
+	 GDMA_DRV_CAP_FLAG_1_HWC_TIMEOUT_RECOVERY)
+
 #define GDMA_DRV_CAP_FLAGS1 \
 	(GDMA_DRV_CAP_FLAG_1_EQ_SHARING_MULTI_VPORT | \
 	 GDMA_DRV_CAP_FLAG_1_NAPI_WKDONE_FIX | \
 	 GDMA_DRV_CAP_FLAG_1_HWC_TIMEOUT_RECONFIG | \
 	 GDMA_DRV_CAP_FLAG_1_VARIABLE_INDIRECTION_TABLE_SUPPORT | \
 	 GDMA_DRV_CAP_FLAG_1_DEV_LIST_HOLES_SUP | \
-	 GDMA_DRV_CAP_FLAG_1_DYNAMIC_IRQ_ALLOC_SUPPORT | \
-	 GDMA_DRV_CAP_FLAG_1_SELF_RESET_ON_EQE | \
-	 GDMA_DRV_CAP_FLAG_1_HANDLE_RECONFIG_EQE | \
 	 GDMA_DRV_CAP_FLAG_1_HW_VPORT_LINK_AWARE | \
 	 GDMA_DRV_CAP_FLAG_1_PERIODIC_STATS_QUERY | \
 	 GDMA_DRV_CAP_FLAG_1_SKB_LINEARIZE | \
-	 GDMA_DRV_CAP_FLAG_1_PROBE_RECOVERY | \
 	 GDMA_DRV_CAP_FLAG_1_HANDLE_STALL_SQ_RECOVERY | \
-	 GDMA_DRV_CAP_FLAG_1_HWC_TIMEOUT_RECOVERY | \
-	 GDMA_DRV_CAP_FLAG_1_EQ_MSI_UNSHARE_MULTI_VPORT)
+	 GDMA_DRV_CAP_FLAG_1_EQ_MSI_UNSHARE_MULTI_VPORT | \
+	 GDMA_DRV_CAP_FLAG_1_DYN_INTERRUPT_MODERATION | \
+	 GDMA_DRV_CAP_FLAG_1_NON_CONTIGUOUS_BUFFERS | \
+	 GDMA_DRV_CAP_FLAG_1_THROTTLED_EVENT_QUEUE)
 
 #define GDMA_DRV_CAP_FLAGS2 0
 
@@ -700,6 +836,9 @@ struct gdma_verify_ver_req {
 	u8 os_ver_str3[128];
 	u8 os_ver_str4[128];
 }; /* HW DATA */
+
+/* HW supports dynamic interrupt moderation - DIM */
+#define GDMA_PF_CAP_FLAG_1_DYN_INTERRUPT_MODERATION BIT(15)
 
 struct gdma_verify_ver_resp {
 	struct gdma_resp_hdr hdr;
@@ -867,8 +1006,8 @@ struct gdma_destroy_dma_region_req {
 }; /* HW DATA */
 
 enum gdma_pd_flags {
-	GDMA_PD_FLAG_INVALID = 0,
-	GDMA_PD_FLAG_ALLOW_GPA_MR = 1,
+	GDMA_PD_FLAG_ALLOW_GPA_MR = BIT(0),
+	GDMA_PD_FLAG_SHORT_PDN = BIT(2),
 };
 
 struct gdma_create_pd_req {
@@ -889,7 +1028,7 @@ struct gdma_destroy_pd_req {
 	u64 pd_handle;
 };/* HW DATA */
 
-struct gdma_destory_pd_resp {
+struct gdma_destroy_pd_resp {
 	struct gdma_resp_hdr hdr;
 };/* HW DATA */
 
@@ -1003,7 +1142,24 @@ struct gdma_destroy_dm_resp {
 	struct gdma_resp_hdr hdr;
 }; /* HW Data */
 
-int mana_gd_verify_vf_version(struct pci_dev *pdev);
+int mana_gd_verify_vf_version(struct gdma_context *gc);
+int mana_gd_query_max_resources(struct gdma_context *gc);
+int mana_gd_setup(struct gdma_context *gc);
+void mana_gd_cleanup(struct gdma_context *gc);
+int mana_gd_detect_devices(struct gdma_context *gc);
+int mana_gd_init_registers(struct gdma_context *gc);
+irqreturn_t mana_gd_intr(int irq, void *arg);
+void mana_gd_process_eq_events(void *arg);
+
+static inline u32 mana_gd_r32(struct gdma_context *g, u64 offset)
+{
+	return readl(g->bar0_va + offset);
+}
+
+static inline u64 mana_gd_r64(struct gdma_context *g, u64 offset)
+{
+	return readq(g->bar0_va + offset);
+}
 
 int mana_gd_register_device(struct gdma_dev *gd);
 int mana_gd_deregister_device(struct gdma_dev *gd);
@@ -1021,9 +1177,11 @@ void mana_gd_free_res_map(struct gdma_resource *r);
 
 void mana_gd_wq_ring_doorbell(struct gdma_context *gc,
 			      struct gdma_queue *queue);
+void mana_gd_wq_ring_doorbell_ext(struct gdma_context *gc, struct gdma_queue *queue,
+				  u32 tail_ptr, u8 wqe_cnt, u8 client_offset);
 
 int mana_gd_alloc_memory(struct gdma_context *gc, unsigned int length,
-			 struct gdma_mem_info *gmi);
+			 struct gdma_mem_info *gmi, bool allow_scatter);
 
 void mana_gd_free_memory(struct gdma_mem_info *gmi);
 
@@ -1036,8 +1194,6 @@ void mana_unregister_debugfs(void);
 
 int mana_rdma_service_event(struct gdma_context *gc, enum gdma_service_type event);
 
-int mana_gd_suspend(struct pci_dev *pdev, pm_message_t state);
-int mana_gd_resume(struct pci_dev *pdev);
 
 bool mana_need_log(struct gdma_context *gc, int err);
 
@@ -1048,4 +1204,6 @@ void mana_gd_put_gic(struct gdma_context *gc, bool use_msi_bitmap, int msi);
 int mana_gd_query_device_cfg(struct gdma_context *gc, u32 proto_major_ver,
 			     u32 proto_minor_ver, u32 proto_micro_ver,
 			     u16 *max_num_vports, u8 *bm_hostmode);
+int mana_gd_dev_reset(struct gdma_context *gc);
+
 #endif /* _GDMA_H */

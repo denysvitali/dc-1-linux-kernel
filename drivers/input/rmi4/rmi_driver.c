@@ -671,10 +671,9 @@ int rmi_read_register_desc(struct rmi_device *d, u16 addr,
 	rdesc->num_registers = bitmap_weight(presence_map,
 						RMI_REG_DESC_PRESENCE_BITS);
 
-	rdesc->registers = devm_kcalloc(&d->dev,
-					rdesc->num_registers,
-					sizeof(struct rmi_register_desc_item),
-					GFP_KERNEL);
+	rdesc->registers = devm_kzalloc_objs(&d->dev,
+					     struct rmi_register_desc_item,
+					     rdesc->num_registers);
 	if (!rdesc->registers)
 		return -ENOMEM;
 
@@ -991,6 +990,15 @@ int rmi_driver_suspend(struct rmi_device *rmi_dev, bool enable_wake)
 {
 	int retval;
 
+	/*
+	 * Transport driver will try to suspend RMI device even if physical
+	 * driver did not bind to the RMI device, because transport device
+	 * (I2C, SPI) is fully registered and operational. Exit early if
+	 * there is no driver data attached to the RMI device.
+	 */
+	if (!dev_get_drvdata(&rmi_dev->dev))
+		return 0;
+
 	retval = rmi_suspend_functions(rmi_dev);
 	if (retval)
 		dev_warn(&rmi_dev->dev, "Failed to suspend functions: %d\n",
@@ -1004,6 +1012,10 @@ EXPORT_SYMBOL_GPL(rmi_driver_suspend);
 int rmi_driver_resume(struct rmi_device *rmi_dev, bool clear_wake)
 {
 	int retval;
+
+	/* Skip if not fully bound to RMI driver */
+	if (!dev_get_drvdata(&rmi_dev->dev))
+		return 0;
 
 	rmi_enable_irq(rmi_dev, clear_wake);
 
@@ -1172,7 +1184,7 @@ static int rmi_driver_probe(struct device *dev)
 			return retval;
 	}
 
-	data = devm_kzalloc(dev, sizeof(struct rmi_driver_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct rmi_driver_data);
 	if (!data)
 		return -ENOMEM;
 

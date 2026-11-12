@@ -285,7 +285,7 @@ static void crashstate_get_bos(struct msm_gpu_state *state, struct msm_gem_submi
 		drm_gpuvm_for_each_va (vma, submit->vm)
 			cnt++;
 
-		state->bos = kcalloc(cnt, sizeof(struct msm_gpu_state_bo), GFP_KERNEL);
+		state->bos = kzalloc_objs(struct msm_gpu_state_bo, cnt);
 
 		if (state->bos)
 			drm_gpuvm_for_each_va(vma, submit->vm) {
@@ -301,8 +301,8 @@ static void crashstate_get_bos(struct msm_gpu_state *state, struct msm_gem_submi
 
 		drm_exec_fini(&exec);
 	} else {
-		state->bos = kcalloc(submit->nr_bos,
-			sizeof(struct msm_gpu_state_bo), GFP_KERNEL);
+		state->bos = kzalloc_objs(struct msm_gpu_state_bo,
+					  submit->nr_bos);
 
 		for (int i = 0; state->bos && i < submit->nr_bos; i++) {
 			struct drm_gem_object *obj = submit->bos[i].obj;
@@ -505,6 +505,8 @@ static void recover_worker(struct kthread_work *work)
 		 */
 		if (!vm->managed)
 			msm_gem_vm_unusable(submit->vm);
+
+		put_task_struct(task);
 	}
 
 	noreclaim_flag = memalloc_noreclaim_save();
@@ -552,10 +554,12 @@ static void recover_worker(struct kthread_work *work)
 		msm_update_fence(ring->fctx, fence);
 	}
 
-	/* retire completed submits, plus the one that hung: */
-	retire_submits(gpu);
+	priv->disable_err_irq = false;
 
 	gpu->funcs->recover(gpu);
+
+	/* retire completed submits, plus the one that hung: */
+	retire_submits(gpu);
 
 	/*
 	 * Replay all remaining submits starting with highest priority
@@ -875,7 +879,7 @@ msm_gpu_create_private_vm(struct msm_gpu *gpu, struct task_struct *task,
 			to_msm_vm(vm)->pid = get_pid(task_pid(task));
 	}
 
-	if (IS_ERR_OR_NULL(vm))
+	if (IS_ERR_OR_NULL(vm) && kernel_managed)
 		vm = drm_gpuvm_get(gpu->vm);
 
 	return vm;

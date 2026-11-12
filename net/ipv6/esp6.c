@@ -134,8 +134,8 @@ static void esp_ssg_unref(struct xfrm_state *x, void *tmp, struct sk_buff *skb, 
 		struct scatterlist *src = already_unref ? esp_req_sg(aead, req) : req->src;
 
 		for (sg = sg_next(src); sg; sg = sg_next(sg))
-			skb_page_unref(page_to_netmem(sg_page(sg)),
-				       skb->pp_recycle);
+			skb_netmem_unref(page_to_netmem(sg_page(sg)),
+					 skb->pp_recycle);
 	}
 }
 
@@ -230,7 +230,8 @@ static void esp_output_encap_csum(struct sk_buff *skb)
 	if (*skb_mac_header(skb) == IPPROTO_UDP) {
 		struct udphdr *uh = udp_hdr(skb);
 		struct ipv6hdr *ip6h = ipv6_hdr(skb);
-		int len = ntohs(uh->len);
+		/* esp6_output_udp_encap limits len to U16_MAX. */
+		int len = udp_get_len_short(uh);
 		unsigned int offset = skb_transport_offset(skb);
 		__wsum csum = skb_checksum(skb, offset, skb->len - offset, 0);
 
@@ -358,7 +359,7 @@ static struct ip_esp_hdr *esp6_output_udp_encap(struct sk_buff *skb,
 	uh = (struct udphdr *)esp->esph;
 	uh->source = sport;
 	uh->dest = dport;
-	uh->len = htons(len);
+	udp_set_len_short(uh, len);
 	uh->check = 0;
 
 	*skb_mac_header(skb) = IPPROTO_UDP;
@@ -469,6 +470,12 @@ int esp6_output_head(struct xfrm_state *x, struct sk_buff *skb, struct esp_info 
 			struct page_frag *pfrag = &x->xfrag;
 
 			esp->inplace = false;
+
+			/* Take real page refs and clear SKBFL_MANAGED_FRAG_REFS before
+			 * we mutate the frag array, so the per-frag unref stays balanced
+			 * for zerocopy managed frags (see __ip_append_data()).
+			 */
+			skb_zcopy_downgrade_managed(skb);
 
 			allocsize = ALIGN(tailen, L1_CACHE_BYTES);
 

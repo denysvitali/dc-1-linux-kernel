@@ -54,10 +54,12 @@ static void otx2_get_egress_burst_cfg(struct otx2_nic *nic, u32 burst,
 	if (burst) {
 		*burst_exp = ilog2(burst) ? ilog2(burst) - 1 : 0;
 		tmp = burst - rounddown_pow_of_two(burst);
-		if (burst < max_mantissa)
+		if (burst <= max_mantissa) {
 			*burst_mantissa = tmp * 2;
-		else
+		} else {
+			WARN_ON(*burst_exp < 7);
 			*burst_mantissa = tmp / (1ULL << (*burst_exp - 7));
+		}
 	} else {
 		*burst_exp = MAX_BURST_EXPONENT;
 		*burst_mantissa = max_mantissa;
@@ -1673,4 +1675,3 @@ void otx2_tc_apply_ingress_police_rules(struct otx2_nic *nic)
 			otx2_tc_config_ingress_rule(nic, node);
 	}
 }
-EXPORT_SYMBOL(otx2_tc_apply_ingress_police_rules);

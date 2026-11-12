@@ -826,14 +826,27 @@ static int rockchip_i2s_tdm_set_bclk_ratio(struct snd_soc_dai *dai,
 	return 0;
 }
 
+static const u64 rockchip_dai_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops rockchip_i2s_tdm_dai_ops = {
-	.probe = rockchip_i2s_tdm_dai_probe,
-	.hw_params = rockchip_i2s_tdm_hw_params,
-	.set_bclk_ratio	= rockchip_i2s_tdm_set_bclk_ratio,
-	.set_fmt = rockchip_i2s_tdm_set_fmt,
-	.set_sysclk = rockchip_i2s_tdm_set_sysclk,
-	.set_tdm_slot = rockchip_dai_tdm_slot,
-	.trigger = rockchip_i2s_tdm_trigger,
+	.probe				= rockchip_i2s_tdm_dai_probe,
+	.hw_params			= rockchip_i2s_tdm_hw_params,
+	.set_bclk_ratio			= rockchip_i2s_tdm_set_bclk_ratio,
+	.set_fmt			= rockchip_i2s_tdm_set_fmt,
+	.set_sysclk			= rockchip_i2s_tdm_set_sysclk,
+	.set_tdm_slot			= rockchip_dai_tdm_slot,
+	.trigger			= rockchip_i2s_tdm_trigger,
+	.auto_selectable_formats	= &rockchip_dai_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static const struct snd_soc_component_driver rockchip_i2s_tdm_component = {
@@ -1234,7 +1247,7 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 	void __iomem *regs;
 	int ret;
 
-	i2s_tdm = devm_kzalloc(&pdev->dev, sizeof(*i2s_tdm), GFP_KERNEL);
+	i2s_tdm = devm_kzalloc_obj(&pdev->dev, *i2s_tdm);
 	if (!i2s_tdm)
 		return -ENOMEM;
 
@@ -1263,16 +1276,14 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 	i2s_tdm->tx_reset = devm_reset_control_get_optional_exclusive(&pdev->dev,
 								      "tx-m");
 	if (IS_ERR(i2s_tdm->tx_reset)) {
-		ret = PTR_ERR(i2s_tdm->tx_reset);
-		return dev_err_probe(i2s_tdm->dev, ret,
+		return dev_err_probe(i2s_tdm->dev, PTR_ERR(i2s_tdm->tx_reset),
 				     "Error in tx-m reset control\n");
 	}
 
 	i2s_tdm->rx_reset = devm_reset_control_get_optional_exclusive(&pdev->dev,
 								      "rx-m");
 	if (IS_ERR(i2s_tdm->rx_reset)) {
-		ret = PTR_ERR(i2s_tdm->rx_reset);
-		return dev_err_probe(i2s_tdm->dev, ret,
+		return dev_err_probe(i2s_tdm->dev, PTR_ERR(i2s_tdm->rx_reset),
 				     "Error in rx-m reset control\n");
 	}
 
@@ -1363,17 +1374,12 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 	ret = devm_snd_soc_register_component(&pdev->dev,
 					      &rockchip_i2s_tdm_component,
 					      i2s_tdm->dai, 1);
-
-	if (ret) {
-		dev_err(&pdev->dev, "Could not register DAI\n");
+	if (ret)
 		goto err_suspend;
-	}
 
 	ret = devm_snd_dmaengine_pcm_register(&pdev->dev, NULL, 0);
-	if (ret) {
-		dev_err(&pdev->dev, "Could not register PCM\n");
+	if (ret)
 		goto err_suspend;
-	}
 
 	return 0;
 

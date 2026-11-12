@@ -837,9 +837,7 @@ static int mt6370_chg_init_irq(struct mt6370_priv *priv)
 						IRQF_TRIGGER_FALLING,
 						dev_name(priv->dev), priv);
 		if (ret)
-			return dev_err_probe(priv->dev, ret,
-					     "Failed to request irq %s\n",
-					     mt6370_chg_irqs[i].name);
+			return ret;
 	}
 
 	return 0;
@@ -851,7 +849,7 @@ static int mt6370_chg_probe(struct platform_device *pdev)
 	struct mt6370_priv *priv;
 	int ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -930,3 +928,4 @@ module_platform_driver(mt6370_chg_driver);
 MODULE_AUTHOR("ChiaEn Wu <chiaen_wu@richtek.com>");
 MODULE_DESCRIPTION("MediaTek MT6370 Charger Driver");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_CONSUMER");

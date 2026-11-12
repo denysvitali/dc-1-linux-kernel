@@ -33,6 +33,7 @@
 #include <linux/sysfb.h>
 #include <linux/efi.h>
 #include <linux/kernel.h>
+#include <linux/kexec.h>
 #include <linux/syscore_ops.h>
 #include <linux/dma-map-ops.h>
 #include <linux/pci.h>
@@ -1320,14 +1321,8 @@ static void vmbus_message_sched(struct hv_per_cpu_context *hv_cpu, void *message
 	msg = (struct hv_message *)message_page_addr + VMBUS_MESSAGE_SINT;
 
 	/* Check if there are actual msgs to be processed */
-	if (msg->header.message_type != HVMSG_NONE) {
-		if (msg->header.message_type == HVMSG_TIMER_EXPIRED) {
-			hv_stimer0_isr();
-			vmbus_signal_eom(msg, HVMSG_TIMER_EXPIRED);
-		} else {
-			tasklet_schedule(&hv_cpu->msg_dpc);
-		}
-	}
+	if (msg->header.message_type != HVMSG_NONE)
+		tasklet_schedule(&hv_cpu->msg_dpc);
 }
 
 static void __vmbus_isr(void)
@@ -1369,8 +1364,6 @@ static void run_vmbus_irqd(unsigned int cpu)
 	__vmbus_isr();
 }
 
-static bool vmbus_irq_initialized;
-
 static struct smp_hotplug_thread vmbus_irq_threads = {
 	.store                  = &vmbus_irqd,
 	.setup			= vmbus_irqd_setup,
@@ -1384,8 +1377,19 @@ void vmbus_isr(void)
 	if (IS_ENABLED(CONFIG_PREEMPT_RT)) {
 		vmbus_irqd_wake();
 	} else {
-		lockdep_hardirq_threaded();
+		static DEFINE_WAIT_OVERRIDE_MAP(vmbus_map, LD_WAIT_CONFIG);
+
+		/*
+		 * vmbus_isr is never force-threaded and always invoked at hard
+		 * IRQ level. __vmbus_isr() below can acquire a spinlock_t
+		 * which becomes a sleeping lock and must not be acquired in
+		 * this context. Therefore on PREEMPT_RT this will be threaded
+		 * via vmbus_irqd_wake(). On non-PREEMPT the annotation lets
+		 * lockdep know that acquiring a spinlock_t is not an issue.
+		 */
+		lock_map_acquire_try(&vmbus_map);
 		__vmbus_isr();
+		lock_map_release(&vmbus_map);
 	}
 }
 EXPORT_SYMBOL_FOR_MODULES(vmbus_isr, "mshv_vtl");
@@ -1486,11 +1490,10 @@ static int vmbus_bus_init(void)
 	 * the VMbus interrupt handler.
 	 */
 
-	if (IS_ENABLED(CONFIG_PREEMPT_RT) && !vmbus_irq_initialized) {
+	if (IS_ENABLED(CONFIG_PREEMPT_RT)) {
 		ret = smpboot_register_percpu_thread(&vmbus_irq_threads);
 		if (ret)
 			goto err_kthread;
-		vmbus_irq_initialized = true;
 	}
 
 	if (vmbus_irq == -1) {
@@ -1534,10 +1537,8 @@ err_connect:
 	else
 		free_percpu_irq(vmbus_irq, &vmbus_evt);
 err_setup:
-	if (IS_ENABLED(CONFIG_PREEMPT_RT) && vmbus_irq_initialized) {
+	if (IS_ENABLED(CONFIG_PREEMPT_RT))
 		smpboot_unregister_percpu_thread(&vmbus_irq_threads);
-		vmbus_irq_initialized = false;
-	}
 err_kthread:
 	bus_unregister(&hv_bus);
 	return ret;
@@ -2169,6 +2170,7 @@ int vmbus_device_register(struct hv_device *child_device_obj)
 	child_device_obj->device.dma_parms = &child_device_obj->dma_parms;
 	child_device_obj->device.dma_mask = &child_device_obj->dma_mask;
 	dma_set_mask(&child_device_obj->device, DMA_BIT_MASK(64));
+	dma_set_coherent_mask(&child_device_obj->device, DMA_BIT_MASK(64));
 
 	/*
 	 * Register with the LDM. This will kick off the driver/device
@@ -2570,10 +2572,14 @@ EXPORT_SYMBOL_GPL(vmbus_free_mmio);
 #ifdef CONFIG_ACPI
 static int vmbus_acpi_add(struct platform_device *pdev)
 {
+	struct acpi_device *ancestor;
+	struct acpi_device *device;
 	acpi_status result;
 	int ret_val = -ENODEV;
-	struct acpi_device *ancestor;
-	struct acpi_device *device = ACPI_COMPANION(&pdev->dev);
+
+	device = ACPI_COMPANION(&pdev->dev);
+	if (!device)
+		return -ENODEV;
 
 	vmbus_root_device = &device->dev;
 
@@ -2903,6 +2909,12 @@ static void hv_kexec_handler(void)
 	cpuhp_remove_state(hyperv_cpuhp_online);
 };
 
+static void hv_vmbus_syscore_shutdown(void *data)
+{
+	if (kexec_is_in_progress())
+		hv_kexec_handler();
+}
+
 static void hv_crash_handler(struct pt_regs *regs)
 {
 	int cpu;
@@ -2922,23 +2934,19 @@ static void hv_crash_handler(struct pt_regs *regs)
 static int hv_synic_suspend(void *data)
 {
 	/*
-	 * When we reach here, all the non-boot CPUs have been offlined.
-	 * If we're in a legacy configuration where stimer Direct Mode is
-	 * not enabled, the stimers on the non-boot CPUs have been unbound
-	 * in hv_synic_cleanup() -> hv_stimer_legacy_cleanup() ->
-	 * hv_stimer_cleanup() -> clockevents_unbind_device().
+	 * When we reach here, all the non-boot CPUs have been offlined,
+	 * and their stimers have been cleaned up by the cpuhp teardown
+	 * callback hv_stimer_cleanup().
 	 *
 	 * hv_synic_suspend() only runs on CPU0 with interrupts disabled.
-	 * Here we do not call hv_stimer_legacy_cleanup() on CPU0 because:
-	 * 1) it's unnecessary as interrupts remain disabled between
-	 * syscore_suspend() and syscore_resume(): see create_image() and
+	 * The stimer on CPU0 is not explicitly cleaned up here because:
+	 * 1) it's harmless as interrupts remain disabled between
+	 * syscore_suspend() and syscore_resume(), so the stimer cannot
+	 * fire during this window: see create_image() and
 	 * resume_target_kernel()
 	 * 2) the stimer on CPU0 is automatically disabled later by
 	 * syscore_suspend() -> timekeeping_suspend() -> tick_suspend() -> ...
 	 * -> clockevents_shutdown() -> ... -> hv_ce_shutdown()
-	 * 3) a warning would be triggered if we call
-	 * clockevents_unbind_device(), which may sleep, in an
-	 * interrupts-disabled context.
 	 */
 
 	hv_hyp_synic_disable_regs(0);
@@ -2957,14 +2965,15 @@ static void hv_synic_resume(void *data)
 	 */
 }
 
-/* The callbacks run only on CPU0, with irqs_disabled. */
-static const struct syscore_ops hv_synic_syscore_ops = {
+/* The suspend and resume callbacks run only on CPU0, with irqs_disabled. */
+static const struct syscore_ops hv_vmbus_syscore_ops = {
 	.suspend = hv_synic_suspend,
 	.resume = hv_synic_resume,
+	.shutdown = hv_vmbus_syscore_shutdown,
 };
 
-static struct syscore hv_synic_syscore = {
-	.ops = &hv_synic_syscore_ops,
+static struct syscore hv_vmbus_syscore = {
+	.ops = &hv_vmbus_syscore_ops,
 };
 
 static int __init hv_acpi_init(void)
@@ -2975,6 +2984,13 @@ static int __init hv_acpi_init(void)
 		return -ENODEV;
 
 	if (hv_root_partition() && !hv_nested)
+		/*
+		 * A non-nested root partition does not need VMBus client
+		 * functionality. However, the mshv_root module may have
+		 * a dependency on the VMBus module as described in
+		 * commit 840b740a35bf. Return success so the module
+		 * loads even though no VMBus initialization is done.
+		 */
 		return 0;
 
 	/*
@@ -3006,10 +3022,9 @@ static int __init hv_acpi_init(void)
 	if (ret)
 		goto cleanup;
 
-	hv_setup_kexec_handler(hv_kexec_handler);
 	hv_setup_crash_handler(hv_crash_handler);
 
-	register_syscore(&hv_synic_syscore);
+	register_syscore(&hv_vmbus_syscore);
 
 	return 0;
 
@@ -3023,21 +3038,26 @@ static void __exit vmbus_exit(void)
 {
 	int cpu;
 
-	unregister_syscore(&hv_synic_syscore);
+	if (hv_root_partition() && !hv_nested)
+		/*
+		 * If a non-nested root partition loaded the VMBus module,
+		 * hv_acpi_init() did not do any VMBus initialization.
+		 * There's nothing to clean up, so just return.
+		 */
+		return;
 
-	hv_remove_kexec_handler();
+	unregister_syscore(&hv_vmbus_syscore);
+
 	hv_remove_crash_handler();
-	vmbus_connection.conn_state = DISCONNECTED;
 	hv_stimer_global_cleanup();
 	vmbus_disconnect();
 	if (vmbus_irq == -1)
 		hv_remove_vmbus_handler();
 	else
 		free_percpu_irq(vmbus_irq, &vmbus_evt);
-	if (IS_ENABLED(CONFIG_PREEMPT_RT) && vmbus_irq_initialized) {
+	if (IS_ENABLED(CONFIG_PREEMPT_RT))
 		smpboot_unregister_percpu_thread(&vmbus_irq_threads);
-		vmbus_irq_initialized = false;
-	}
+
 	for_each_online_cpu(cpu) {
 		struct hv_per_cpu_context *hv_cpu
 			= per_cpu_ptr(hv_context.cpu_context, cpu);

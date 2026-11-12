@@ -336,7 +336,7 @@ static int is_psy_prop_writeable(struct gb_power_supply *gbpsy,
 
 static int is_prop_valint(enum power_supply_property psp)
 {
-	return ((psp < POWER_SUPPLY_PROP_MODEL_NAME) ? 1 : 0);
+	return (psp < POWER_SUPPLY_PROP_MODEL_NAME) ? 1 : 0;
 }
 
 static void next_interval(struct gb_power_supply *gbpsy)
@@ -377,12 +377,8 @@ static void gb_power_supply_state_change(struct gb_power_supply *gbpsy,
 			gbpsy->pm_acquired = true;
 	} else {
 		if (gbpsy->pm_acquired) {
-			ret = gb_pm_runtime_put_autosuspend(connection->bundle);
-			if (ret)
-				dev_err(&connection->bundle->dev,
-					"Fail to set wake unlock for none charging\n");
-			else
-				gbpsy->pm_acquired = false;
+			gb_pm_runtime_put_autosuspend(connection->bundle);
+			gbpsy->pm_acquired = false;
 		}
 	}
 
@@ -423,7 +419,7 @@ static void check_changed(struct gb_power_supply *gbpsy,
 static int total_props(struct gb_power_supply *gbpsy)
 {
 	/* this return the intval plus the strval properties */
-	return (gbpsy->properties_count + gbpsy->properties_count_str);
+	return gbpsy->properties_count + gbpsy->properties_count_str;
 }
 
 static void prop_append(struct gb_power_supply *gbpsy,

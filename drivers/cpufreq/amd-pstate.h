@@ -11,6 +11,15 @@
 #include <linux/pm_qos.h>
 #include <linux/platform_profile.h>
 
+#include <asm/processor.h>
+
+#if IS_MODULE(CONFIG_X86_AMD_PSTATE_UT)
+#define EXPORT_SYMBOL_FOR_PSTATE_UT(symbol) \
+	EXPORT_SYMBOL_FOR_MODULES(symbol, "amd-pstate-ut")
+#else
+#define EXPORT_SYMBOL_FOR_PSTATE_UT(symbol)
+#endif
+
 /*********************************************************************
  *                        AMD P-state INTERFACE                       *
  *********************************************************************/
@@ -32,6 +41,7 @@
  * @min_limit_perf: Cached value of the performance corresponding to policy->min
  * @max_limit_perf: Cached value of the performance corresponding to policy->max
  * @bios_min_perf: Cached perf value corresponding to the "Requested CPU Min Frequency" BIOS option
+ * @val: Raw 64-bit value for atomic access via READ_ONCE()/WRITE_ONCE()
  */
 union perf_cached {
 	struct {
@@ -89,7 +99,12 @@ struct amd_aperf_mperf {
  * @epp_default_ac: Default EPP value for AC power source
  * @epp_default_dc: Default EPP value for DC power source
  * @dynamic_epp: Whether dynamic EPP is enabled
+ * @raw_epp: Whether the last EPP write was a raw numeric value rather than a
+ *	     named preference
  * @power_nb: Notifier block for power events
+ * @current_profile: Currently selected platform profile option
+ * @ppdev: Device registered with the platform profile handler
+ * @profile_name: Name under which @ppdev is registered
  *
  * The amd_cpudata is key private data for each CPU thread in AMD P-State, and
  * represents all the attributes and goals that AMD P-State requests at runtime.
@@ -133,6 +148,8 @@ struct amd_cpudata {
 	enum platform_profile_option current_profile;
 	struct device *ppdev;
 	char *profile_name;
+
+	enum x86_topology_cpu_type cpu_type;
 };
 
 /*
@@ -146,6 +163,62 @@ enum amd_pstate_mode {
 	AMD_PSTATE_GUIDED,
 	AMD_PSTATE_MAX,
 };
+
+/*
+ * AMD Energy Preference Performance (EPP)
+ * The EPP is used in the CCLK DPM controller to drive
+ * the frequency that a core is going to operate during
+ * short periods of activity. EPP values will be utilized for
+ * different OS profiles (balanced, performance, power savings)
+ * display strings corresponding to EPP index in the
+ * energy_perf_strings[]
+ *	index		String
+ *-------------------------------------
+ *	0		default
+ *	1		performance
+ *	2		balance_performance
+ *	3		balance_power
+ *	4		power
+ *	5		custom (for raw EPP values)
+ *	6		dynamic (platform profile driven selection)
+ */
+enum energy_perf_value_index {
+	EPP_INDEX_DEFAULT = 0,
+	EPP_INDEX_PERFORMANCE,
+	EPP_INDEX_BALANCE_PERFORMANCE,
+	EPP_INDEX_BALANCE_POWERSAVE,
+	EPP_INDEX_POWERSAVE,
+	EPP_INDEX_CUSTOM,
+	EPP_INDEX_DYNAMIC,
+	EPP_INDEX_MAX,
+};
+
+static const char * const energy_perf_strings[] = {
+	[EPP_INDEX_DEFAULT] = "default",
+	[EPP_INDEX_PERFORMANCE] = "performance",
+	[EPP_INDEX_BALANCE_PERFORMANCE] = "balance_performance",
+	[EPP_INDEX_BALANCE_POWERSAVE] = "balance_power",
+	[EPP_INDEX_POWERSAVE] = "power",
+	[EPP_INDEX_CUSTOM] = "custom",
+	[EPP_INDEX_DYNAMIC] = "dynamic",
+};
+static_assert(ARRAY_SIZE(energy_perf_strings) == EPP_INDEX_MAX);
+
+u8 *amd_pstate_cpu_epp_values(enum x86_topology_cpu_type cpu_type);
+
+static inline u8 freq_to_perf(union perf_cached perf, u32 nominal_freq, unsigned int freq_val)
+{
+	u32 perf_val = DIV_ROUND_UP_ULL((u64)freq_val * perf.nominal_perf, nominal_freq);
+
+	return (u8)clamp(perf_val, perf.lowest_perf, perf.highest_perf);
+}
+
+static inline u32 perf_to_freq(union perf_cached perf, u32 nominal_freq, u8 perf_val)
+{
+	return DIV_ROUND_UP_ULL((u64)nominal_freq * perf_val,
+				perf.nominal_perf);
+}
+
 const char *amd_pstate_get_mode_string(enum amd_pstate_mode mode);
 int amd_pstate_get_status(void);
 int amd_pstate_update_status(const char *buf, size_t size);
@@ -153,6 +226,8 @@ ssize_t store_energy_performance_preference(struct cpufreq_policy *policy,
 				    const char *buf, size_t count);
 ssize_t show_energy_performance_preference(struct cpufreq_policy *policy, char *buf);
 void amd_pstate_clear_dynamic_epp(struct cpufreq_policy *policy);
+ssize_t store_amd_pstate_floor_freq(struct cpufreq_policy *policy, const char *buf, size_t count);
+ssize_t show_amd_pstate_floor_freq(struct cpufreq_policy *policy, char *buf);
 
 struct freq_attr;
 

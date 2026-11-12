@@ -64,7 +64,7 @@ MODULE_PARM_DESC(force, "force loading on processors with erratum 319");
 #define F15H_M60H_HARDWARE_TEMP_CTRL_OFFSET	0xd8200c64
 #define F15H_M60H_REPORTED_TEMP_CTRL_OFFSET	0xd8200ca4
 
-/* Common for Zen CPU families (Family 17h and 18h and 19h and 1Ah) */
+/* Common for Zen CPU families (Family 17h, 19h and 1Ah) */
 #define ZEN_REPORTED_TEMP_CTRL_BASE		0x00059800
 
 #define ZEN_CCD_TEMP(offset, x)			(ZEN_REPORTED_TEMP_CTRL_BASE + \
@@ -94,6 +94,7 @@ MODULE_PARM_DESC(force, "force loading on processors with erratum 319");
  * Defining locally as IDs are not shared.
  */
 #define PCI_DEVICE_ID_AMD_1AH_M50H_DF_F3	0x12cb
+#define PCI_DEVICE_ID_AMD_1AH_M80H_DF_F3	0x1243
 #define PCI_DEVICE_ID_AMD_1AH_M90H_DF_F3	0x127b
 
 struct k10temp_data {
@@ -207,6 +208,10 @@ static const char *k10temp_temp_label[] = {
 	"Tccd10",
 	"Tccd11",
 	"Tccd12",
+	"Tccd13",
+	"Tccd14",
+	"Tccd15",
+	"Tccd16",
 };
 
 static int k10temp_read_labels(struct device *dev,
@@ -243,7 +248,7 @@ static int k10temp_read_temp(struct device *dev, u32 attr, int channel,
 			if (*val < 0 && !data->disp_negative)
 				*val = 0;
 			break;
-		case 2 ... 13:		/* Tccd{1-12} */
+		case 2 ... 17:		/* Tccd{1-16} */
 			ret = read_ccd_temp_reg(data, channel - 2, &regval);
 
 			if (ret)
@@ -384,6 +389,10 @@ static const struct hwmon_channel_info * const k10temp_info[] = {
 			   HWMON_T_INPUT | HWMON_T_LABEL,
 			   HWMON_T_INPUT | HWMON_T_LABEL,
 			   HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_INPUT | HWMON_T_LABEL,
 			   HWMON_T_INPUT | HWMON_T_LABEL),
 	NULL
 };
@@ -441,7 +450,7 @@ static int k10temp_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 			 "unreliable CPU thermal sensor; check erratum 319\n");
 	}
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -467,7 +476,7 @@ static int k10temp_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		data->read_tempreg = read_tempreg_pci;
 	}
 
-	if (boot_cpu_data.x86 == 0x17 || boot_cpu_data.x86 == 0x18) {
+	if (boot_cpu_data.x86 == 0x17) {
 		switch (boot_cpu_data.x86_model) {
 		case 0x1:	/* Zen */
 		case 0x8:	/* Zen+ */
@@ -515,6 +524,10 @@ static int k10temp_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		}
 	} else if (boot_cpu_data.x86 == 0x1a) {
 		switch (boot_cpu_data.x86_model) {
+		case 0x00 ... 0x1f:	/* Zen5 Turin */
+			data->ccd_offset = 0x1F0;
+			k10temp_get_ccd_support(data, 16);
+			break;
 		case 0x40 ... 0x4f:	/* Zen5 Ryzen Desktop */
 			data->ccd_offset = 0x308;
 			k10temp_get_ccd_support(data, 8);
@@ -570,8 +583,8 @@ static const struct pci_device_id k10temp_id_table[] = {
 	{ PCI_VDEVICE(AMD, PCI_DEVICE_ID_AMD_1AH_M50H_DF_F3) },
 	{ PCI_VDEVICE(AMD, PCI_DEVICE_ID_AMD_1AH_M60H_DF_F3) },
 	{ PCI_VDEVICE(AMD, PCI_DEVICE_ID_AMD_1AH_M70H_DF_F3) },
+	{ PCI_VDEVICE(AMD, PCI_DEVICE_ID_AMD_1AH_M80H_DF_F3) },
 	{ PCI_VDEVICE(AMD, PCI_DEVICE_ID_AMD_1AH_M90H_DF_F3) },
-	{ PCI_VDEVICE(HYGON, PCI_DEVICE_ID_AMD_17H_DF_F3) },
 	{}
 };
 MODULE_DEVICE_TABLE(pci, k10temp_id_table);

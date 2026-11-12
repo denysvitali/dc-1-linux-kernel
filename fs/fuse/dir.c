@@ -34,7 +34,7 @@ struct dentry_bucket {
 #define FUSE_HASH_BITS	5
 #define FUSE_HASH_SIZE	(1 << FUSE_HASH_BITS)
 static struct dentry_bucket dentry_hash[FUSE_HASH_SIZE];
-struct delayed_work dentry_tree_work;
+static struct delayed_work dentry_tree_work;
 
 /* Minimum invalidation work queue frequency */
 #define FUSE_DENTRY_INVAL_FREQ_MIN 5
@@ -96,6 +96,7 @@ static void fuse_advise_use_readdirplus(struct inode *dir)
 
 struct fuse_dentry {
 	u64 time;
+	u64 epoch;
 	union {
 		struct rcu_head rcu;
 		struct rb_node node;
@@ -234,6 +235,13 @@ void fuse_dentry_tree_cleanup(void)
 
 	for (i = 0; i < FUSE_HASH_SIZE; i++)
 		WARN_ON_ONCE(!RB_EMPTY_ROOT(&dentry_hash[i].tree));
+}
+
+void fuse_dentry_set_epoch(struct dentry *dentry, u64 epoch)
+{
+	struct fuse_dentry *fd = dentry->d_fsdata;
+
+	fd->epoch = epoch;
 }
 
 static inline void __fuse_dentry_settime(struct dentry *dentry, u64 time)
@@ -387,10 +395,11 @@ static int fuse_dentry_revalidate(struct inode *dir, const struct qstr *name,
 	struct fuse_mount *fm;
 	struct fuse_conn *fc;
 	struct fuse_inode *fi;
+	struct fuse_dentry *fd = entry->d_fsdata;
 	int ret;
 
 	fc = get_fuse_conn_super(dir->i_sb);
-	if (entry->d_time < atomic_read(&fc->epoch))
+	if (fd->epoch < atomic_read(&fc->epoch))
 		goto invalid;
 
 	inode = d_inode_rcu(entry);
@@ -480,10 +489,10 @@ static int fuse_dentry_init(struct dentry *dentry)
 	RB_CLEAR_NODE(&fd->node);
 	dentry->d_fsdata = fd;
 	/*
-	 * Initialising d_time (epoch) to '0' ensures the dentry is invalid
+	 * Initialising epoch to '0' ensures the dentry is invalid
 	 * if compared to fc->epoch, which is initialized to '1'.
 	 */
-	dentry->d_time = 0;
+	fuse_dentry_set_epoch(dentry, 0);
 
 	return 0;
 }
@@ -641,7 +650,7 @@ static struct dentry *fuse_lookup(struct inode *dir, struct dentry *entry,
 		goto out_err;
 
 	entry = newent ? newent : entry;
-	entry->d_time = epoch;
+	fuse_dentry_set_epoch(entry, epoch);
 	if (outarg_valid)
 		fuse_change_entry_timeout(entry, &outarg);
 	else
@@ -742,7 +751,7 @@ static u32 fuse_ext_size(size_t size)
 /*
  * This adds just a single supplementary group that matches the parent's group.
  */
-static int get_create_supp_group(struct mnt_idmap *idmap,
+static int get_create_supp_group(const struct mnt_idmap *idmap,
 				 struct inode *dir,
 				 struct fuse_in_arg *ext)
 {
@@ -773,7 +782,7 @@ static int get_create_supp_group(struct mnt_idmap *idmap,
 	return 0;
 }
 
-static int get_create_ext(struct mnt_idmap *idmap,
+static int get_create_ext(const struct mnt_idmap *idmap,
 			  struct fuse_args *args,
 			  struct inode *dir, struct dentry *dentry,
 			  umode_t mode)
@@ -811,7 +820,7 @@ static void free_ext_value(struct fuse_args *args)
  * If the filesystem doesn't support this, then fall back to separate
  * 'mknod' + 'open' requests.
  */
-static int fuse_create_open(struct mnt_idmap *idmap, struct inode *dir,
+static int fuse_create_open(const struct mnt_idmap *idmap, struct inode *dir,
 			    struct dentry *entry, struct file *file,
 			    unsigned int flags, umode_t mode, u32 opcode)
 {
@@ -867,6 +876,7 @@ static int fuse_create_open(struct mnt_idmap *idmap, struct inode *dir,
 	args.out_args[0].value = &outentry;
 	/* Store outarg for fuse_finish_open() */
 	outopenp = &ff->args->open_outarg;
+	args.out_argvar = true; /* compat */
 	args.out_args[1].size = sizeof(*outopenp);
 	args.out_args[1].value = outopenp;
 
@@ -876,7 +886,7 @@ static int fuse_create_open(struct mnt_idmap *idmap, struct inode *dir,
 
 	err = fuse_simple_idmap_request(idmap, fm, &args);
 	free_ext_value(&args);
-	if (err)
+	if (err < 0)
 		goto out_free_ff;
 
 	err = -EIO;
@@ -898,7 +908,7 @@ static int fuse_create_open(struct mnt_idmap *idmap, struct inode *dir,
 	}
 	kfree(forget);
 	d_instantiate(entry, inode);
-	entry->d_time = epoch;
+	fuse_dentry_set_epoch(entry, epoch);
 	fuse_change_entry_timeout(entry, &outentry);
 	fuse_dir_changed(dir);
 	err = generic_file_open(inode, file);
@@ -925,14 +935,14 @@ out_err:
 	return err;
 }
 
-static int fuse_mknod(struct mnt_idmap *, struct inode *, struct dentry *,
+static int fuse_mknod(const struct mnt_idmap *, struct inode *, struct dentry *,
 		      umode_t, dev_t);
 static int fuse_atomic_open(struct inode *dir, struct dentry *entry,
 			    struct file *file, unsigned flags,
 			    umode_t mode)
 {
 	int err;
-	struct mnt_idmap *idmap = file_mnt_idmap(file);
+	const struct mnt_idmap *idmap = file_mnt_idmap(file);
 	struct fuse_conn *fc = get_fuse_conn(dir);
 
 	if (fuse_is_bad(dir))
@@ -971,7 +981,7 @@ mknod:
 /*
  * Code shared between mknod, mkdir, symlink and link
  */
-static struct dentry *create_new_entry(struct mnt_idmap *idmap, struct fuse_mount *fm,
+static struct dentry *create_new_entry(const struct mnt_idmap *idmap, struct fuse_mount *fm,
 				       struct fuse_args *args, struct inode *dir,
 				       struct dentry *entry, umode_t mode)
 {
@@ -1022,16 +1032,15 @@ static struct dentry *create_new_entry(struct mnt_idmap *idmap, struct fuse_moun
 	}
 	kfree(forget);
 
-	d_drop(entry);
 	d = d_splice_alias(inode, entry);
 	if (IS_ERR(d))
 		return d;
 
 	if (d) {
-		d->d_time = epoch;
+		fuse_dentry_set_epoch(d, epoch);
 		fuse_change_entry_timeout(d, &outarg);
 	} else {
-		entry->d_time = epoch;
+		fuse_dentry_set_epoch(entry, epoch);
 		fuse_change_entry_timeout(entry, &outarg);
 	}
 	fuse_dir_changed(dir);
@@ -1044,7 +1053,7 @@ static struct dentry *create_new_entry(struct mnt_idmap *idmap, struct fuse_moun
 	return ERR_PTR(err);
 }
 
-static int create_new_nondir(struct mnt_idmap *idmap, struct fuse_mount *fm,
+static int create_new_nondir(const struct mnt_idmap *idmap, struct fuse_mount *fm,
 			     struct fuse_args *args, struct inode *dir,
 			     struct dentry *entry, umode_t mode)
 {
@@ -1060,7 +1069,7 @@ static int create_new_nondir(struct mnt_idmap *idmap, struct fuse_mount *fm,
 	return PTR_ERR(create_new_entry(idmap, fm, args, dir, entry, mode));
 }
 
-static int fuse_mknod(struct mnt_idmap *idmap, struct inode *dir,
+static int fuse_mknod(const struct mnt_idmap *idmap, struct inode *dir,
 		      struct dentry *entry, umode_t mode, dev_t rdev)
 {
 	struct fuse_mknod_in inarg;
@@ -1083,13 +1092,13 @@ static int fuse_mknod(struct mnt_idmap *idmap, struct inode *dir,
 	return create_new_nondir(idmap, fm, &args, dir, entry, mode);
 }
 
-static int fuse_create(struct mnt_idmap *idmap, struct inode *dir,
-		       struct dentry *entry, umode_t mode, bool excl)
+static int fuse_create(const struct mnt_idmap *idmap, struct inode *dir,
+		       struct dentry *entry, umode_t mode)
 {
 	return fuse_mknod(idmap, dir, entry, mode, 0);
 }
 
-static int fuse_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
+static int fuse_tmpfile(const struct mnt_idmap *idmap, struct inode *dir,
 			struct file *file, umode_t mode)
 {
 	struct fuse_conn *fc = get_fuse_conn(dir);
@@ -1107,7 +1116,7 @@ static int fuse_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
 	return err;
 }
 
-static struct dentry *fuse_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+static struct dentry *fuse_mkdir(const struct mnt_idmap *idmap, struct inode *dir,
 				 struct dentry *entry, umode_t mode)
 {
 	struct fuse_mkdir_in inarg;
@@ -1116,6 +1125,14 @@ static struct dentry *fuse_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 
 	if (!fm->fc->dont_mask)
 		mode &= ~current_umask();
+
+	/*
+	 * vfs_mkdir() now passes S_IFDIR in @mode, but @mode is forwarded
+	 * verbatim to the userspace server which has only ever been given the
+	 * permission bits. Strip the type bit until the protocol is known to
+	 * cope with it.
+	 */
+	mode &= ~S_IFDIR;
 
 	memset(&inarg, 0, sizeof(inarg));
 	inarg.mode = mode;
@@ -1129,7 +1146,7 @@ static struct dentry *fuse_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	return create_new_entry(idmap, fm, &args, dir, entry, S_IFDIR);
 }
 
-static int fuse_symlink(struct mnt_idmap *idmap, struct inode *dir,
+static int fuse_symlink(const struct mnt_idmap *idmap, struct inode *dir,
 			struct dentry *entry, const char *link)
 {
 	struct fuse_mount *fm = get_fuse_mount(dir);
@@ -1239,9 +1256,10 @@ static int fuse_rmdir(struct inode *dir, struct dentry *entry)
 	return err;
 }
 
-static int fuse_rename_common(struct mnt_idmap *idmap, struct inode *olddir, struct dentry *oldent,
-			      struct inode *newdir, struct dentry *newent,
-			      unsigned int flags, int opcode, size_t argsize)
+static int fuse_rename_common(const struct mnt_idmap *idmap, struct inode *olddir,
+			      struct dentry *oldent, struct inode *newdir,
+			      struct dentry *newent, unsigned int flags,
+			      int opcode, size_t argsize)
 {
 	int err;
 	struct fuse_rename2_in inarg;
@@ -1289,7 +1307,7 @@ static int fuse_rename_common(struct mnt_idmap *idmap, struct inode *olddir, str
 	return err;
 }
 
-static int fuse_rename2(struct mnt_idmap *idmap, struct inode *olddir,
+static int fuse_rename2(const struct mnt_idmap *idmap, struct inode *olddir,
 			struct dentry *oldent, struct inode *newdir,
 			struct dentry *newent, unsigned int flags)
 {
@@ -1358,7 +1376,7 @@ out:
 	return err;
 }
 
-static void fuse_fillattr(struct mnt_idmap *idmap, struct inode *inode,
+static void fuse_fillattr(const struct mnt_idmap *idmap, struct inode *inode,
 			  struct fuse_attr *attr, struct kstat *stat)
 {
 	unsigned int blkbits;
@@ -1412,7 +1430,7 @@ static void fuse_statx_to_attr(struct fuse_statx *sx, struct fuse_attr *attr)
 	attr->blksize = sx->blksize;
 }
 
-static int fuse_do_statx(struct mnt_idmap *idmap, struct inode *inode,
+static int fuse_do_statx(const struct mnt_idmap *idmap, struct inode *inode,
 			 struct file *file, struct kstat *stat)
 {
 	int err;
@@ -1473,7 +1491,7 @@ static int fuse_do_statx(struct mnt_idmap *idmap, struct inode *inode,
 	return 0;
 }
 
-static int fuse_do_getattr(struct mnt_idmap *idmap, struct inode *inode,
+static int fuse_do_getattr(const struct mnt_idmap *idmap, struct inode *inode,
 			   struct kstat *stat, struct file *file)
 {
 	int err;
@@ -1519,7 +1537,7 @@ static int fuse_do_getattr(struct mnt_idmap *idmap, struct inode *inode,
 	return err;
 }
 
-static int fuse_update_get_attr(struct mnt_idmap *idmap, struct inode *inode,
+static int fuse_update_get_attr(const struct mnt_idmap *idmap, struct inode *inode,
 				struct file *file, struct kstat *stat,
 				u32 request_mask, unsigned int flags)
 {
@@ -1745,7 +1763,7 @@ static int fuse_perm_getattr(struct inode *inode, int mask)
  * access request is sent.  Execute permission is still checked
  * locally based on file mode.
  */
-static int fuse_permission(struct mnt_idmap *idmap,
+static int fuse_permission(const struct mnt_idmap *idmap,
 			   struct inode *inode, int mask)
 {
 	struct fuse_conn *fc = get_fuse_conn(inode);
@@ -1983,7 +2001,7 @@ static bool update_mtime(unsigned ivalid, bool trust_local_mtime)
 	return true;
 }
 
-static void iattr_to_fattr(struct mnt_idmap *idmap, struct fuse_conn *fc,
+static void iattr_to_fattr(const struct mnt_idmap *idmap, struct fuse_conn *fc,
 			   struct iattr *iattr, struct fuse_setattr_in *arg,
 			   bool trust_local_cmtime)
 {
@@ -2125,7 +2143,7 @@ int fuse_flush_times(struct inode *inode, struct fuse_file *ff)
  * vmtruncate() doesn't allow for this case, so do the rlimit checking
  * and the actual truncation by hand.
  */
-int fuse_do_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+int fuse_do_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		    struct iattr *attr, struct file *file)
 {
 	struct inode *inode = d_inode(dentry);
@@ -2157,14 +2175,15 @@ int fuse_do_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		is_truncate = true;
 	}
 
-	if (FUSE_IS_DAX(inode) && is_truncate) {
+	if (FUSE_IS_VDAX(inode) && is_truncate) {
 		filemap_invalidate_lock(mapping);
 		fault_blocked = true;
-		err = fuse_dax_break_layouts(inode, 0, -1);
-		if (err) {
-			filemap_invalidate_unlock(mapping);
-			return err;
-		}
+		err = fuse_vdax_break_layouts(inode, 0, -1);
+		if (err)
+			goto unlock;
+	} else if (IS_DAX(inode) && is_truncate) {
+		/* No truncate for DAX yet */
+		return -EINVAL;
 	}
 
 	if (attr->ia_valid & ATTR_OPEN) {
@@ -2191,7 +2210,7 @@ int fuse_do_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			 ATTR_TIMES_SET)) {
 		err = write_inode_now(inode, true);
 		if (err)
-			return err;
+			goto unlock;
 
 		fuse_set_nowrite(inode);
 		fuse_release_nowrite(inode);
@@ -2282,6 +2301,9 @@ int fuse_do_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	 */
 	if ((is_truncate || !is_wb) &&
 	    S_ISREG(inode->i_mode) && oldsize != outarg.attr.size) {
+		if (outarg.attr.size > oldsize)
+			truncate_pagecache_range(inode, oldsize,
+						 outarg.attr.size - 1);
 		truncate_pagecache(inode, outarg.attr.size);
 		invalidate_inode_pages2(mapping);
 	}
@@ -2299,12 +2321,13 @@ error:
 
 	clear_bit(FUSE_I_SIZE_UNSTABLE, &fi->state);
 
+unlock:
 	if (fault_blocked)
 		filemap_invalidate_unlock(mapping);
 	return err;
 }
 
-static int fuse_setattr(struct mnt_idmap *idmap, struct dentry *entry,
+static int fuse_setattr(const struct mnt_idmap *idmap, struct dentry *entry,
 			struct iattr *attr)
 {
 	struct inode *inode = d_inode(entry);
@@ -2367,7 +2390,7 @@ static int fuse_setattr(struct mnt_idmap *idmap, struct dentry *entry,
 	return ret;
 }
 
-static int fuse_getattr(struct mnt_idmap *idmap,
+static int fuse_getattr(const struct mnt_idmap *idmap,
 			const struct path *path, struct kstat *stat,
 			u32 request_mask, unsigned int flags)
 {

@@ -11,6 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/kstrtox.h>
 #include <linux/moduleparam.h>
+#include <linux/string.h>
 
 #include "internal.h"
 
@@ -181,10 +182,10 @@ static int param_set_trace_method_name(const char *val,
 
 	/* This is a hack.  We can't kmalloc in early boot. */
 	if (is_abs_path)
-		strcpy(trace_method_name, val);
+		strscpy(trace_method_name, val, sizeof(trace_method_name));
 	else {
 		trace_method_name[0] = '\\';
-		strcpy(trace_method_name+1, val);
+		strscpy(trace_method_name + 1, val, sizeof(trace_method_name) - 1);
 	}
 
 	/* Restore the original tracer state */
@@ -316,6 +317,7 @@ struct acpi_table_attr {
 struct acpi_data_attr {
 	struct bin_attribute attr;
 	u64	addr;
+	char filename[ACPI_NAMESEG_SIZE+ACPI_INST_SIZE];
 };
 
 static ssize_t acpi_table_show(struct file *filp, struct kobject *kobj,
@@ -418,6 +420,7 @@ static ssize_t acpi_data_show(struct file *filp, struct kobject *kobj,
 	struct acpi_data_attr *data_attr;
 	void __iomem *base;
 	ssize_t size;
+	u64 end;
 
 	data_attr = container_of(bin_attr, struct acpi_data_attr, attr);
 	size = data_attr->attr.size;
@@ -431,13 +434,17 @@ static ssize_t acpi_data_show(struct file *filp, struct kobject *kobj,
 	if (count > size - offset)
 		count = size - offset;
 
-	base = acpi_os_map_iomem(data_attr->addr, size);
+	/* acpi_os_map_iomem() can't handle a range that wraps around */
+	if (check_add_overflow(data_attr->addr, size, &end))
+		return -EINVAL;
+
+	base = acpi_os_map_iomem(data_attr->addr + offset, count);
 	if (!base)
 		return -ENOMEM;
 
-	memcpy_fromio(buf, base + offset, count);
+	memcpy_fromio(buf, base, count);
 
-	acpi_os_unmap_iomem(base, size);
+	acpi_os_unmap_iomem(base, count);
 
 	return count;
 }
@@ -447,13 +454,12 @@ static int acpi_bert_data_init(void *th, struct acpi_data_attr *data_attr)
 	struct acpi_table_bert *bert = th;
 
 	if (bert->header.length < sizeof(struct acpi_table_bert) ||
-	    bert->region_length < sizeof(struct acpi_hest_generic_status)) {
+	    bert->region_length < sizeof(struct acpi_bert_region)) {
 		kfree(data_attr);
 		return -EINVAL;
 	}
 	data_attr->addr = bert->address;
 	data_attr->attr.size = bert->region_length;
-	data_attr->attr.attr.name = "BERT";
 
 	return sysfs_create_bin_file(tables_data_kobj, &data_attr->attr);
 }
@@ -469,7 +475,6 @@ static int acpi_ccel_data_init(void *th, struct acpi_data_attr *data_attr)
 	}
 	data_attr->addr = ccel->log_area_start_address;
 	data_attr->attr.size = ccel->log_area_minimum_length;
-	data_attr->attr.attr.name = "CCEL";
 
 	return sysfs_create_bin_file(tables_data_kobj, &data_attr->attr);
 }
@@ -484,7 +489,7 @@ static struct acpi_data_obj {
 
 #define NUM_ACPI_DATA_OBJS ARRAY_SIZE(acpi_data_objs)
 
-static int acpi_table_data_init(struct acpi_table_header *th)
+static int acpi_table_data_init(struct acpi_table_header *th, struct acpi_table_attr *table_attr)
 {
 	struct acpi_data_attr *data_attr;
 	int i;
@@ -497,6 +502,8 @@ static int acpi_table_data_init(struct acpi_table_header *th)
 			sysfs_attr_init(&data_attr->attr.attr);
 			data_attr->attr.read = acpi_data_show;
 			data_attr->attr.attr.mode = 0400;
+			strscpy(data_attr->filename, table_attr->filename);
+			data_attr->attr.attr.name = data_attr->filename;
 			return acpi_data_objs[i].fn(th, data_attr);
 		}
 	}
@@ -509,7 +516,6 @@ static int acpi_tables_sysfs_init(void)
 	struct acpi_table_header *table_header = NULL;
 	int table_index;
 	acpi_status status;
-	int ret;
 
 	tables_kobj = kobject_create_and_add("tables", acpi_kobj);
 	if (!tables_kobj)
@@ -534,16 +540,14 @@ static int acpi_tables_sysfs_init(void)
 
 		table_attr = kzalloc_obj(*table_attr);
 		if (!table_attr)
-			return -ENOMEM;
+			break;
 
-		ret = acpi_table_attr_init(tables_kobj,
-					   table_attr, table_header);
-		if (ret) {
+		if (acpi_table_attr_init(tables_kobj, table_attr, table_header)) {
 			kfree(table_attr);
-			return ret;
+			break;
 		}
 		list_add_tail(&table_attr->node, &acpi_table_attr_list);
-		acpi_table_data_init(table_header);
+		acpi_table_data_init(table_header, table_attr);
 	}
 
 	kobject_uevent(tables_kobj, KOBJ_ADD);

@@ -1142,13 +1142,33 @@ static inline int ib_is_udata_in_empty(struct ib_udata *udata)
  * @_udata: The system calls ib_udata struct
  *
  * Used when there is no driver response data to return. Provides forward
- * compatability by zeroing any buffer the user may have provided.
+ * compatibility by zeroing any buffer the user may have provided.
  */
 static inline int ib_respond_empty_udata(struct ib_udata *udata)
 {
 	if (udata && udata->outlen && clear_user(udata->outbuf, udata->outlen))
 		return -EFAULT;
 	return 0;
+}
+
+/**
+ * ib_no_udata_io - Ensure no input data and zero fill the response buffer
+ * @udata: The system call's ib_udata struct
+ *
+ * Driver ops which do not accept any input data and do not provide any response
+ * data may call this at the beginning of their handler to fully adhere to the
+ * uAPI forward/backward compatibility rules.
+ *
+ * Return: Negative failure code if the op should be denied, 0 otherwise.
+ */
+static inline int ib_no_udata_io(struct ib_udata *udata)
+{
+	int ret = ib_is_udata_in_empty(udata);
+
+	if (ret)
+		return ret;
+
+	return ib_respond_empty_udata(udata);
 }
 
 #endif

@@ -103,7 +103,7 @@ static int max20411_probe(struct i2c_client *client)
 	struct regulator_config cfg = {};
 	struct max20411 *max20411;
 
-	max20411 = devm_kzalloc(dev, sizeof(*max20411), GFP_KERNEL);
+	max20411 = devm_kzalloc_obj(dev, *max20411);
 	if (!max20411)
 		return -ENOMEM;
 
@@ -145,7 +145,7 @@ static const struct of_device_id of_max20411_match_tbl[] = {
 MODULE_DEVICE_TABLE(of, of_max20411_match_tbl);
 
 static const struct i2c_device_id max20411_id[] = {
-	{ "max20411" },
+	{ .name = "max20411" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max20411_id);

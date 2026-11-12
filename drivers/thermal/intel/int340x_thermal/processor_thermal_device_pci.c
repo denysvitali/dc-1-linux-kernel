@@ -308,10 +308,8 @@ static int proc_thermal_setup_msi(struct pci_dev *pdev, struct proc_thermal_pci 
 		ret = devm_request_threaded_irq(&pdev->dev, irq, proc_thermal_irq_handler,
 						proc_thermal_irq_thread_handler,
 						0, KBUILD_MODNAME, pci_info);
-		if (ret) {
-			dev_err(&pdev->dev, "Request IRQ %d failed\n", irq);
+		if (ret)
 			goto err_free_msi_vectors;
-		}
 
 		proc_thermal_msi_map[i] = irq;
 	}
@@ -336,11 +334,11 @@ static int proc_thermal_pci_probe(struct pci_dev *pdev, const struct pci_device_
 	};
 	int irq_flag = 0, irq, ret;
 
-	proc_priv = devm_kzalloc(&pdev->dev, sizeof(*proc_priv), GFP_KERNEL);
+	proc_priv = devm_kzalloc_obj(&pdev->dev, *proc_priv);
 	if (!proc_priv)
 		return -ENOMEM;
 
-	pci_info = devm_kzalloc(&pdev->dev, sizeof(*pci_info), GFP_KERNEL);
+	pci_info = devm_kzalloc_obj(&pdev->dev, *pci_info);
 	if (!pci_info)
 		return -ENOMEM;
 
@@ -394,10 +392,8 @@ static int proc_thermal_pci_probe(struct pci_dev *pdev, const struct pci_device_
 		ret = devm_request_threaded_irq(&pdev->dev, irq, proc_thermal_irq_handler,
 						proc_thermal_irq_thread_handler, irq_flag,
 						KBUILD_MODNAME, pci_info);
-		if (ret) {
-			dev_err(&pdev->dev, "Request IRQ %d failed\n", pdev->irq);
+		if (ret)
 			goto err_ret_tzone;
-		}
 	}
 
 	ret = thermal_zone_device_enable(pci_info->tzone);

@@ -242,13 +242,22 @@ again:
 		goto cleanup;
 	}
 
+	/*
+	 * Clear the flag right away. On the first iteration (cur == 0) if the
+	 * inode happened to have been truncated to 0 after it was added to
+	 * autodefrag and before we were called, then we need to clear the flag,
+	 * otherwise if writes are done to the inode we won't be able to add it
+	 * to autodefrag again (unless the inode is evicted, loaded again, and
+	 * small writes to it happen again).
+	 */
+	clear_bit(BTRFS_INODE_IN_DEFRAG, &inode->runtime_flags);
+
 	if (cur >= i_size_read(&inode->vfs_inode)) {
 		iput(&inode->vfs_inode);
 		goto cleanup;
 	}
 
 	/* Do a chunk of defrag */
-	clear_bit(BTRFS_INODE_IN_DEFRAG, &inode->runtime_flags);
 	memset(&range, 0, sizeof(range));
 	range.len = (u64)-1;
 	range.start = cur;
@@ -530,11 +539,7 @@ static int btrfs_defrag_leaves(struct btrfs_trans_handle *trans,
 out:
 	btrfs_free_path(path);
 	if (ret == -EAGAIN) {
-		if (root->defrag_max.objectid > root->defrag_progress.objectid)
-			goto done;
-		if (root->defrag_max.type > root->defrag_progress.type)
-			goto done;
-		if (root->defrag_max.offset > root->defrag_progress.offset)
+		if (btrfs_comp_cpu_keys(&root->defrag_max, &root->defrag_progress) > 0)
 			goto done;
 		ret = 0;
 	}
@@ -815,7 +820,7 @@ static bool defrag_check_next_extent(struct inode *inode, struct extent_map *em,
 	 * If the next extent is at its max capacity, defragging current extent
 	 * makes no sense, as the total number of extents won't change.
 	 */
-	if (next->len >= get_extent_max_capacity(fs_info, em))
+	if (next->len >= get_extent_max_capacity(fs_info, next))
 		goto out;
 	/* Skip older extent */
 	if (next->generation < newer_than)
@@ -1093,7 +1098,7 @@ next:
 		struct defrag_target_range *tmp;
 
 		list_for_each_entry_safe(entry, tmp, target_list, list) {
-			list_del_init(&entry->list);
+			list_del(&entry->list);
 			kfree(entry);
 		}
 	}
@@ -1130,20 +1135,15 @@ static_assert(PAGE_ALIGNED(CLUSTER_SIZE));
  *
  * - Extent bits are locked
  */
-static int defrag_one_locked_target(struct btrfs_inode *inode,
-				    struct defrag_target_range *target,
-				    struct folio **folios, int nr_pages,
-				    struct extent_state **cached_state)
+static void defrag_one_locked_target(struct btrfs_inode *inode,
+				     struct defrag_target_range *target,
+				     struct folio **folios, int nr_pages,
+				     struct extent_state **cached_state)
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
-	struct extent_changeset *data_reserved = NULL;
 	const u64 start = target->start;
 	const u64 len = target->len;
-	int ret = 0;
 
-	ret = btrfs_delalloc_reserve_space(inode, &data_reserved, start, len);
-	if (ret < 0)
-		return ret;
 	btrfs_clear_extent_bit(&inode->io_tree, start, start + len - 1,
 			       EXTENT_DELALLOC | EXTENT_DO_ACCOUNTING |
 			       EXTENT_DEFRAG, cached_state);
@@ -1164,10 +1164,6 @@ static int defrag_one_locked_target(struct btrfs_inode *inode,
 			continue;
 		btrfs_folio_clamp_set_dirty(fs_info, folio, start, len);
 	}
-	btrfs_delalloc_release_extents(inode, len);
-	extent_changeset_free(data_reserved);
-
-	return ret;
 }
 
 static int defrag_one_range(struct btrfs_inode *inode, u64 start, u32 len,
@@ -1178,11 +1174,13 @@ static int defrag_one_range(struct btrfs_inode *inode, u64 start, u32 len,
 	struct defrag_target_range *entry;
 	struct defrag_target_range *tmp;
 	LIST_HEAD(target_list);
-	struct folio **folios;
+	struct folio AUTO_KFREE(*folios);
 	const u32 sectorsize = inode->root->fs_info->sectorsize;
 	u64 cur = start;
 	const unsigned int nr_pages = ((start + len - 1) >> PAGE_SHIFT) -
 				      (start >> PAGE_SHIFT) + 1;
+	struct extent_changeset *data_reserved = NULL;
+	u64 last_defrag_end = start;
 	int ret = 0;
 
 	ASSERT(nr_pages <= CLUSTER_SIZE / PAGE_SIZE);
@@ -1191,6 +1189,20 @@ static int defrag_one_range(struct btrfs_inode *inode, u64 start, u32 len,
 	folios = kzalloc_objs(struct folio *, nr_pages, GFP_NOFS);
 	if (!folios)
 		return -ENOMEM;
+
+	/*
+	 * Reserve delalloc space before locking the range and before locking
+	 * and dirtying any folios - otherwise we could deadlock, for example
+	 * after defrag of one range we dirty folios and keep them locked when
+	 * we move to the next range, so reserving delalloc space right before
+	 * each range could trigger flushing of delalloc and deadlock on the
+	 * extent lock or trigger a transaction commit with flushoncommit, which
+	 * can either deadlock on the lock of a folio made dirty in the previous
+	 * range or the extent lock.
+	 */
+	ret = btrfs_delalloc_reserve_space(inode, &data_reserved, start, len);
+	if (ret < 0)
+		return ret;
 
 	/* Prepare all pages */
 	for (int i = 0; cur < start + len && i < nr_pages; i++) {
@@ -1225,15 +1237,12 @@ static int defrag_one_range(struct btrfs_inode *inode, u64 start, u32 len,
 	if (ret < 0)
 		goto unlock_extent;
 
-	list_for_each_entry(entry, &target_list, list) {
-		ret = defrag_one_locked_target(inode, entry, folios, nr_pages,
-					       &cached_state);
-		if (ret < 0)
-			break;
-	}
-
 	list_for_each_entry_safe(entry, tmp, &target_list, list) {
-		list_del_init(&entry->list);
+		defrag_one_locked_target(inode, entry, folios, nr_pages, &cached_state);
+		if (entry->start > last_defrag_end)
+			btrfs_delalloc_release_space(inode, data_reserved, last_defrag_end,
+						     entry->start - last_defrag_end, true);
+		last_defrag_end = entry->start + entry->len;
 		kfree(entry);
 	}
 unlock_extent:
@@ -1245,7 +1254,12 @@ free_folios:
 		folio_unlock(folios[i]);
 		folio_put(folios[i]);
 	}
-	kfree(folios);
+	btrfs_delalloc_release_extents(inode, len);
+	if (last_defrag_end < start + len)
+		btrfs_delalloc_release_space(inode, data_reserved, last_defrag_end,
+					     start + len - last_defrag_end, true);
+	extent_changeset_free(data_reserved);
+
 	return ret;
 }
 
@@ -1310,10 +1324,8 @@ static int defrag_one_cluster(struct btrfs_inode *inode,
 				      inode->root->fs_info->sectorsize_bits;
 	}
 out:
-	list_for_each_entry_safe(entry, tmp, &target_list, list) {
-		list_del_init(&entry->list);
+	list_for_each_entry_safe(entry, tmp, &target_list, list)
 		kfree(entry);
-	}
 	if (ret >= 0)
 		*last_scanned_ret = max(*last_scanned_ret, start + len);
 	return ret;

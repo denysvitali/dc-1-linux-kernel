@@ -513,7 +513,7 @@ static char **realloc_argv(unsigned int *size, char **old_argv)
 		new_size = 8;
 		gfp = GFP_NOIO;
 	}
-	argv = kmalloc_array(new_size, sizeof(*argv), gfp);
+	argv = kmalloc_objs(*argv, new_size, gfp);
 	if (argv) {
 		if (old_argv)
 			memcpy(argv, old_argv, *size * sizeof(*argv));
@@ -2035,7 +2035,7 @@ int dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 		limits->features &= ~BLK_FEAT_NOWAIT;
 
 	/*
-	 * The current polling impementation does not support request based
+	 * The current polling implementation does not support request based
 	 * stacking.
 	 */
 	if (!__table_type_bio_based(t->type))

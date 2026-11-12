@@ -908,7 +908,13 @@ static int carl9170_op_config(struct ieee80211_hw *hw, int radio_idx, u32 change
 	}
 
 	if (changed & IEEE80211_CONF_CHANGE_SMPS) {
-		/* TODO */
+		/*
+		 * We advertise SM_PS disabled (all chains active).
+		 * mac80211 may still request mode changes, which we
+		 * accept but only support OFF (both chains active).
+		 * Static/dynamic SMPS would require firmware support
+		 * for chain control that the AR9170 does not provide.
+		 */
 		err = 0;
 	}
 
@@ -1921,8 +1927,8 @@ static int carl9170_parse_eeprom(struct ar9170 *ar)
 	if (!bands)
 		return -EINVAL;
 
-	ar->survey = devm_kcalloc(&ar->udev->dev, chans,
-				  sizeof(struct survey_info), GFP_KERNEL);
+	ar->survey = devm_kzalloc_objs(&ar->udev->dev, struct survey_info,
+				       chans);
 	if (!ar->survey)
 		return -ENOMEM;
 	ar->num_channels = chans;

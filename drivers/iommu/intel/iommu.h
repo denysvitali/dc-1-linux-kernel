@@ -700,6 +700,7 @@ struct intel_iommu {
 	/* mutex to protect domain_ida */
 	struct mutex	did_lock;
 	struct ida	domain_ida; /* domain id allocator */
+	unsigned long	max_domain_id;
 	unsigned long	*copied_tables; /* bitmap of copied tables */
 	spinlock_t	lock; /* protect context, domain ids */
 	struct root_entry *root_entry; /* virtual address */
@@ -1104,11 +1105,19 @@ static inline void qi_desc_dev_iotlb_pasid(u16 sid, u16 pfsid, u32 pasid,
 					   unsigned int size_order,
 					   struct qi_desc *desc)
 {
-	unsigned long mask = 1UL << (VTD_PAGE_SHIFT + size_order - 1);
-
 	desc->qw0 = QI_DEV_EIOTLB_PASID(pasid) | QI_DEV_EIOTLB_SID(sid) |
 		QI_DEV_EIOTLB_QDEP(qdep) | QI_DEIOTLB_TYPE |
 		QI_DEV_IOTLB_PFSID(pfsid);
+
+	/*
+	 * The widest range the descriptor can express is a full flush, encoded
+	 * by making bit 63 the least significant zero bit of ADDR, that is
+	 * @size_order == 64 - VTD_PAGE_SHIFT.  Bound @size_order there so that
+	 * a caller passing something larger cannot produce an out-of-range
+	 * shift below.
+	 */
+	if (size_order > 64 - VTD_PAGE_SHIFT)
+		size_order = 64 - VTD_PAGE_SHIFT;
 
 	/*
 	 * If S bit is 0, we only flush a single page. If S bit is set,
@@ -1119,7 +1128,8 @@ static inline void qi_desc_dev_iotlb_pasid(u16 sid, u16 pfsid, u32 pasid,
 	 * Max Invs Pending (MIP) is set to 0 for now until we have DIT in
 	 * ECAP.
 	 */
-	if (!IS_ALIGNED(addr, VTD_PAGE_SIZE << size_order))
+	if (size_order < 64 - VTD_PAGE_SHIFT &&
+	    !IS_ALIGNED(addr, BIT_ULL(VTD_PAGE_SHIFT + size_order)))
 		pr_warn_ratelimited("Invalidate non-aligned address %llx, order %d\n",
 				    addr, size_order);
 
@@ -1135,7 +1145,7 @@ static inline void qi_desc_dev_iotlb_pasid(u16 sid, u16 pfsid, u32 pasid,
 		desc->qw1 |= GENMASK_ULL(size_order + VTD_PAGE_SHIFT - 1,
 					VTD_PAGE_SHIFT);
 		/* Clear size_order bit to indicate size */
-		desc->qw1 &= ~mask;
+		desc->qw1 &= ~BIT_ULL(VTD_PAGE_SHIFT + size_order - 1);
 		/* Set the S bit to indicate flushing more than 1 page */
 		desc->qw1 |= QI_DEV_EIOTLB_SIZE;
 	}
@@ -1240,7 +1250,7 @@ void cache_tag_flush_range_np(struct dmar_domain *domain, unsigned long start,
 			      unsigned long end);
 
 void intel_context_flush_no_pasid(struct device_domain_info *info,
-				  struct context_entry *context, u16 did);
+				  struct context_entry *context, u16 did, u16 sid);
 
 int intel_iommu_enable_prq(struct intel_iommu *iommu);
 int intel_iommu_finish_prq(struct intel_iommu *iommu);
@@ -1340,7 +1350,6 @@ static inline bool intel_domain_is_ss_paging(struct dmar_domain *domain)
 	return domain->domain.ops == &intel_ss_paging_domain_ops;
 }
 
-#ifdef CONFIG_INTEL_IOMMU
 extern int intel_iommu_sm;
 int iommu_calculate_agaw(struct intel_iommu *iommu);
 int iommu_calculate_max_sagaw(struct intel_iommu *iommu);
@@ -1352,21 +1361,62 @@ static inline bool ecmd_has_pmu_essential(struct intel_iommu *iommu)
 		DMA_ECMD_ECCAP3_ESSENTIAL;
 }
 
-extern int dmar_disabled;
+enum dmar_force_on {
+	DMAR_FORCEON_PLATFORM,
+	DMAR_FORCEON_TBOOT
+};
+
+/*
+ * On policies are positive, with more positive value being stronger.
+ * Off policies are negative, with more negative value being stronger.
+ *
+ * 'dmar' here refers to DMA remapping instead of the dmar/iommu unit.
+ *
+ * - DMAR_FORCE_ON:
+ *     force to turn on (e.g. by tboot or platform opt-in).
+ *
+ * - DMAR_ON:
+ *     turn on by build configuration (CONFIG_INTEL_IOMMU_DEFAULT_ON=on)
+ *     or user opts ("intel_iommu=on").
+ *
+ * - DMAR_DEFAULT_OFF
+ *     turn off by build configuration (CONFIG_INTEL_IOMMU_DEFAULT_ON=off).
+ *
+ * - DMAR_USER_OFF
+ *     turn off by user opts ("intel_iommu=off" or "iommu=off").
+ *
+ * - DMAR_FW_OFF
+ *     turn off due to firmware opt-out (DMAR_REMAP_OPT_OUT)
+ *
+ * - '0' is invalid, compared to decide the on/off policy
+ *
+ */
+#define DMAR_FORCE_ON		2
+#define DMAR_ON			1
+#define DMAR_DEFAULT_OFF	-1
+#define DMAR_USER_OFF		-2
+#define DMAR_FW_OFF		-3
+extern int dmar_policy;
+
+static inline bool dmar_policy_on(void)
+{
+	return dmar_policy > 0;
+}
+
+static inline bool dmar_policy_off(void)
+{
+	return dmar_policy < 0;
+}
+
+static inline bool dmar_policy_force_on(void)
+{
+	return dmar_policy == DMAR_FORCE_ON;
+}
+
+bool dmar_can_force_on(enum dmar_force_on force_on);
+
 extern int intel_iommu_enabled;
-#else
-static inline int iommu_calculate_agaw(struct intel_iommu *iommu)
-{
-	return 0;
-}
-static inline int iommu_calculate_max_sagaw(struct intel_iommu *iommu)
-{
-	return 0;
-}
-#define dmar_disabled	(1)
-#define intel_iommu_enabled (0)
-#define intel_iommu_sm (0)
-#endif
+extern int intel_iommu_tboot_noforce;
 
 static inline const char *decode_prq_descriptor(char *str, size_t size,
 		u64 dw0, u64 dw1, u64 dw2, u64 dw3)

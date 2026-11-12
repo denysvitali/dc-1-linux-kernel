@@ -205,6 +205,20 @@ config MFD_AC100
 	  This driver include only the core APIs. You have to select individual
 	  components like codecs or RTC under the corresponding menus.
 
+config MFD_AC200
+	tristate "X-Powers AC200"
+	depends on COMMON_CLK
+	depends on I2C
+	depends on OF
+	select MFD_CORE
+	select REGMAP_I2C
+	help
+	  Support for the X-Powers AC200 mixed-signal companion IC. The AC200
+	  contains audio, video, RTC and Fast Ethernet PHY functions and is
+	  co-packaged with some Allwinner H6 and H616 SoCs. This driver provides
+	  the shared register access and instantiates the individual function
+	  devices.
+
 config MFD_AXP20X
 	tristate
 	select MFD_CORE
@@ -1006,6 +1020,8 @@ config MFD_MAX77705
 	depends on I2C
 	select MFD_CORE
 	select MFD_SIMPLE_MFD_I2C
+	select REGMAP_I2C
+	select REGMAP_IRQ
 	help
 	  Say yes here to add support for Maxim Integrated MAX77705 PMIC.
 	  This is a Power Management IC with Charger, safe LDOs, Flash, Haptic
@@ -1461,7 +1477,6 @@ config MFD_SEC_I2C
 config MFD_SI476X_CORE
 	tristate "Silicon Laboratories 4761/64/68 AM/FM radio."
 	depends on I2C
-	depends on GPIOLIB_LEGACY
 	select MFD_CORE
 	select REGMAP_I2C
 	help
@@ -2208,6 +2223,10 @@ config MFD_STW481X
 	  in various ST Microelectronics and ST-Ericsson embedded
 	  Nomadik series.
 
+config MFD_ROHM_PWRBUTTON
+	tristate
+	select MFD_CORE
+
 config MFD_ROHM_BD718XX
 	tristate "ROHM BD71837 Power Management IC"
 	depends on I2C=y
@@ -2215,6 +2234,7 @@ config MFD_ROHM_BD718XX
 	select REGMAP_I2C
 	select REGMAP_IRQ
 	select MFD_CORE
+	select MFD_ROHM_PWRBUTTON
 	help
 	  Select this option to get support for the ROHM BD71837
 	  Power Management ICs. BD71837 is designed to power processors like
@@ -2222,22 +2242,26 @@ config MFD_ROHM_BD718XX
 	  and emergency shut down as well as 32,768KHz clock output.
 
 config MFD_ROHM_BD71828
-	tristate "ROHM BD718[15/28/79], BD72720 and BD73900 PMICs"
+	tristate "ROHM BD718[15/28/79], BD72720 and BD73[8/9]00 PMICs"
 	depends on I2C=y
 	depends on OF
 	select REGMAP_I2C
 	select REGMAP_IRQ
 	select MFD_CORE
+	select MFD_ROHM_PWRBUTTON
 	help
 	  Select this option to get support for the ROHM BD71815, BD71828,
-	  BD71879, BD72720 and BD73900 Power Management ICs (PMICs). These are
-	  single-chip Power Management ICs (PMIC), mainly for battery-powered
-	  portable devices.
+	  BD71879, BD72720, BD73800 and BD73900 Power Management ICs (PMICs).
+	  These are single-chip Power Management ICs (PMIC), mainly for
+	  battery-powered portable devices.
 	  The BD71815 has 5 bucks, 7 LDOs, and a boost for driving LEDs.
 	  The BD718[28/79] have 7 buck converters and 7 LDOs.
 	  The BD72720 and the BD73900 have 10 bucks and 11 LDOs.
-	  All ICs provide a single-cell linear charger, a Coulomb counter,
-	  a Real-Time Clock (RTC), GPIOs and a 32.768 kHz clock gate.
+	  All the above ICs provide a single-cell linear charger, and a Coulomb
+	  counter.
+	  The BD73800 has 8 bucks, 4 LDOs and ADC for power/current
+	  accumulation but no charging logic. All these PMICs integrate also a
+	  Real-Time Clock (RTC), GPIOs and a 32.768 kHz clock gate.
 
 config MFD_ROHM_BD957XMUF
 	tristate "ROHM BD9576MUF and BD9573MUF Power Management ICs"

@@ -8,6 +8,7 @@
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
+#include <linux/hdmi.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/slab.h>
@@ -775,11 +776,6 @@ static int adv7511_connector_init(struct adv7511 *adv)
  * DRM Bridge Operations
  */
 
-static const struct adv7511 *bridge_to_adv7511_const(const struct drm_bridge *bridge)
-{
-	return container_of(bridge, struct adv7511, bridge);
-}
-
 static void adv7511_bridge_atomic_enable(struct drm_bridge *bridge,
 					 struct drm_atomic_commit *state)
 {
@@ -815,19 +811,6 @@ static void adv7511_bridge_atomic_disable(struct drm_bridge *bridge,
 	struct adv7511 *adv = bridge_to_adv7511(bridge);
 
 	adv7511_power_off(adv);
-}
-
-static enum drm_mode_status
-adv7511_bridge_hdmi_tmds_char_rate_valid(const struct drm_bridge *bridge,
-					 const struct drm_display_mode *mode,
-					 unsigned long long tmds_rate)
-{
-	const struct adv7511 *adv = bridge_to_adv7511_const(bridge);
-
-	if (tmds_rate > 1000ULL * adv->info->max_mode_clock_khz)
-		return MODE_CLOCK_HIGH;
-
-	return MODE_OK;
 }
 
 static enum drm_mode_status adv7511_bridge_mode_valid(struct drm_bridge *bridge,
@@ -1004,9 +987,8 @@ static const struct drm_bridge_funcs adv7511_bridge_funcs = {
 	.atomic_disable = adv7511_bridge_atomic_disable,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 
-	.hdmi_tmds_char_rate_valid = adv7511_bridge_hdmi_tmds_char_rate_valid,
 	.hdmi_clear_audio_infoframe = adv7511_bridge_hdmi_clear_audio_infoframe,
 	.hdmi_write_audio_infoframe = adv7511_bridge_hdmi_write_audio_infoframe,
 	.hdmi_clear_avi_infoframe = adv7511_bridge_hdmi_clear_avi_infoframe,
@@ -1055,8 +1037,7 @@ static int adv7511_init_regulators(struct adv7511 *adv)
 	unsigned int i;
 	int ret;
 
-	adv->supplies = devm_kcalloc(dev, num_supplies,
-				     sizeof(*adv->supplies), GFP_KERNEL);
+	adv->supplies = devm_kzalloc_objs(dev, *adv->supplies, num_supplies);
 	if (!adv->supplies)
 		return -ENOMEM;
 
@@ -1359,6 +1340,8 @@ static int adv7511_probe(struct i2c_client *i2c)
 
 	adv7511->bridge.vendor = "Analog";
 	adv7511->bridge.product = adv7511->info->name;
+	adv7511->bridge.supported_hdmi_ver = HDMI_VERSION_1_2;
+	adv7511->bridge.max_tmds_char_rate = 1000ULL * adv7511->info->max_mode_clock_khz;
 
 #ifdef CONFIG_DRM_I2C_ADV7511_AUDIO
 	adv7511->bridge.ops |= DRM_BRIDGE_OP_HDMI_AUDIO;
@@ -1471,11 +1454,11 @@ static const struct adv7511_chip_info adv7535_chip_info = {
 };
 
 static const struct i2c_device_id adv7511_i2c_ids[] = {
-	{ "adv7511", (kernel_ulong_t)&adv7511_chip_info },
-	{ "adv7511w", (kernel_ulong_t)&adv7511_chip_info },
-	{ "adv7513", (kernel_ulong_t)&adv7511_chip_info },
-	{ "adv7533", (kernel_ulong_t)&adv7533_chip_info },
-	{ "adv7535", (kernel_ulong_t)&adv7535_chip_info },
+	{ .name = "adv7511", .driver_data = (kernel_ulong_t)&adv7511_chip_info },
+	{ .name = "adv7511w", .driver_data = (kernel_ulong_t)&adv7511_chip_info },
+	{ .name = "adv7513", .driver_data = (kernel_ulong_t)&adv7511_chip_info },
+	{ .name = "adv7533", .driver_data = (kernel_ulong_t)&adv7533_chip_info },
+	{ .name = "adv7535", .driver_data = (kernel_ulong_t)&adv7535_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adv7511_i2c_ids);

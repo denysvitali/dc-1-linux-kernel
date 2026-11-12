@@ -456,7 +456,7 @@ static int dell_wmi_process_key(struct wmi_device *wdev, int type, int code, __l
 			key++;
 		used = 1;
 	} else if (type == 0x0012 && code == 0x000d && remaining > 0) {
-		value = (le16_to_cpu(buffer[2]) == 2);
+		value = (le16_to_cpu(buffer[0]) == 2);
 		used = 1;
 	}
 
@@ -795,8 +795,7 @@ static int dell_wmi_probe(struct wmi_device *wdev, const void *context)
 	if (ret)
 		return ret;
 
-	priv = devm_kzalloc(
-		&wdev->dev, sizeof(struct dell_wmi_priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&wdev->dev, struct dell_wmi_priv);
 	if (!priv)
 		return -ENOMEM;
 	dev_set_drvdata(&wdev->dev, priv);
@@ -843,9 +842,22 @@ static int __init dell_wmi_init(void)
 
 	err = dell_privacy_register_driver();
 	if (err)
-		return err;
+		goto out_smbios;
 
-	return wmi_driver_register(&dell_wmi_driver);
+	err = wmi_driver_register(&dell_wmi_driver);
+	if (err)
+		goto out_privacy;
+
+	return 0;
+
+out_privacy:
+	dell_privacy_unregister_driver();
+
+out_smbios:
+	if (wmi_requires_smbios_request)
+		dell_wmi_events_set_enabled(false);
+
+	return err;
 }
 late_initcall(dell_wmi_init);
 

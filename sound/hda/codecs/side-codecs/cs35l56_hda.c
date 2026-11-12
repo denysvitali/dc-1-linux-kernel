@@ -527,18 +527,6 @@ static void cs35l56_hda_request_firmware_files(struct cs35l56_hda *cs35l56,
 						  base_name, NULL, NULL, "bin");
 }
 
-static void cs35l56_hda_release_firmware_files(const struct firmware *wmfw_firmware,
-					       char *wmfw_filename,
-					       const struct firmware *coeff_firmware,
-					       char *coeff_filename)
-{
-	release_firmware(wmfw_firmware);
-	kfree(wmfw_filename);
-
-	release_firmware(coeff_firmware);
-	kfree(coeff_filename);
-}
-
 static int cs35l56_hda_apply_calibration(struct cs35l56_hda *cs35l56)
 {
 	int ret;
@@ -561,10 +549,10 @@ static int cs35l56_hda_apply_calibration(struct cs35l56_hda *cs35l56)
 
 static void cs35l56_hda_fw_load(struct cs35l56_hda *cs35l56)
 {
-	const struct firmware *coeff_firmware = NULL;
-	const struct firmware *wmfw_firmware = NULL;
-	char *coeff_filename = NULL;
-	char *wmfw_filename = NULL;
+	const struct firmware *coeff_firmware __free(firmware) = NULL;
+	const struct firmware *wmfw_firmware __free(firmware) = NULL;
+	char *coeff_filename __free(kfree) = NULL;
+	char *wmfw_filename __free(kfree) = NULL;
 	unsigned int preloaded_fw_ver;
 	bool firmware_missing;
 	int ret;
@@ -574,7 +562,7 @@ static void cs35l56_hda_fw_load(struct cs35l56_hda *cs35l56)
 	 * downloaded previously then it needs to be powered down so that it
 	 * can be updated.
 	 */
-	if (cs35l56->base.fw_patched)
+	if (cs35l56->cs_dsp.booted)
 		cs_dsp_power_down(&cs35l56->cs_dsp);
 
 	cs35l56->base.fw_patched = false;
@@ -606,14 +594,14 @@ static void cs35l56_hda_fw_load(struct cs35l56_hda *cs35l56)
 	if (firmware_missing) {
 		if (!wmfw_firmware) {
 			dev_err(cs35l56->base.dev, ".%s file required but not found\n", "wmfw");
-			goto err_fw_release;
+			return;
 		} else if (!coeff_firmware) {
 			dev_err(cs35l56->base.dev, ".%s file required but not found\n", "bin");
-			goto err_fw_release;
+			return;
 		}
 	}
 
-	mutex_lock(&cs35l56->base.irq_lock);
+	guard(mutex)(&cs35l56->base.irq_lock);
 
 	/*
 	 * If the firmware hasn't been patched it must be shutdown before
@@ -624,14 +612,14 @@ static void cs35l56_hda_fw_load(struct cs35l56_hda *cs35l56)
 	if (firmware_missing && (wmfw_firmware || coeff_firmware)) {
 		ret = cs35l56_firmware_shutdown(&cs35l56->base);
 		if (ret)
-			goto err;
+			return;
 	}
 
 	ret = cs_dsp_power_up(&cs35l56->cs_dsp, wmfw_firmware, wmfw_filename,
 			      coeff_firmware, coeff_filename, "misc");
 	if (ret) {
 		dev_dbg(cs35l56->base.dev, "%s: cs_dsp_power_up ret %d\n", __func__, ret);
-		goto err;
+		return;
 	}
 
 	if (wmfw_filename)
@@ -646,7 +634,7 @@ static void cs35l56_hda_fw_load(struct cs35l56_hda *cs35l56)
 		regcache_mark_dirty(cs35l56->base.regmap);
 		ret = cs35l56_wait_for_firmware_boot(&cs35l56->base);
 		if (ret)
-			goto err_powered_up;
+			return;
 
 		regcache_cache_only(cs35l56->base.regmap, false);
 	}
@@ -654,7 +642,7 @@ static void cs35l56_hda_fw_load(struct cs35l56_hda *cs35l56)
 	/* Disable auto-hibernate so that runtime_pm has control */
 	ret = cs35l56_mbox_send(&cs35l56->base, CS35L56_MBOX_CMD_PREVENT_AUTO_HIBERNATE);
 	if (ret)
-		goto err_powered_up;
+		return;
 
 	regcache_sync(cs35l56->base.regmap);
 
@@ -675,15 +663,6 @@ static void cs35l56_hda_fw_load(struct cs35l56_hda *cs35l56)
 		cs_dsp_stop(&cs35l56->cs_dsp);
 
 	cs35l56_log_tuning(&cs35l56->base, &cs35l56->cs_dsp);
-
-err_powered_up:
-	if (!cs35l56->base.fw_patched)
-		cs_dsp_power_down(&cs35l56->cs_dsp);
-err:
-	mutex_unlock(&cs35l56->base.irq_lock);
-err_fw_release:
-	cs35l56_hda_release_firmware_files(wmfw_firmware, wmfw_filename,
-					   coeff_firmware, coeff_filename);
 }
 
 static void cs35l56_hda_dsp_work(struct work_struct *work)
@@ -830,8 +809,10 @@ static void cs35l56_hda_unbind(struct device *dev, struct device *master, void *
 	cs_dsp_cleanup_debugfs(&cs35l56->cs_dsp);
 	debugfs_remove_recursive(cs35l56->debugfs_root);
 #endif
+	if (cs35l56->cs_dsp.running)
+		cs_dsp_stop(&cs35l56->cs_dsp);
 
-	if (cs35l56->base.fw_patched)
+	if (cs35l56->cs_dsp.booted)
 		cs_dsp_power_down(&cs35l56->cs_dsp);
 
 	comp = hda_component_from_index(parent, cs35l56->index);

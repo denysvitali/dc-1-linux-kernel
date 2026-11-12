@@ -345,7 +345,7 @@ static int rtl_ecc_init_ctx(struct nand_device *nand)
 	if (ret)
 		return ret;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(dev, *ctx);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -396,7 +396,7 @@ static int rtl_ecc_probe(struct platform_device *pdev)
 	void __iomem *base;
 	int ret;
 
-	rtlc = devm_kzalloc(dev, sizeof(*rtlc), GFP_KERNEL);
+	rtlc = devm_kzalloc_obj(dev, *rtlc);
 	if (!rtlc)
 		return -ENOMEM;
 
@@ -450,6 +450,7 @@ static const struct of_device_id rtl_ecc_of_ids[] = {
 	},
 	{ /* sentinel */ },
 };
+MODULE_DEVICE_TABLE(of, rtl_ecc_of_ids);
 
 static struct platform_driver rtl_ecc_driver = {
 	.driver	= {

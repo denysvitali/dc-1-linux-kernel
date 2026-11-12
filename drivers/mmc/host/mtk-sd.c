@@ -1843,7 +1843,7 @@ static irqreturn_t msdc_cmdq_irq(struct msdc_host *host, u32 intsts)
 			cmd_err, dat_err, intsts);
 	}
 
-	return cqhci_irq(mmc, 0, cmd_err, dat_err);
+	return cqhci_irq(mmc, cmd_err, dat_err);
 }
 
 static irqreturn_t msdc_irq(int irq, void *dev_id)
@@ -3189,9 +3189,7 @@ static int msdc_drv_probe(struct platform_device *pdev)
 	msdc_init_hw(host);
 
 	if (mmc->caps2 & MMC_CAP2_CQE) {
-		host->cq_host = devm_kzalloc(mmc->parent,
-					     sizeof(*host->cq_host),
-					     GFP_KERNEL);
+		host->cq_host = devm_kzalloc_obj(mmc->parent, *host->cq_host);
 		if (!host->cq_host) {
 			ret = -ENOMEM;
 			goto release;
@@ -3210,7 +3208,7 @@ static int msdc_drv_probe(struct platform_device *pdev)
 		msdc_cqe_cit_cal(host, 2350);
 	} else if (mmc->caps2 & MMC_CAP2_NO_SDIO) {
 		/* Use HSQ on eMMC/SD (but not on SDIO) if HW CQE not supported */
-		struct mmc_hsq *hsq = devm_kzalloc(&pdev->dev, sizeof(*hsq), GFP_KERNEL);
+		struct mmc_hsq *hsq = devm_kzalloc_obj(&pdev->dev, *hsq);
 		if (!hsq) {
 			ret = -ENOMEM;
 			goto release;
@@ -3276,6 +3274,7 @@ static void msdc_drv_remove(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, NULL);
 	mmc_remove_host(mmc);
+	cancel_delayed_work_sync(&host->req_timeout);
 	msdc_deinit_hw(host);
 	msdc_gate_clock(host);
 

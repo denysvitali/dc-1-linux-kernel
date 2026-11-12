@@ -19,6 +19,7 @@
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
+#include <linux/stringify.h>
 #include <linux/watchdog.h>
 
 /* Register definitions */
@@ -260,9 +261,9 @@ static void atcwdt_get_timeout_params(struct atcwdt_drv *drv_data,
  * register to determine the interrupt timer type supported by the hardware.
  *
  * Note: This function must only be called when the ATCWDT200 watchdog is
- * disabled. If the watchdog is enabled, this function returns TMR_UNKNOWN.
+ * disabled. If the watchdog is enabled, this function returns -EBUSY.
  *
- * Returns: The interrupt timer type supported by the hardware.
+ * Returns: 0 on success or negative error code on failure.
  */
 static int atcwdt_get_int_timer_type(struct atcwdt_drv *drv_data)
 {
@@ -274,7 +275,8 @@ static int atcwdt_get_int_timer_type(struct atcwdt_drv *drv_data)
 	regmap_read(drv_data->regmap, REG_CTRL, &val);
 	if (val & CTRL_WDT_EN) {
 		spin_unlock(&drv_data->lock);
-		return TMR_UNKNOWN;
+		return dev_err_probe(dev, -EBUSY,
+				     "Watchdog is enabled, cannot detect timer type\n");
 	}
 
 	/*
@@ -490,7 +492,7 @@ static int atcwdt_probe(struct platform_device *pdev)
 	struct atcwdt_drv *drv_data;
 	int ret;
 
-	drv_data = devm_kzalloc(dev, sizeof(*drv_data), GFP_KERNEL);
+	drv_data = devm_kzalloc_obj(dev, *drv_data);
 	if (!drv_data)
 		return -ENOMEM;
 
@@ -569,11 +571,11 @@ module_platform_driver(atcwdt_driver);
 
 module_param(timeout, uint, 0);
 MODULE_PARM_DESC(timeout, "Watchdog timeout in seconds (default="
-		 __MODULE_STRING(ATCWDT_TIMEOUT) ")");
+		 __stringify(ATCWDT_TIMEOUT) ")");
 
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default="
-		 __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+		 __stringify(WATCHDOG_NOWAYOUT) ")");
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("CL Wang <cl634@andestech.com>");

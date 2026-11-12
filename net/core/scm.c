@@ -149,6 +149,7 @@ EXPORT_SYMBOL(__scm_destroy);
 
 static inline int scm_replace_pid(struct scm_cookie *scm, struct pid *pid)
 {
+	struct pid *thread_pid;
 	int err;
 
 	/* drop all previous references */
@@ -158,7 +159,18 @@ static inline int scm_replace_pid(struct scm_cookie *scm, struct pid *pid)
 	if (unlikely(err))
 		return err;
 
-	scm->pid = pid;
+	/* A sender naming its own thread-group sends from the current thread. */
+	if (pid == task_tgid(current))
+		thread_pid = task_pid(current);
+	else
+		thread_pid = pid;
+
+	err = pidfs_register_pid(thread_pid);
+	if (unlikely(err))
+		return err;
+
+	scm->pid[PIDTYPE_TGID] = pid;
+	scm->pid[PIDTYPE_PID] = get_pid(thread_pid);
 	scm->creds.pid = pid_vnr(pid);
 	return 0;
 }
@@ -207,7 +219,8 @@ int __scm_send(struct socket *sock, struct msghdr *msg, struct scm_cookie *p)
 			if (err)
 				goto error;
 
-			if (!p->pid || pid_vnr(p->pid) != creds.pid) {
+			if (!p->pid[PIDTYPE_TGID] ||
+			    pid_vnr(p->pid[PIDTYPE_TGID]) != creds.pid) {
 				struct pid *pid;
 				err = -ESRCH;
 				pid = find_get_pid(creds.pid);
@@ -351,7 +364,31 @@ static int scm_max_fds(struct msghdr *msg)
 	return (msg->msg_controllen - sizeof(struct cmsghdr)) / sizeof(int);
 }
 
-void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
+int scm_recv_one_fd(struct file *f, int __user *ufd, unsigned int flags,
+		    bool notrunc)
+{
+	int error;
+
+	if (!ufd)
+		return -EFAULT;
+
+	error = security_file_receive(f);
+	if (error)
+		return notrunc ? put_user(error, ufd) : error;
+
+	FD_PREPARE(fdf, flags, get_file(f));
+	if (fdf->fd < 0)
+		return fdf->fd;
+
+	error = put_user(fdf->fd, ufd);
+	if (error)
+		return error;
+
+	__receive_sock(fdf->file);
+	return fd_publish(fdf);
+}
+
+void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm, bool notrunc)
 {
 	struct cmsghdr __user *cm =
 		(__force struct cmsghdr __user *)msg->msg_control_user;
@@ -365,12 +402,12 @@ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 		return;
 
 	if (msg->msg_flags & MSG_CMSG_COMPAT) {
-		scm_detach_fds_compat(msg, scm);
+		scm_detach_fds_compat(msg, scm, notrunc);
 		return;
 	}
 
 	for (i = 0; i < fdmax; i++) {
-		err = scm_recv_one_fd(scm->fp->fp[i], cmsg_data + i, o_flags);
+		err = scm_recv_one_fd(scm->fp->fp[i], cmsg_data + i, o_flags, notrunc);
 		if (err < 0)
 			break;
 	}
@@ -462,10 +499,15 @@ static bool scm_has_secdata(struct sock *sk)
 }
 #endif
 
-static void scm_pidfd_recv(struct msghdr *msg, struct scm_cookie *scm)
+static void scm_pidfd_recv(struct msghdr *msg, struct scm_cookie *scm,
+			   enum pid_type type, int cmsg_type)
 {
+	unsigned int flags = PIDFD_STALE;
 	struct file *pidfd_file = NULL;
+	struct pid *pid;
 	int len, pidfd;
+
+	pid = scm->pid[type];
 
 	/* put_cmsg() doesn't return an error if CMSG is truncated,
 	 * that's why we need to opencode these checks here.
@@ -480,12 +522,15 @@ static void scm_pidfd_recv(struct msghdr *msg, struct scm_cookie *scm)
 		return;
 	}
 
-	if (!scm->pid)
+	if (!pid)
 		return;
 
-	pidfd = pidfd_prepare(scm->pid, PIDFD_STALE, &pidfd_file);
+	if (type == PIDTYPE_PID)
+		flags |= PIDFD_THREAD;
 
-	if (put_cmsg(msg, SOL_SOCKET, SCM_PIDFD, sizeof(int), &pidfd)) {
+	pidfd = pidfd_prepare(pid, flags, &pidfd_file);
+
+	if (put_cmsg(msg, SOL_SOCKET, cmsg_type, sizeof(int), &pidfd)) {
 		if (pidfd_file) {
 			put_unused_fd(pidfd);
 			fput(pidfd_file);
@@ -503,7 +548,7 @@ static bool __scm_recv_common(struct sock *sk, struct msghdr *msg,
 {
 	if (!msg->msg_control) {
 		if (sk->sk_scm_credentials || sk->sk_scm_pidfd ||
-		    scm->fp || scm_has_secdata(sk))
+		    sk->sk_scm_pidfd_thread || scm->fp || scm_has_secdata(sk))
 			msg->msg_flags |= MSG_CTRUNC;
 
 		scm_destroy(scm);
@@ -522,9 +567,6 @@ static bool __scm_recv_common(struct sock *sk, struct msghdr *msg,
 	}
 
 	scm_passec(sk, msg, scm);
-
-	if (scm->fp)
-		scm_detach_fds(msg, scm);
 
 	return true;
 }
@@ -545,8 +587,18 @@ void scm_recv_unix(struct socket *sock, struct msghdr *msg,
 	if (!__scm_recv_common(sock->sk, msg, scm, flags))
 		return;
 
+	if (scm->fp) {
+		struct unix_sock *u;
+
+		u = unix_sk(sock->sk);
+		scm_detach_fds(msg, scm, READ_ONCE(u->scm_rights_notrunc));
+	}
+
 	if (sock->sk->sk_scm_pidfd)
-		scm_pidfd_recv(msg, scm);
+		scm_pidfd_recv(msg, scm, PIDTYPE_TGID, SCM_PIDFD);
+
+	if (sock->sk->sk_scm_pidfd_thread)
+		scm_pidfd_recv(msg, scm, PIDTYPE_PID, SCM_PIDFD_THREAD);
 
 	scm_destroy_cred(scm);
 }

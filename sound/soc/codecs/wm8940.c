@@ -333,7 +333,7 @@ static const struct snd_soc_dapm_route wm8940_dapm_routes[] = {
 	{"ADC", NULL, "Boost Mixer"},
 };
 
-#define wm8940_reset(c) snd_soc_component_write(c, WM8940_SOFTRESET, 0);
+#define wm8940_reset(c) snd_soc_component_write(c, WM8940_SOFTRESET, 0)
 
 static int wm8940_set_dai_fmt(struct snd_soc_dai *codec_dai,
 			      unsigned int fmt)
@@ -730,6 +730,17 @@ static int wm8940_set_dai_sysclk(struct snd_soc_dai *dai, int clk_id,
 			SNDRV_PCM_FMTBIT_S24_LE |			\
 			SNDRV_PCM_FMTBIT_S32_LE)
 
+static const u64 wm8940_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops wm8940_dai_ops = {
 	.hw_params = wm8940_i2s_hw_params,
 	.set_sysclk = wm8940_set_dai_sysclk,
@@ -738,6 +749,8 @@ static const struct snd_soc_dai_ops wm8940_dai_ops = {
 	.set_clkdiv = wm8940_set_dai_clkdiv,
 	.set_pll = wm8940_set_dai_pll,
 	.no_capture_mute = 1,
+	.auto_selectable_formats = &wm8940_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static struct snd_soc_dai_driver wm8940_dai = {
@@ -833,8 +846,7 @@ static int wm8940_i2c_probe(struct i2c_client *i2c)
 	struct wm8940_priv *wm8940;
 	int ret;
 
-	wm8940 = devm_kzalloc(&i2c->dev, sizeof(struct wm8940_priv),
-			      GFP_KERNEL);
+	wm8940 = devm_kzalloc_obj(&i2c->dev, struct wm8940_priv);
 	if (wm8940 == NULL)
 		return -ENOMEM;
 

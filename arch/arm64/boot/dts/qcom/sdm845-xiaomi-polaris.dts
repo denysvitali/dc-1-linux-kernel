@@ -32,6 +32,7 @@
 /delete-node/ &mba_region;
 /delete-node/ &slpi_mem;
 /delete-node/ &spss_mem;
+/delete-node/ &xbl_mem;
 
 / {
 	model = "Xiaomi Mi MIX 2S";
@@ -63,6 +64,11 @@
 	};
 
 	reserved-memory {
+		xbl-mem@85d00000 {
+			reg = <0 0x85d00000 0 0x200000>;
+			no-map;
+		};
+
 		adsp_mem: memory@8c500000 {
 			reg = <0 0x8c500000 0 0x1e00000>;
 			no-map;
@@ -409,8 +415,6 @@
 };
 
 &ipa {
-	qcom,gsi-loader = "self";
-	memory-region = <&ipa_fw_mem>;
 	firmware-name = "qcom/sdm845/Xiaomi/polaris/ipa_fws.mbn";
 
 	status = "okay";
@@ -668,8 +672,8 @@
 };
 
 &usb_1_qmpphy {
-	vdda-pll-supply = <&vreg_l1a_0p875>;
-	vdda-phy-supply = <&vreg_l26a_1p2>;
+	vdda-pll-supply = <&vreg_l26a_1p2>;
+	vdda-phy-supply = <&vreg_l1a_0p875>;
 	status = "okay";
 };
 

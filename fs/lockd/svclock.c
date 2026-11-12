@@ -47,40 +47,6 @@ static const struct rpc_call_ops nlmsvc_grant_ops;
 static LIST_HEAD(nlm_blocked);
 static DEFINE_SPINLOCK(nlm_blocked_lock);
 
-#if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
-static const char *nlmdbg_cookie2a(const struct lockd_cookie *cookie)
-{
-	/*
-	 * We can get away with a static buffer because this is only called
-	 * from lockd, which is single-threaded.
-	 */
-	static char buf[2*NLM_MAXCOOKIELEN+1];
-	unsigned int i, len = sizeof(buf);
-	char *p = buf;
-
-	len--;	/* allow for trailing \0 */
-	if (len < 3)
-		return "???";
-	for (i = 0 ; i < cookie->len ; i++) {
-		if (len < 2) {
-			strcpy(p-3, "...");
-			break;
-		}
-		sprintf(p, "%02x", cookie->data[i]);
-		p += 2;
-		len -= 2;
-	}
-	*p = '\0';
-
-	return buf;
-}
-#else
-static inline const char *nlmdbg_cookie2a(const struct lockd_cookie *cookie)
-{
-	return "???";
-}
-#endif
-
 /*
  * Insert a blocked lock into the global list
  */
@@ -155,11 +121,12 @@ nlmsvc_lookup_block(struct nlm_file *file, struct lockd_lock *lock)
 	spin_lock(&nlm_blocked_lock);
 	list_for_each_entry(block, &nlm_blocked, b_list) {
 		fl = &block->b_call->a_args.lock.fl;
-		dprintk("lockd: check f=%p pd=%d %Ld-%Ld ty=%d cookie=%s\n",
+		dprintk("lockd: check f=%p pd=%d %Ld-%Ld ty=%d cookie=%*phN\n",
 				block->b_file, fl->c.flc_pid,
 				(long long)fl->fl_start,
 				(long long)fl->fl_end, fl->c.flc_type,
-				nlmdbg_cookie2a(&block->b_call->a_args.cookie));
+				block->b_call->a_args.cookie.len,
+				block->b_call->a_args.cookie.data);
 		if (block->b_file == file && nlm_compare_locks(fl, &lock->fl)) {
 			kref_get(&block->b_count);
 			spin_unlock(&nlm_blocked_lock);
@@ -198,7 +165,8 @@ nlmsvc_find_block(struct lockd_cookie *cookie)
 	return NULL;
 
 found:
-	dprintk("nlmsvc_find_block(%s): block=%p\n", nlmdbg_cookie2a(cookie), block);
+	dprintk("nlmsvc_find_block(%*phN): block=%p\n",
+		cookie->len, cookie->data, block);
 	kref_get(&block->b_count);
 	spin_unlock(&nlm_blocked_lock);
 	return block;
@@ -327,14 +295,17 @@ restart:
 	list_for_each_entry_safe(block, next, &file->f_blocks, b_flist) {
 		if (!match(block->b_host, host))
 			continue;
-		/* Do not destroy blocks that are not on
-		 * the global retry list - why? */
+		/*
+		 * nlmsvc_retry_blocked() holds f_mutex while the block
+		 * is off nlm_blocked, so a block off the list here has
+		 * been retired.
+		 */
 		if (list_empty(&block->b_list))
 			continue;
 		kref_get(&block->b_count);
 		spin_unlock(&nlm_blocked_lock);
-		mutex_unlock(&file->f_mutex);
 		nlmsvc_unlink_block(block);
+		mutex_unlock(&file->f_mutex);
 		nlmsvc_release_block(block);
 		goto restart;
 	}
@@ -1044,6 +1015,8 @@ nlmsvc_retry_blocked(struct svc_rqst *rqstp)
 {
 	unsigned long	timeout = MAX_SCHEDULE_TIMEOUT;
 	struct nlm_block *block;
+	struct nlm_file *file;
+	bool due;
 
 	spin_lock(&nlm_blocked_lock);
 	while (!list_empty(&nlm_blocked) && !svc_thread_should_stop(rqstp)) {
@@ -1055,7 +1028,27 @@ nlmsvc_retry_blocked(struct svc_rqst *rqstp)
 			timeout = block->b_when - jiffies;
 			break;
 		}
+		kref_get(&block->b_count);
 		spin_unlock(&nlm_blocked_lock);
+
+		/*
+		 * Hold f_mutex so nlmsvc_traverse_blocks() cannot scan
+		 * the file while the retry has the block off nlm_blocked.
+		 */
+		file = block->b_file;
+		mutex_lock(&file->f_mutex);
+		spin_lock(&nlm_blocked_lock);
+		due = !list_empty(&block->b_list) &&
+		      block->b_when != NLM_NEVER &&
+		      !time_after(block->b_when, jiffies);
+		spin_unlock(&nlm_blocked_lock);
+
+		if (!due) {
+			mutex_unlock(&file->f_mutex);
+			nlmsvc_release_block(block);
+			spin_lock(&nlm_blocked_lock);
+			continue;
+		}
 
 		dprintk("nlmsvc_retry_blocked(%p, when=%ld)\n",
 			block, block->b_when);
@@ -1065,6 +1058,8 @@ nlmsvc_retry_blocked(struct svc_rqst *rqstp)
 			retry_deferred_block(block);
 		} else
 			nlmsvc_grant_blocked(block);
+		mutex_unlock(&file->f_mutex);
+		nlmsvc_release_block(block);
 		spin_lock(&nlm_blocked_lock);
 	}
 	spin_unlock(&nlm_blocked_lock);

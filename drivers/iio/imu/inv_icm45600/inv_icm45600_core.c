@@ -710,13 +710,13 @@ int inv_icm45600_core_probe(struct regmap *regmap, const struct inv_icm45600_chi
 	if (IS_ERR(regmap_custom))
 		return dev_err_probe(dev, PTR_ERR(regmap_custom), "Failed to register regmap\n");
 
-	st = devm_kzalloc(dev, sizeof(*st), GFP_KERNEL);
+	st = devm_kzalloc_obj(dev, *st);
 	if (!st)
 		return -ENOMEM;
 
 	dev_set_drvdata(dev, st);
 
-	st->fifo.data = devm_kzalloc(dev, 8192, GFP_KERNEL);
+	st->fifo.data = devm_kzalloc(dev, INV_ICM45600_FIFO_SIZE_MAX, GFP_KERNEL);
 	if (!st->fifo.data)
 		return -ENOMEM;
 

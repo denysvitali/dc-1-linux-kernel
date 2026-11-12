@@ -197,6 +197,7 @@ void __rtnl_net_unlock(struct net *net)
 {
 	ASSERT_RTNL();
 
+	unregister_netdevice_many_net(net);
 	mutex_unlock(&net->rtnl_mutex);
 }
 EXPORT_SYMBOL(__rtnl_net_unlock);
@@ -273,6 +274,29 @@ bool lockdep_rtnl_net_is_held(struct net *net)
 	return lockdep_rtnl_is_held() && lockdep_is_held(&net->rtnl_mutex);
 }
 EXPORT_SYMBOL(lockdep_rtnl_net_is_held);
+
+static struct workqueue_struct *rtnl_net_wq;
+
+void rtnl_net_queue_work(struct net *net)
+{
+	queue_work(rtnl_net_wq, &net->rtnl_work);
+}
+
+void rtnl_net_flush_workqueue(void)
+{
+	flush_workqueue(rtnl_net_wq);
+}
+
+void rtnl_net_work_func(struct work_struct *work)
+{
+	struct net *net = container_of(work, struct net, rtnl_work);
+
+	if (list_empty(&net->dev_unreg_head))
+		return;
+
+	rtnl_net_lock(net);
+	rtnl_net_unlock(net);
+}
 #else
 static int rtnl_net_cmp_locks(const struct net *net_a, const struct net *net_b)
 {
@@ -282,10 +306,11 @@ static int rtnl_net_cmp_locks(const struct net *net_a, const struct net *net_b)
 #endif
 
 struct rtnl_nets {
-	/* ->newlink() needs to freeze 3 netns at most;
-	 * 2 for the new device, 1 for its peer.
+	/* ->newlink() needs to freeze 4 netns at most;
+	 * 2 for the new device, 1 for its peer, 1 for
+	 * an existing device (do_setlink() path).
 	 */
-	struct net *net[3];
+	struct net *net[4];
 	unsigned char len;
 };
 
@@ -501,6 +526,9 @@ void rtnl_unregister_all(int protocol)
 	}
 	rtnl_unlock();
 
+	/* Wait for rtnl_get_link() calls that rtnetlink_rcv_msg() makes
+	 * under RCU, before try_module_get().
+	 */
 	synchronize_net();
 
 	kfree(tab);
@@ -636,16 +664,15 @@ unlock:
 }
 EXPORT_SYMBOL_GPL(rtnl_link_register);
 
-static void __rtnl_kill_links(struct net *net, struct rtnl_link_ops *ops)
+static void __rtnl_kill_links(struct net *net, struct rtnl_link_ops *ops,
+			      struct list_head *dev_kill_list)
 {
 	struct net_device *dev;
-	LIST_HEAD(list_kill);
 
 	for_each_netdev(net, dev) {
 		if (dev->rtnl_link_ops == ops)
-			ops->dellink(dev, &list_kill);
+			ops->dellink(dev, dev_kill_list);
 	}
-	unregister_netdevice_many(&list_kill);
 }
 
 /* Return with the rtnl_lock held when there are no network
@@ -676,12 +703,17 @@ static void rtnl_lock_unregistering_all(void)
  */
 void rtnl_link_unregister(struct rtnl_link_ops *ops)
 {
+	LIST_HEAD(dev_kill_list);
 	struct net *net;
 
 	mutex_lock(&link_ops_mutex);
 	list_del_rcu(&ops->list);
 	mutex_unlock(&link_ops_mutex);
 
+	/* Wait for rtnl_link_ops_get() readers that found ops but have
+	 * not yet taken ops->srcu.
+	 */
+	synchronize_rcu();
 	synchronize_srcu(&ops->srcu);
 	cleanup_srcu_struct(&ops->srcu);
 
@@ -689,8 +721,14 @@ void rtnl_link_unregister(struct rtnl_link_ops *ops)
 	down_write(&pernet_ops_rwsem);
 	rtnl_lock_unregistering_all();
 
-	for_each_net(net)
-		__rtnl_kill_links(net, ops);
+	for_each_net(net) {
+		__rtnl_net_lock(net);
+		__rtnl_kill_links(net, ops, &dev_kill_list);
+		unregister_netdevice_queue_many_net(net, &dev_kill_list);
+		__rtnl_net_unlock(net);
+	}
+
+	unregister_netdevice_many(&dev_kill_list);
 
 	rtnl_unlock();
 	up_write(&pernet_ops_rwsem);
@@ -808,6 +846,9 @@ void rtnl_af_unregister(struct rtnl_af_ops *ops)
 	list_del_rcu(&ops->list);
 	spin_unlock(&rtnl_af_ops_lock);
 
+	/* Wait for rtnl_af_ops walkers that invoke callbacks without
+	 * ops->srcu, and for rtnl_af_lookup() readers not yet holding it.
+	 */
 	synchronize_rcu();
 	synchronize_srcu(&ops->srcu);
 	cleanup_srcu_struct(&ops->srcu);
@@ -1143,12 +1184,27 @@ static void copy_rtnl_link_stats(struct rtnl_link_stats *a,
 	a->rx_nohandler = b->rx_nohandler;
 }
 
+/* Cap the number of VFs that IFLA_VFINFO_LIST describes. The nest is one
+ * netlink attribute, so everything inside it has to fit in the u16 nla_len.
+ * The cap is a fixed number rather than whatever happens to fit, so that the
+ * limit is a property of the interface instead of one of the requested
+ * attribute set and the host's alignment requirements. The largest per-VF
+ * encoding is 368 bytes with statistics and GUIDs and 236 bytes without
+ * statistics, so both values keep the nest well inside U16_MAX.
+ */
+static int rtnl_vfinfo_cap(int num_vfs, u32 ext_filter_mask)
+{
+	return min(num_vfs,
+		   ext_filter_mask & RTEXT_FILTER_SKIP_STATS ? 256 : 128);
+}
+
 /* All VF info */
 static inline int rtnl_vfinfo_size(const struct net_device *dev,
 				   u32 ext_filter_mask)
 {
 	if (dev->dev.parent && (ext_filter_mask & RTEXT_FILTER_VF)) {
-		int num_vfs = dev_num_vf(dev->dev.parent);
+		int num_vfs = rtnl_vfinfo_cap(dev_num_vf(dev->dev.parent),
+					      ext_filter_mask);
 		size_t size = nla_total_size(0);
 		size += num_vfs *
 			(nla_total_size(0) +
@@ -1350,6 +1406,7 @@ static noinline size_t if_nlmsg_size(const struct net_device *dev,
 	       + rtnl_devlink_port_size(dev)
 	       + rtnl_dpll_pin_size()
 	       + nla_total_size(8)  /* IFLA_MAX_PACING_OFFLOAD_HORIZON */
+	       + nla_total_size(4)  /* IFLA_PACING_OFFLOAD */
 	       + nla_total_size(2)  /* IFLA_HEADROOM */
 	       + nla_total_size(2)  /* IFLA_TAILROOM */
 	       + rtnl_dev_parent_size(dev)
@@ -1685,6 +1742,11 @@ static noinline_for_stack int rtnl_fill_vf(struct sk_buff *skb,
 	vfinfo = nla_nest_start_noflag(skb, IFLA_VFINFO_LIST);
 	if (!vfinfo)
 		return -EMSGSIZE;
+
+	/* IFLA_NUM_VF above stays the device's VF count; the list itself is
+	 * capped so that its length cannot overflow nla_len.
+	 */
+	num_vfs = rtnl_vfinfo_cap(num_vfs, ext_filter_mask);
 
 	for (i = 0; i < num_vfs; i++) {
 		if (rtnl_fill_vfinfo(skb, dev, i, ext_filter_mask)) {
@@ -2125,6 +2187,8 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb,
 			READ_ONCE(dev->tso_max_segs)) ||
 	    nla_put_uint(skb, IFLA_MAX_PACING_OFFLOAD_HORIZON,
 			 READ_ONCE(dev->max_pacing_offload_horizon)) ||
+	    nla_put_u32(skb, IFLA_PACING_OFFLOAD,
+			dev->pacing_offload) ||
 #ifdef CONFIG_RPS
 	    nla_put_u32(skb, IFLA_NUM_RX_QUEUES,
 			READ_ONCE(dev->num_rx_queues)) ||
@@ -2236,6 +2300,11 @@ nla_put_failure:
 	return -EMSGSIZE;
 }
 
+static const struct netlink_range_validation txqlen_range = {
+	.min = 0,
+	.max = S16_MAX,
+};
+
 static const struct nla_policy ifla_policy[IFLA_MAX+1] = {
 	[IFLA_UNSPEC]		= { .strict_start_type = IFLA_DPLL_PIN },
 	[IFLA_IFNAME]		= { .type = NLA_STRING, .len = IFNAMSIZ-1 },
@@ -2246,7 +2315,7 @@ static const struct nla_policy ifla_policy[IFLA_MAX+1] = {
 	[IFLA_LINK]		= { .type = NLA_U32 },
 	[IFLA_MASTER]		= { .type = NLA_U32 },
 	[IFLA_CARRIER]		= { .type = NLA_U8 },
-	[IFLA_TXQLEN]		= { .type = NLA_U32 },
+	[IFLA_TXQLEN]		= NLA_POLICY_FULL_RANGE(NLA_U32, &txqlen_range),
 	[IFLA_WEIGHT]		= { .type = NLA_U32 },
 	[IFLA_OPERSTATE]	= { .type = NLA_U8 },
 	[IFLA_LINKMODE]		= { .type = NLA_U8 },
@@ -2293,9 +2362,11 @@ static const struct nla_policy ifla_policy[IFLA_MAX+1] = {
 	[IFLA_ALLMULTI]		= { .type = NLA_REJECT },
 	[IFLA_GSO_IPV4_MAX_SIZE]	= NLA_POLICY_MIN(NLA_U32, MAX_TCP_HEADER + 1),
 	[IFLA_GRO_IPV4_MAX_SIZE]	= { .type = NLA_U32 },
+	[IFLA_MAX_PACING_OFFLOAD_HORIZON] = { .type = NLA_REJECT },
 	[IFLA_NETNS_IMMUTABLE]	= { .type = NLA_REJECT },
 	[IFLA_HEADROOM]		= { .type = NLA_REJECT },
 	[IFLA_TAILROOM]		= { .type = NLA_REJECT },
+	[IFLA_PACING_OFFLOAD]	= NLA_POLICY_MAX(NLA_U32, 1),
 };
 
 static const struct nla_policy ifla_info_policy[IFLA_INFO_MAX+1] = {
@@ -2767,6 +2838,14 @@ static int validate_linkmsg(struct net_device *dev, struct nlattr *tb[],
 	    nla_get_u32(tb[IFLA_GRO_IPV4_MAX_SIZE]) > GRO_MAX_SIZE) {
 		NL_SET_ERR_MSG(extack, "too big gro_ipv4_max_size");
 		return -EINVAL;
+	}
+
+	if (tb[IFLA_PACING_OFFLOAD]) {
+		if (nla_get_u32(tb[IFLA_PACING_OFFLOAD]) &&
+		    !dev->max_pacing_offload_horizon) {
+			NL_SET_ERR_MSG(extack, "pacing offload not supported by device");
+			return -EOPNOTSUPP;
+		}
 	}
 
 	if (tb[IFLA_AF_SPEC]) {
@@ -3286,6 +3365,15 @@ static int do_setlink(const struct sk_buff *skb, struct net_device *dev,
 		}
 	}
 
+	if (tb[IFLA_PACING_OFFLOAD]) {
+		bool val = nla_get_u32(tb[IFLA_PACING_OFFLOAD]);
+
+		if (dev->pacing_offload != val) {
+			dev->pacing_offload = val;
+			status |= DO_SETLINK_MODIFIED;
+		}
+	}
+
 	if (tb[IFLA_OPERSTATE])
 		set_operstate(dev, nla_get_u8(tb[IFLA_OPERSTATE]));
 
@@ -3660,14 +3748,16 @@ int rtnl_configure_link(struct net_device *dev, const struct ifinfomsg *ifm,
 			u32 portid, const struct nlmsghdr *nlh)
 {
 	unsigned int old_flags, changed;
-	int err;
+	int err = 0;
+
+	netdev_lock_ops(dev);
 
 	old_flags = dev->flags;
 	if (ifm && (ifm->ifi_flags || ifm->ifi_change)) {
 		err = __dev_change_flags(dev, rtnl_dev_combine_flags(dev, ifm),
 					 NULL);
 		if (err < 0)
-			return err;
+			goto out;
 	}
 
 	changed = old_flags ^ dev->flags;
@@ -3677,7 +3767,10 @@ int rtnl_configure_link(struct net_device *dev, const struct ifinfomsg *ifm,
 	}
 
 	__dev_notify_flags(dev, old_flags, changed, portid, nlh);
-	return 0;
+
+out:
+	netdev_unlock_ops(dev);
+	return err;
 }
 EXPORT_SYMBOL(rtnl_configure_link);
 
@@ -3918,22 +4011,20 @@ static int rtnl_newlink_create(struct sk_buff *skb, struct ifinfomsg *ifm,
 		goto out;
 	}
 
-	netdev_lock_ops(dev);
-
 	err = rtnl_configure_link(dev, ifm, portid, nlh);
 	if (err < 0)
 		goto out_unregister;
 	if (tb[IFLA_MASTER]) {
+		netdev_lock_ops(dev);
 		err = do_set_master(dev, nla_get_u32(tb[IFLA_MASTER]), extack);
+		netdev_unlock_ops(dev);
 		if (err)
 			goto out_unregister;
 	}
 
-	netdev_unlock_ops(dev);
 out:
 	return err;
 out_unregister:
-	netdev_unlock_ops(dev);
 	if (ops->newlink) {
 		LIST_HEAD(list_kill);
 
@@ -4155,6 +4246,8 @@ static int rtnl_newlink(struct sk_buff *skb, struct nlmsghdr *nlh,
 		}
 	}
 
+	rtnl_nets_add(&rtnl_nets, get_net(sock_net(skb->sk)));
+
 	rtnl_nets_lock(&rtnl_nets);
 	ret = __rtnl_newlink(skb, nlh, ops, tgt_net, link_net, peer_net, tbs, data, extack);
 	rtnl_nets_unlock(&rtnl_nets);
@@ -4273,7 +4366,7 @@ static int rtnl_getlink(struct sk_buff *skb, struct nlmsghdr *nlh,
 retry:
 	if (need_rtnl) {
 		rtnl_lock();
-		if (!dev_isalive(dev)) {
+		if (!netif_is_alive(dev)) {
 			err = -ENODEV;
 			nskb = NULL;
 			goto unlock;
@@ -7195,6 +7288,8 @@ static const struct rtnl_msg_handler rtnetlink_rtnl_msg_handlers[] __initconst =
 	{.msgtype = RTM_SETSTATS, .doit = rtnl_stats_set},
 	{.msgtype = RTM_NEWLINKPROP, .doit = rtnl_newlinkprop},
 	{.msgtype = RTM_DELLINKPROP, .doit = rtnl_dellinkprop},
+	{.protocol = PF_PACKET, .msgtype = RTM_GETMULTICAST,
+	 .dumpit = dev_mc_dump, .flags = RTNL_FLAG_DUMP_UNLOCKED},
 	{.protocol = PF_BRIDGE, .msgtype = RTM_GETLINK,
 	 .dumpit = rtnl_bridge_getlink},
 	{.protocol = PF_BRIDGE, .msgtype = RTM_DELLINK,
@@ -7221,4 +7316,10 @@ void __init rtnetlink_init(void)
 	register_netdevice_notifier(&rtnetlink_dev_notifier);
 
 	rtnl_register_many(rtnetlink_rtnl_msg_handlers);
+
+#ifdef CONFIG_DEBUG_NET_SMALL_RTNL
+	rtnl_net_wq = create_workqueue("rtnl_net");
+	if (!rtnl_net_wq)
+		panic("Could not create rtnl_net workq");
+#endif
 }

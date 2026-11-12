@@ -217,19 +217,19 @@ static int entity_early_parse_ge(struct device *dev,
 	if (!control_name)
 		return -ENOMEM;
 
-	kctl = devm_kzalloc(dev, sizeof(*kctl), GFP_KERNEL);
+	kctl = devm_kzalloc_obj(dev, *kctl);
 	if (!kctl)
 		return -ENOMEM;
 
-	soc_enum = devm_kzalloc(dev, sizeof(*soc_enum), GFP_KERNEL);
+	soc_enum = devm_kzalloc_obj(dev, *soc_enum);
 	if (!soc_enum)
 		return -ENOMEM;
 
-	texts = devm_kcalloc(dev, range->rows + 3, sizeof(*texts), GFP_KERNEL);
+	texts = devm_kzalloc_objs(dev, *texts, range->rows + 3);
 	if (!texts)
 		return -ENOMEM;
 
-	values = devm_kcalloc(dev, range->rows + 3, sizeof(*values), GFP_KERNEL);
+	values = devm_kzalloc_objs(dev, *values, range->rows + 3);
 	if (!values)
 		return -ENOMEM;
 
@@ -364,7 +364,6 @@ static int entity_parse_ot(struct device *dev,
 
 /**
  * sdca_asoc_pde_poll_actual_ps - Verify PDE power state reached target state
- * @dev: Pointer to the device for error logging.
  * @regmap: Register map for reading ACTUAL_PS register.
  * @function_id: SDCA function identifier.
  * @entity_id: SDCA entity identifier for the power domain.
@@ -389,11 +388,11 @@ static int entity_parse_ot(struct device *dev,
  * polling times out before reaching the target state, or a negative error code if
  * a register read fails.
  */
-int sdca_asoc_pde_poll_actual_ps(struct device *dev, struct regmap *regmap,
+int sdca_asoc_pde_poll_actual_ps(struct regmap *regmap,
 				 int function_id, int entity_id,
-			    int from_ps, int to_ps,
-			    const struct sdca_pde_delay *pde_delays,
-			    int num_delays)
+				 int from_ps, int to_ps,
+				 const struct sdca_pde_delay *pde_delays,
+				 int num_delays)
 {
 	static const int polls = 100;
 	static const int default_poll_us = 1000;
@@ -451,14 +450,14 @@ static int entity_pde_event(struct snd_soc_dapm_widget *widget,
 		return 0;
 	}
 
-	ret = sdca_asoc_pde_poll_actual_ps(component->dev, component->regmap,
+	ret = sdca_asoc_pde_poll_actual_ps(component->regmap,
 					   SDW_SDCA_CTL_FUNC(widget->reg),
 					   SDW_SDCA_CTL_ENT(widget->reg),
 					   from, to,
 					   entity->pde.max_delay,
 					   entity->pde.num_max_delay);
 	if (ret)
-		dev_err(component->dev, "%s: PDE transition %x -> %x failed, err=%d\n",
+		dev_err(component->dev, "%s: pde transition %x -> %x failed: %d\n",
 			entity->label, from, to, ret);
 
 	return ret;
@@ -588,15 +587,15 @@ static int entity_parse_su_class(struct device *dev,
 	const char **texts;
 	int i;
 
-	kctl = devm_kzalloc(dev, sizeof(*kctl), GFP_KERNEL);
+	kctl = devm_kzalloc_obj(dev, *kctl);
 	if (!kctl)
 		return -ENOMEM;
 
-	soc_enum = devm_kzalloc(dev, sizeof(*soc_enum), GFP_KERNEL);
+	soc_enum = devm_kzalloc_obj(dev, *soc_enum);
 	if (!soc_enum)
 		return -ENOMEM;
 
-	texts = devm_kcalloc(dev, entity->num_sources + 1, sizeof(*texts), GFP_KERNEL);
+	texts = devm_kzalloc_objs(dev, *texts, entity->num_sources + 1);
 	if (!texts)
 		return -ENOMEM;
 
@@ -678,7 +677,7 @@ static int entity_parse_mu(struct device *dev,
 		dev_warn(dev, "%s: unexpected access layer: %x\n",
 			 entity->label, control->layers);
 
-	kctl = devm_kcalloc(dev, entity->num_sources, sizeof(*kctl), GFP_KERNEL);
+	kctl = devm_kzalloc_objs(dev, *kctl, entity->num_sources);
 	if (!kctl)
 		return -ENOMEM;
 
@@ -691,7 +690,7 @@ static int entity_parse_mu(struct device *dev,
 		if (!control_name)
 			return -ENOMEM;
 
-		mc = devm_kzalloc(dev, sizeof(*mc), GFP_KERNEL);
+		mc = devm_kzalloc_obj(dev, *mc);
 		if (!mc)
 			return -ENOMEM;
 
@@ -947,7 +946,7 @@ static int control_limit_kctl(struct device *dev,
 	min = sign_extend32(min, control->nbits - 1);
 	max = sign_extend32(max, control->nbits - 1);
 
-	tlv = devm_kcalloc(dev, 4, sizeof(*tlv), GFP_KERNEL);
+	tlv = devm_kzalloc_objs(dev, *tlv, 4);
 	if (!tlv)
 		return -ENOMEM;
 
@@ -1035,7 +1034,7 @@ static int populate_control(struct device *dev,
 	if (!control_name)
 		return -ENOMEM;
 
-	mc = devm_kzalloc(dev, sizeof(*mc), GFP_KERNEL);
+	mc = devm_kzalloc_obj(dev, *mc);
 	if (!mc)
 		return -ENOMEM;
 
@@ -1231,7 +1230,7 @@ static u64 width_find_mask(unsigned int bits)
 	}
 }
 
-static int populate_rate_format(struct device *dev,
+int sdca_asoc_populate_rate_format(struct device *dev,
 				struct sdca_function_data *function,
 				struct sdca_entity *entity,
 				struct snd_soc_pcm_stream *stream)
@@ -1292,6 +1291,7 @@ static int populate_rate_format(struct device *dev,
 
 	return 0;
 }
+EXPORT_SYMBOL_NS(sdca_asoc_populate_rate_format, "SND_SOC_SDCA");
 
 /**
  * sdca_asoc_populate_dais - fill in an array of DAI drivers for a Function
@@ -1344,7 +1344,7 @@ int sdca_asoc_populate_dais(struct device *dev, struct sdca_function_data *funct
 		stream->channels_min = 1;
 		stream->channels_max = SDCA_MAX_CHANNEL_COUNT;
 
-		ret = populate_rate_format(dev, function, entity, stream);
+		ret = sdca_asoc_populate_rate_format(dev, function, entity, stream);
 		if (ret)
 			return ret;
 
@@ -1392,19 +1392,19 @@ int sdca_asoc_populate_component(struct device *dev,
 	if (ret)
 		return ret;
 
-	widgets = devm_kcalloc(dev, num_widgets, sizeof(*widgets), GFP_KERNEL);
+	widgets = devm_kzalloc_objs(dev, *widgets, num_widgets);
 	if (!widgets)
 		return -ENOMEM;
 
-	routes = devm_kcalloc(dev, num_routes, sizeof(*routes), GFP_KERNEL);
+	routes = devm_kzalloc_objs(dev, *routes, num_routes);
 	if (!routes)
 		return -ENOMEM;
 
-	controls = devm_kcalloc(dev, num_controls, sizeof(*controls), GFP_KERNEL);
+	controls = devm_kzalloc_objs(dev, *controls, num_controls);
 	if (!controls)
 		return -ENOMEM;
 
-	dais = devm_kcalloc(dev, num_dais, sizeof(*dais), GFP_KERNEL);
+	dais = devm_kzalloc_objs(dev, *dais, num_dais);
 	if (!dais)
 		return -ENOMEM;
 
@@ -1507,7 +1507,7 @@ int sdca_asoc_set_constraints(struct device *dev, struct regmap *regmap,
 		return ret;
 	}
 
-	dai->priv = constraint;
+	snd_soc_dai_set_priv(dai, constraint);
 
 	return 0;
 }
@@ -1523,7 +1523,7 @@ EXPORT_SYMBOL_NS(sdca_asoc_set_constraints, "SND_SOC_SDCA");
 void sdca_asoc_free_constraints(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
-	struct snd_pcm_hw_constraint_list *constraint = dai->priv;
+	struct snd_pcm_hw_constraint_list *constraint = snd_soc_dai_to_priv(dai);
 
 	kfree(constraint);
 }

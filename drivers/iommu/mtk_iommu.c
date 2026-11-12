@@ -221,7 +221,7 @@ struct mtk_iommu_plat_data {
 		unsigned int	iova_region_nr;
 		const struct mtk_iommu_iova_region	*iova_region;
 		/*
-		 * Indicate the correspondance between larbs, ports and regions.
+		 * Indicate the correspondence between larbs, ports and regions.
 		 *
 		 * The index is the same as iova_region and larb port numbers are
 		 * described as bit positions.
@@ -1879,7 +1879,7 @@ static int mtk_iommu_probe(struct platform_device *pdev)
 	struct mtk_iommu_bank_data *bank;
 	void __iomem		*base;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 	data->dev = dev;

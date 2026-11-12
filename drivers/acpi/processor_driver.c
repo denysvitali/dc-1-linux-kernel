@@ -164,7 +164,7 @@ static int __acpi_processor_start(struct acpi_device *device)
 
 	acpi_pss_perf_init(pr);
 
-	result = acpi_processor_thermal_init(pr, device);
+	result = acpi_processor_thermal_init(pr);
 	if (result)
 		goto err_power_exit;
 
@@ -179,7 +179,7 @@ static int __acpi_processor_start(struct acpi_device *device)
 	return 0;
 
 err_thermal_exit:
-	acpi_processor_thermal_exit(pr, device);
+	acpi_processor_thermal_exit(pr);
 err_power_exit:
 	acpi_processor_power_exit(pr);
 	return result;
@@ -203,7 +203,7 @@ static int acpi_processor_stop(struct device *dev)
 
 	acpi_cppc_processor_exit(pr);
 
-	acpi_processor_thermal_exit(pr, device);
+	acpi_processor_thermal_exit(pr);
 
 	return 0;
 }
@@ -284,6 +284,12 @@ err:
 
 unregister_idle_drv:
 	acpi_processor_unregister_idle_driver();
+
+	if (acpi_processor_cpufreq_init) {
+		cpufreq_unregister_notifier(&acpi_processor_notifier_block,
+					    CPUFREQ_POLICY_NOTIFIER);
+		acpi_processor_cpufreq_init = false;
+	}
 
 	return result;
 }

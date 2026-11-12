@@ -7,6 +7,7 @@
 
 #include <linux/types.h>
 #include <linux/blk_types.h>
+#include <linux/blk_plug.h>
 #include <linux/device.h>
 #include <linux/list.h>
 #include <linux/llist.h>
@@ -21,7 +22,6 @@
 #include <linux/rcupdate.h>
 #include <linux/percpu-refcount.h>
 #include <linux/blkzoned.h>
-#include <linux/sched.h>
 #include <linux/sbitmap.h>
 #include <linux/uuid.h>
 #include <linux/xarray.h>
@@ -126,8 +126,6 @@ struct blk_integrity {
 	unsigned char				pi_tuple_size;
 };
 
-typedef unsigned int __bitwise blk_mode_t;
-
 /* open for reading */
 #define BLK_OPEN_READ		((__force blk_mode_t)(1 << 0))
 /* open for writing */
@@ -193,14 +191,17 @@ struct gendisk {
 #ifdef CONFIG_BLK_DEV_ZONED
 	/*
 	 * Zoned block device information. Reads of this information must be
-	 * protected with blk_queue_enter() / blk_queue_exit(). Modifying this
-	 * information is only allowed while no requests are being processed.
-	 * See also blk_mq_freeze_queue() and blk_mq_unfreeze_queue().
+	 * protected with blk_queue_enter() / blk_queue_exit() or by holding a
+	 * lock on zone_revalidate_mutex. blk_revalidate_disk_zones() may modify
+	 * this information while no requests are being processed (disk queue
+	 * frozen with blk_mq_freeze_queue()) and while holding a lock on
+	 * zone_revalidate_mutex.
 	 */
+	struct mutex		zone_revalidate_mutex;
 	unsigned int		nr_zones;
 	unsigned int		zone_capacity;
 	unsigned int		last_zone_capacity;
-	u8 __rcu		*zones_cond;
+	u8 __rcu		*zones_state;
 	unsigned int		zone_wplugs_hash_bits;
 	atomic_t		nr_zone_wplugs;
 	spinlock_t		zone_wplugs_hash_lock;
@@ -677,7 +678,7 @@ enum {
 	QUEUE_FLAG_HCTX_ACTIVE,		/* at least one blk-mq hctx is active */
 	QUEUE_FLAG_SQ_SCHED,		/* single queue style io dispatch */
 	QUEUE_FLAG_DISABLE_WBT_DEF,	/* for sched to disable/enable wbt */
-	QUEUE_FLAG_NO_ELV_SWITCH,	/* can't switch elevator any more */
+	QUEUE_FLAG_NO_ELV_SWITCH,	/* a switch is running or disk is going away */
 	QUEUE_FLAG_QOS_ENABLED,		/* qos is enabled */
 	QUEUE_FLAG_BIO_ISSUE_TIME,	/* record bio->issue_time_ns */
 	QUEUE_FLAG_ZONED_QD1_WRITES,	/* Limit zoned devices writes to QD=1 */
@@ -718,8 +719,6 @@ void blk_queue_flag_clear(unsigned int flag, struct request_queue *q);
 	((q)->limits.features & BLK_FEAT_SKIP_TAGSET_QUIESCE)
 #define blk_queue_disable_wbt(q)	\
 	test_bit(QUEUE_FLAG_DISABLE_WBT_DEF, &(q)->queue_flags)
-#define blk_queue_no_elv_switch(q)	\
-	test_bit(QUEUE_FLAG_NO_ELV_SWITCH, &(q)->queue_flags)
 #define blk_queue_zoned_qd1_writes(q)	\
 	test_bit(QUEUE_FLAG_ZONED_QD1_WRITES, &(q)->queue_flags)
 
@@ -1169,94 +1168,10 @@ extern void blk_put_queue(struct request_queue *);
 
 void blk_mark_disk_dead(struct gendisk *disk);
 
-struct rq_list {
-	struct request *head;
-	struct request *tail;
-};
-
 #ifdef CONFIG_BLOCK
-/*
- * blk_plug permits building a queue of related requests by holding the I/O
- * fragments for a short period. This allows merging of sequential requests
- * into single larger request. As the requests are moved from a per-task list to
- * the device's request_queue in a batch, this results in improved scalability
- * as the lock contention for request_queue lock is reduced.
- *
- * It is ok not to disable preemption when adding the request to the plug list
- * or when attempting a merge. For details, please see schedule() where
- * blk_flush_plug() is called.
- */
-struct blk_plug {
-	struct rq_list mq_list; /* blk-mq requests */
-
-	/* if ios_left is > 1, we can batch tag/rq allocations */
-	struct rq_list cached_rqs;
-	u64 cur_ktime;
-	unsigned short nr_ios;
-
-	unsigned short rq_count;
-
-	bool multiple_queues;
-	bool has_elevator;
-
-	struct list_head cb_list; /* md requires an unplug callback */
-};
-
-struct blk_plug_cb;
-typedef void (*blk_plug_cb_fn)(struct blk_plug_cb *, bool);
-struct blk_plug_cb {
-	struct list_head list;
-	blk_plug_cb_fn callback;
-	void *data;
-};
-extern struct blk_plug_cb *blk_check_plugged(blk_plug_cb_fn unplug,
-					     void *data, int size);
-extern void blk_start_plug(struct blk_plug *);
-extern void blk_start_plug_nr_ios(struct blk_plug *, unsigned short);
-extern void blk_finish_plug(struct blk_plug *);
-
-void __blk_flush_plug(struct blk_plug *plug, bool from_schedule);
-static inline void blk_flush_plug(struct blk_plug *plug, bool async)
-{
-	if (plug)
-		__blk_flush_plug(plug, async);
-}
-
-static __always_inline void blk_plug_invalidate_ts(void)
-{
-	if (unlikely(current->flags & PF_BLOCK_TS)) {
-		current->plug->cur_ktime = 0;
-		current->flags &= ~PF_BLOCK_TS;
-	}
-}
-
 int blkdev_issue_flush(struct block_device *bdev);
 long nr_blockdev_pages(void);
 #else /* CONFIG_BLOCK */
-struct blk_plug {
-};
-
-static inline void blk_start_plug_nr_ios(struct blk_plug *plug,
-					 unsigned short nr_ios)
-{
-}
-
-static inline void blk_start_plug(struct blk_plug *plug)
-{
-}
-
-static inline void blk_finish_plug(struct blk_plug *plug)
-{
-}
-
-static inline void blk_flush_plug(struct blk_plug *plug, bool async)
-{
-}
-
-static inline void blk_plug_invalidate_ts(void)
-{
-}
-
 static inline int blkdev_issue_flush(struct block_device *bdev)
 {
 	return 0;
@@ -1682,6 +1597,8 @@ struct block_device_operations {
 	/* returns the length of the identifier or a negative errno: */
 	int (*get_unique_id)(struct gendisk *disk, u8 id[16],
 			enum blk_unique_id id_type);
+	int (*init_dma_buf_io_ctx)(struct block_device *,
+				   struct dma_buf_io_ctx *);
 	struct module *owner;
 	const struct pr_ops *pr_ops;
 
@@ -1771,13 +1688,6 @@ struct blk_holder_ops {
 };
 
 /*
- * For filesystems using @fs_holder_ops, the @holder argument passed to
- * helpers used to open and claim block devices via
- * bd_prepare_to_claim() must point to a superblock.
- */
-extern const struct blk_holder_ops fs_holder_ops;
-
-/*
  * Return the correct open flags for blkdev_get_by_* for super block flags
  * as stored in sb->s_flags.
  */
@@ -1837,7 +1747,10 @@ static inline int early_lookup_bdev(const char *pathname, dev_t *dev)
 
 int bdev_freeze(struct block_device *bdev);
 int bdev_thaw(struct block_device *bdev);
+int bdev_deny_freeze(struct block_device *bdev);
+void bdev_allow_freeze(struct block_device *bdev);
 void bdev_fput(struct file *bdev_file);
+void bdev_yield_claim(struct file *bdev_file);
 
 struct io_comp_batch {
 	struct rq_list req_list;
@@ -1906,8 +1819,11 @@ static inline int bio_split_rw_at(struct bio *bio,
  */
 static inline unsigned int max_integrity_io_size(struct queue_limits *lim)
 {
-	return min_t(unsigned int, lim->max_segment_size,
-		(BLK_INTEGRITY_MAX_SIZE / lim->integrity.metadata_size) <<
+	unsigned int buf_size = min_t(unsigned int, lim->max_segment_size,
+				      BLK_INTEGRITY_MAX_SIZE);
+
+	return min_t(u64, UINT_MAX,
+		(u64)(buf_size / lim->integrity.metadata_size) <<
 			lim->integrity.interval_exp);
 }
 

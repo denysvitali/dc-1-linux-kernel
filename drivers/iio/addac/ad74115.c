@@ -1539,8 +1539,7 @@ static int ad74115_setup_iio_channels(struct iio_dev *indio_dev)
 	struct device *dev = &st->spi->dev;
 	struct iio_chan_spec *channels;
 
-	channels = devm_kcalloc(dev, sizeof(*channels),
-				indio_dev->num_channels, GFP_KERNEL);
+	channels = devm_kzalloc_objs(dev, *channels, indio_dev->num_channels);
 	if (!channels)
 		return -ENOMEM;
 
@@ -1904,7 +1903,7 @@ static int __init ad74115_register_driver(struct spi_driver *spi)
 }
 
 static const struct spi_device_id ad74115_spi_id[] = {
-	{ "ad74115h" },
+	{ .name = "ad74115h" },
 	{ }
 };
 

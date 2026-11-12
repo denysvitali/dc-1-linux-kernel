@@ -33,7 +33,8 @@
 			{ NFS_INO_INVALID_XATTR, "INVALID_XATTR" }, \
 			{ NFS_INO_INVALID_NLINK, "INVALID_NLINK" }, \
 			{ NFS_INO_INVALID_MODE, "INVALID_MODE" }, \
-			{ NFS_INO_INVALID_BTIME, "INVALID_BTIME" })
+			{ NFS_INO_INVALID_BTIME, "INVALID_BTIME" }, \
+			{ NFS_INO_INVALID_UNCACHEABLE_FILE_DATA, "INVALID_UNCACHEABLE_FILE_DATA" })
 
 #define nfs_show_nfsi_flags(v) \
 	__print_flags(v, "|", \
@@ -1771,7 +1772,10 @@ DECLARE_EVENT_CLASS(nfs_local_dio_class,
 		__entry->count = count;
 		__entry->mem_align = local_dio->mem_align;
 		__entry->offset_align = local_dio->offset_align;
-		__entry->start = offset;
+		if (local_dio->start_len)
+			__entry->start = local_dio->middle_offset - local_dio->start_len;
+		else
+			__entry->start = 0;
 		__entry->start_len = local_dio->start_len;
 		__entry->middle = local_dio->middle_offset;
 		__entry->middle_len = local_dio->middle_len;

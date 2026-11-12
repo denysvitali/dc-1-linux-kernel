@@ -396,9 +396,11 @@ static __poll_t iommufd_eventq_fops_poll(struct file *filep,
 static int iommufd_eventq_fops_release(struct inode *inode, struct file *filep)
 {
 	struct iommufd_eventq *eventq = filep->private_data;
+	/* eventq may be freed once the users reference is dropped. */
+	struct iommufd_ctx *ictx = eventq->ictx;
 
 	refcount_dec(&eventq->obj.users);
-	iommufd_ctx_put(eventq->ictx);
+	iommufd_ctx_put(ictx);
 	return 0;
 }
 
@@ -483,6 +485,8 @@ int iommufd_fault_iopf_handler(struct iopf_group *group)
 
 	hwpt = group->attach_handle->domain->iommufd_hwpt;
 	fault = hwpt->fault;
+
+	iopf_group_dequeue(group);
 
 	spin_lock(&fault->common.lock);
 	list_add_tail(&group->node, &fault->common.deliver);

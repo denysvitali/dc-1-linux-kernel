@@ -661,7 +661,7 @@ static int s3c64xx_wait_for_pio(struct s3c64xx_spi_driver_data *sdd,
 	 * loops = length / max fifo size (calculated by using the
 	 * fifo mask).
 	 * For any size less than the fifo size the below code is
-	 * executed atleast once.
+	 * executed at least once.
 	 */
 	loops = xfer->len / sdd->fifo_depth;
 	buf = xfer->rx_buf;
@@ -1161,7 +1161,7 @@ static struct s3c64xx_spi_info *s3c64xx_spi_parse_dt(struct device *dev)
 	struct s3c64xx_spi_info *sci;
 	u32 temp;
 
-	sci = devm_kzalloc(dev, sizeof(*sci), GFP_KERNEL);
+	sci = devm_kzalloc_obj(dev, *sci);
 	if (!sci)
 		return ERR_PTR(-ENOMEM);
 
@@ -1331,7 +1331,8 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, PTR_ERR(sdd->clk),
 				     "Unable to acquire clock 'spi'\n");
 
-	sprintf(clk_name, "spi_busclk%d", sci->src_clk_nr);
+	snprintf(clk_name, sizeof(clk_name), "spi_busclk%d",
+		 sci->src_clk_nr);
 	sdd->src_clk = devm_clk_get_enabled(&pdev->dev, clk_name);
 	if (IS_ERR(sdd->src_clk))
 		return dev_err_probe(&pdev->dev, PTR_ERR(sdd->src_clk),
@@ -1408,7 +1409,6 @@ static void s3c64xx_spi_remove(struct platform_device *pdev)
 	pm_runtime_set_suspended(&pdev->dev);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int s3c64xx_spi_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
@@ -1444,9 +1444,7 @@ static int s3c64xx_spi_resume(struct device *dev)
 
 	return spi_controller_resume(host);
 }
-#endif /* CONFIG_PM_SLEEP */
 
-#ifdef CONFIG_PM
 static int s3c64xx_spi_runtime_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
@@ -1494,12 +1492,11 @@ err_disable_ioclk:
 
 	return ret;
 }
-#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops s3c64xx_spi_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(s3c64xx_spi_suspend, s3c64xx_spi_resume)
-	SET_RUNTIME_PM_OPS(s3c64xx_spi_runtime_suspend,
-			   s3c64xx_spi_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(s3c64xx_spi_suspend, s3c64xx_spi_resume)
+	RUNTIME_PM_OPS(s3c64xx_spi_runtime_suspend,
+		       s3c64xx_spi_runtime_resume, NULL)
 };
 
 static const struct s3c64xx_spi_port_config s3c6410_spi_port_config = {
@@ -1655,7 +1652,7 @@ MODULE_DEVICE_TABLE(of, s3c64xx_spi_dt_match);
 static struct platform_driver s3c64xx_spi_driver = {
 	.driver = {
 		.name	= "s3c64xx-spi",
-		.pm = &s3c64xx_spi_pm,
+		.pm = pm_ptr(&s3c64xx_spi_pm),
 		.of_match_table = of_match_ptr(s3c64xx_spi_dt_match),
 	},
 	.probe = s3c64xx_spi_probe,

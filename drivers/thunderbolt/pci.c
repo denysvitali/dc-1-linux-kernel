@@ -18,6 +18,7 @@
 #include <linux/property.h>
 #include <linux/string_helpers.h>
 #include <linux/suspend.h>
+#include <linux/platform_data/x86/apple.h>
 
 #include "nhi.h"
 #include "nhi_regs.h"
@@ -108,11 +109,86 @@ static void nhi_pci_check_iommu(struct tb_nhi_pci *nhi_pci)
 		str_enabled_disabled(port_ok));
 }
 
+static bool add_link(struct tb_nhi *nhi, struct pci_dev *pdev)
+{
+	const struct device_link *link;
+
+	link = device_link_add(&pdev->dev, nhi->dev,
+			       DL_FLAG_AUTOREMOVE_SUPPLIER |
+			       DL_FLAG_PM_RUNTIME);
+	if (!link) {
+		dev_warn(nhi->dev, "device link creation from %s failed\n",
+			 dev_name(&pdev->dev));
+		return false;
+	}
+
+	dev_dbg(nhi->dev, "created link from %s\n", dev_name(&pdev->dev));
+	return true;
+}
+
+/*
+ * During suspend the Thunderbolt controller is reset and all PCIe
+ * tunnels are lost. The NHI driver will try to reestablish all tunnels
+ * during resume. This adds device links between the tunneled PCIe
+ * downstream ports and the NHI so that the device core will make sure
+ * NHI is resumed first before the rest.
+ */
+static bool nhi_pci_add_links(struct tb_nhi *nhi)
+{
+	struct pci_dev *nhi_pdev = to_pci_dev(nhi->dev);
+	struct pci_dev *upstream, *pdev;
+	bool ret;
+
+	if (!x86_apple_machine)
+		return false;
+
+	switch (nhi_pdev->device) {
+	case PCI_DEVICE_ID_INTEL_LIGHT_RIDGE:
+	case PCI_DEVICE_ID_INTEL_CACTUS_RIDGE_4C:
+	case PCI_DEVICE_ID_INTEL_FALCON_RIDGE_2C_NHI:
+	case PCI_DEVICE_ID_INTEL_FALCON_RIDGE_4C_NHI:
+	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_2C_NHI:
+	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI:
+		break;
+	default:
+		return false;
+	}
+
+	upstream = pci_upstream_bridge(nhi_pdev);
+	while (upstream) {
+		if (!pci_is_pcie(upstream))
+			return false;
+		if (pci_pcie_type(upstream) == PCI_EXP_TYPE_UPSTREAM)
+			break;
+		upstream = pci_upstream_bridge(upstream);
+	}
+
+	if (!upstream)
+		return false;
+
+	/*
+	 * For each hotplug downstream port, create add device link back
+	 * to NHI so that PCIe tunnels can be re-established after
+	 * sleep.
+	 */
+	ret = false;
+	for_each_pci_bridge(pdev, upstream->subordinate) {
+		if (!pci_is_pcie(pdev))
+			continue;
+		if (pci_pcie_type(pdev) != PCI_EXP_TYPE_DOWNSTREAM ||
+		    !pdev->is_pciehp)
+			continue;
+
+		ret |= add_link(nhi, pdev);
+	}
+
+	return ret;
+}
+
 static int nhi_pci_init_msi(struct tb_nhi *nhi)
 {
 	struct tb_nhi_pci *nhi_pci = nhi_to_pci(nhi);
 	struct pci_dev *pdev = to_pci_dev(nhi->dev);
-	struct device *dev = &pdev->dev;
 	int res, irq, nvec;
 
 	ida_init(&nhi_pci->msix_ida);
@@ -139,7 +215,7 @@ static int nhi_pci_init_msi(struct tb_nhi *nhi)
 		res = devm_request_irq(&pdev->dev, irq, nhi_msi,
 				       IRQF_NO_SUSPEND, "thunderbolt", nhi);
 		if (res)
-			return dev_err_probe(dev, res, "request_irq failed, aborting\n");
+			return res;
 	}
 
 	return 0;
@@ -230,7 +306,7 @@ static void nhi_pci_ring_release_msix(struct tb_ring *ring)
 	ring->irq = 0;
 }
 
-static void nhi_pci_shutdown(struct tb_nhi *nhi)
+static void nhi_pci_release_irq(struct tb_nhi *nhi)
 {
 	struct tb_nhi_pci *nhi_pci = nhi_to_pci(nhi);
 	struct pci_dev *pdev = to_pci_dev(nhi->dev);
@@ -252,11 +328,12 @@ static bool nhi_pci_is_present(struct tb_nhi *nhi)
 }
 
 static const struct tb_nhi_ops pci_nhi_default_ops = {
+	.add_links = nhi_pci_add_links,
 	.pre_nvm_auth = nhi_pci_start_dma_port,
 	.post_nvm_auth = nhi_pci_complete_dma_port,
 	.request_ring_irq = nhi_pci_ring_request_msix,
 	.release_ring_irq = nhi_pci_ring_release_msix,
-	.shutdown = nhi_pci_shutdown,
+	.shutdown = nhi_pci_release_irq,
 	.is_present = nhi_pci_is_present,
 	.init_interrupts = nhi_pci_init_msi,
 };
@@ -422,15 +499,50 @@ static int icl_nhi_resume(struct tb_nhi *nhi)
 	return 0;
 }
 
+static bool icl_nhi_add_links(struct tb_nhi *nhi)
+{
+	struct pci_dev *nhi_pdev = to_pci_dev(nhi->dev);
+	struct pci_bus *bus = nhi_pdev->bus;
+	struct pci_dev *pdev;
+	bool ret;
+
+	if (!x86_apple_machine)
+		return false;
+
+	/*
+	 * On integrated controllers the tunneled PCIe root ports are
+	 * directly under the host bridge.
+	 */
+	if (!pci_is_root_bus(bus))
+		return false;
+
+	ret = false;
+	for_each_pci_bridge(pdev, bus) {
+		switch (nhi_pdev->device) {
+		case PCI_DEVICE_ID_INTEL_ICL_NHI0:
+			if (pdev->device == 0x8a1d || pdev->device == 0x8a1f)
+				ret |= add_link(nhi, pdev);
+			break;
+		case PCI_DEVICE_ID_INTEL_ICL_NHI1:
+			if (pdev->device == 0x8a21 || pdev->device == 0x8a23)
+				ret |= add_link(nhi, pdev);
+			break;
+		}
+	}
+
+	return ret;
+}
+
 static void icl_nhi_shutdown(struct tb_nhi *nhi)
 {
-	nhi_pci_shutdown(nhi);
+	nhi_pci_release_irq(nhi);
 
 	icl_nhi_force_power(nhi, false);
 }
 
 static const struct tb_nhi_ops icl_nhi_ops = {
 	.init = icl_nhi_resume,
+	.add_links = icl_nhi_add_links,
 	.suspend_noirq = icl_nhi_suspend_noirq,
 	.resume_noirq = icl_nhi_resume,
 	.runtime_suspend = icl_nhi_suspend,
@@ -458,7 +570,7 @@ static int nhi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (res)
 		return dev_err_probe(dev, res, "cannot enable PCI device, aborting\n");
 
-	nhi_pci = devm_kzalloc(dev, sizeof(*nhi_pci), GFP_KERNEL);
+	nhi_pci = devm_kzalloc_obj(dev, *nhi_pci);
 	if (!nhi_pci)
 		return -ENOMEM;
 
@@ -479,10 +591,18 @@ static int nhi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	return nhi_probe(&nhi_pci->nhi);
 }
 
-static void nhi_pci_remove(struct pci_dev *pdev)
+static void nhi_pci_do_remove(struct pci_dev *pdev, bool reset)
 {
 	struct tb *tb = pci_get_drvdata(pdev);
 	struct tb_nhi *nhi = tb->nhi;
+
+	/*
+	 * On system shutdown/reboot force a host router reset so the
+	 * connection manager asserts DPR on connected Thunderbolt 3 devices
+	 * before the router tree is removed (see tb_stop()).
+	 */
+	if (reset)
+		nhi->host_reset = true;
 
 	pm_runtime_get_sync(&pdev->dev);
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
@@ -491,6 +611,16 @@ static void nhi_pci_remove(struct pci_dev *pdev)
 	tb_domain_remove(tb);
 	wait_for_completion(&nhi->domain_released);
 	nhi_shutdown(nhi);
+}
+
+static void nhi_pci_remove(struct pci_dev *pdev)
+{
+	nhi_pci_do_remove(pdev, false);
+}
+
+static void nhi_pci_shutdown(struct pci_dev *pdev)
+{
+	nhi_pci_do_remove(pdev, true);
 }
 
 static struct pci_device_id nhi_ids[] = {
@@ -593,7 +723,7 @@ static struct pci_driver nhi_driver = {
 	.id_table = nhi_ids,
 	.probe = nhi_pci_probe,
 	.remove = nhi_pci_remove,
-	.shutdown = nhi_pci_remove,
+	.shutdown = nhi_pci_shutdown,
 	.driver.pm = &nhi_pm_ops,
 };
 

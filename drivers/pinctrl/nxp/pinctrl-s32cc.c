@@ -60,6 +60,12 @@ static u32 get_pin_func(u32 pinmux)
 	return pinmux & GENMASK(3, 0);
 }
 
+/*
+ * struct s32_pinctrl_mem_region - memory region for a set of SIUL2 registers
+ * @map: regmap used for this range
+ * @pin_range: the pins controlled by these registers
+ * @name: name of the current range
+ */
 struct s32_pinctrl_mem_region {
 	struct regmap *map;
 	const struct s32_pin_range *pin_range;
@@ -67,7 +73,7 @@ struct s32_pinctrl_mem_region {
 };
 
 /*
- * Holds pin configuration for GPIO's.
+ * struct gpio_pin_config - holds pin configuration for GPIO's
  * @pin_id: Pin ID for this GPIO
  * @config: Pin settings
  * @list: Linked list entry for each gpio pin
@@ -79,20 +85,22 @@ struct gpio_pin_config {
 };
 
 /*
- * Pad config save/restore for power suspend/resume.
+ * struct s32_pinctrl_context - pad config save/restore for suspend/resume
+ * @pads: saved values for the pads
  */
 struct s32_pinctrl_context {
 	unsigned int *pads;
 };
 
 /*
+ * struct s32_pinctrl - private driver data
  * @dev: a pointer back to containing device
  * @pctl: a pointer to the pinctrl device structure
  * @regions: reserved memory regions with start/end pin
  * @info: structure containing information about the pin
- * @gpio_configs: Saved configurations for GPIO pins
- * @gpiop_configs_lock: lock for the `gpio_configs` list
- * @s32_pinctrl_context: Configuration saved over system sleep
+ * @gpio_configs: saved configurations for GPIO pins
+ * @gpio_configs_lock: lock for the `gpio_configs` list
+ * @saved_context: configuration saved over system sleep
  */
 struct s32_pinctrl {
 	struct device *dev;
@@ -123,13 +131,13 @@ s32_get_region(struct pinctrl_dev *pctldev, unsigned int pin)
 	return NULL;
 }
 
-static inline int s32_check_pin(struct pinctrl_dev *pctldev,
-				unsigned int pin)
+static int s32_check_pin(struct pinctrl_dev *pctldev,
+			 unsigned int pin)
 {
 	return s32_get_region(pctldev, pin) ? 0 : -EINVAL;
 }
 
-static inline int s32_regmap_read(struct pinctrl_dev *pctldev,
+static int s32_regmap_read(struct pinctrl_dev *pctldev,
 			   unsigned int pin, unsigned int *val)
 {
 	struct s32_pinctrl_mem_region *region;
@@ -145,7 +153,7 @@ static inline int s32_regmap_read(struct pinctrl_dev *pctldev,
 	return regmap_read(region->map, offset, val);
 }
 
-static inline int s32_regmap_write(struct pinctrl_dev *pctldev,
+static int s32_regmap_write(struct pinctrl_dev *pctldev,
 			    unsigned int pin,
 			    unsigned int val)
 {
@@ -163,7 +171,7 @@ static inline int s32_regmap_write(struct pinctrl_dev *pctldev,
 
 }
 
-static inline int s32_regmap_update(struct pinctrl_dev *pctldev, unsigned int pin,
+static int s32_regmap_update(struct pinctrl_dev *pctldev, unsigned int pin,
 			     unsigned int mask, unsigned int val)
 {
 	struct s32_pinctrl_mem_region *region;
@@ -476,8 +484,8 @@ static int s32_get_slew_regval(int arg)
 	return -EINVAL;
 }
 
-static inline void s32_pin_set_pull(enum pin_config_param param,
-				   unsigned int *mask, unsigned int *config)
+static void s32_pin_set_pull(enum pin_config_param param,
+			     unsigned int *mask, unsigned int *config)
 {
 	switch (param) {
 	case PIN_CONFIG_BIAS_DISABLE:
@@ -775,8 +783,8 @@ static int s32_pinctrl_parse_groups(struct device_node *np,
 
 	grp->data.npins = npins;
 
-	pins = devm_kcalloc(info->dev, npins, sizeof(*pins), GFP_KERNEL);
-	sss = devm_kcalloc(info->dev, npins, sizeof(*sss), GFP_KERNEL);
+	pins = devm_kzalloc_objs(info->dev, *pins, npins);
+	sss = devm_kzalloc_objs(info->dev, *sss, npins);
 	if (!pins || !sss)
 		return -ENOMEM;
 
@@ -816,8 +824,7 @@ static int s32_pinctrl_parse_functions(struct device_node *np,
 		return dev_err_probe(info->dev, -EINVAL,
 				     "No groups defined in %pOF\n", np);
 
-	groups = devm_kcalloc(info->dev, func->ngroups,
-				    sizeof(*func->groups), GFP_KERNEL);
+	groups = devm_kzalloc_objs(info->dev, *groups, func->ngroups);
 	if (!groups)
 		return -ENOMEM;
 
@@ -856,8 +863,8 @@ static int s32_pinctrl_probe_dt(struct platform_device *pdev,
 		return -EINVAL;
 	}
 
-	ipctl->regions = devm_kcalloc(&pdev->dev, mem_regions,
-				      sizeof(*ipctl->regions), GFP_KERNEL);
+	ipctl->regions = devm_kzalloc_objs(&pdev->dev, *ipctl->regions,
+					   mem_regions);
 	if (!ipctl->regions)
 		return -ENOMEM;
 
@@ -890,8 +897,8 @@ static int s32_pinctrl_probe_dt(struct platform_device *pdev,
 				     "No functions defined\n");
 
 	info->nfunctions = nfuncs;
-	info->functions = devm_kcalloc(&pdev->dev, nfuncs,
-				       sizeof(*info->functions), GFP_KERNEL);
+	info->functions = devm_kzalloc_objs(&pdev->dev, *info->functions,
+					    nfuncs);
 	if (!info->functions)
 		return -ENOMEM;
 
@@ -899,8 +906,8 @@ static int s32_pinctrl_probe_dt(struct platform_device *pdev,
 	for_each_child_of_node_scoped(np, child)
 		info->ngroups += of_get_child_count(child);
 
-	info->groups = devm_kcalloc(&pdev->dev, info->ngroups,
-				    sizeof(*info->groups), GFP_KERNEL);
+	info->groups = devm_kzalloc_objs(&pdev->dev, *info->groups,
+					 info->ngroups);
 	if (!info->groups)
 		return -ENOMEM;
 
@@ -929,7 +936,7 @@ int s32_pinctrl_probe(struct platform_device *pdev,
 		return dev_err_probe(&pdev->dev, -EINVAL,
 				     "Wrong pinctrl info\n");
 
-	info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc_obj(&pdev->dev, *info);
 	if (!info)
 		return -ENOMEM;
 
@@ -937,7 +944,7 @@ int s32_pinctrl_probe(struct platform_device *pdev,
 	info->dev = &pdev->dev;
 
 	/* Create state holders etc for this driver */
-	ipctl = devm_kzalloc(&pdev->dev, sizeof(*ipctl), GFP_KERNEL);
+	ipctl = devm_kzalloc_obj(&pdev->dev, *ipctl);
 	if (!ipctl)
 		return -ENOMEM;
 
@@ -948,8 +955,7 @@ int s32_pinctrl_probe(struct platform_device *pdev,
 	INIT_LIST_HEAD(&ipctl->gpio_configs);
 	spin_lock_init(&ipctl->gpio_configs_lock);
 
-	s32_pinctrl_desc =
-		devm_kzalloc(&pdev->dev, sizeof(*s32_pinctrl_desc), GFP_KERNEL);
+	s32_pinctrl_desc = devm_kzalloc_obj(&pdev->dev, *s32_pinctrl_desc);
 	if (!s32_pinctrl_desc)
 		return -ENOMEM;
 
@@ -966,23 +972,27 @@ int s32_pinctrl_probe(struct platform_device *pdev,
 		return dev_err_probe(&pdev->dev, ret,
 				     "Fail to probe dt properties\n");
 
-	ipctl->pctl = devm_pinctrl_register(&pdev->dev, s32_pinctrl_desc,
-					    ipctl);
-	if (IS_ERR(ipctl->pctl))
-		return dev_err_probe(&pdev->dev, PTR_ERR(ipctl->pctl),
-				     "could not register s32 pinctrl driver\n");
+	ret = devm_pinctrl_register_and_init(&pdev->dev, s32_pinctrl_desc,
+					     ipctl, &ipctl->pctl);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Could not register s32 pinctrl driver\n");
 
 #ifdef CONFIG_PM_SLEEP
 	saved_context = &ipctl->saved_context;
 	saved_context->pads =
-		devm_kcalloc(&pdev->dev, info->soc_data->npins,
-			     sizeof(*saved_context->pads),
-			     GFP_KERNEL);
+		devm_kzalloc_objs(&pdev->dev, *saved_context->pads,
+				  info->soc_data->npins);
 	if (!saved_context->pads)
 		return -ENOMEM;
 #endif
 
-	dev_info(&pdev->dev, "initialized s32 pinctrl driver\n");
+	ret = pinctrl_enable(ipctl->pctl);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Failed to enable pinctrl\n");
+
+	dev_info(&pdev->dev, "Initialized S32 pinctrl driver\n");
 
 	return 0;
 }

@@ -812,9 +812,6 @@ bool pciehp_is_native(struct pci_dev *bridge)
 	if (!IS_ENABLED(CONFIG_HOTPLUG_PCI_PCIE))
 		return false;
 
-	if (pcie_ports_native)
-		return true;
-
 	host = pci_find_host_bridge(bridge->bus);
 	return host->native_pcie_hotplug;
 }
@@ -1636,8 +1633,8 @@ pci_acpi_setup_ecam_mapping(struct acpi_pci_root *root)
 
 	cfg = pci_ecam_create(dev, &cfgres, bus_res, ecam_ops);
 	if (IS_ERR(cfg)) {
-		dev_err(dev, "%04x:%pR error %ld mapping ECAM\n", seg, bus_res,
-			PTR_ERR(cfg));
+		dev_err(dev, "%04x:%pR error %pe mapping ECAM\n", seg, bus_res,
+			cfg);
 		return NULL;
 	}
 

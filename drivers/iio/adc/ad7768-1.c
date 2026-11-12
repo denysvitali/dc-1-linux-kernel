@@ -1829,6 +1829,9 @@ static int ad7768_probe(struct spi_device *spi)
 	}
 
 	st->chip = spi_get_device_match_data(spi);
+	if (!st->chip)
+		return -ENODATA;
+
 	st->spi = spi;
 
 	st->regmap = devm_regmap_init_spi(spi, &ad7768_regmap_config);
@@ -1918,10 +1921,10 @@ static int ad7768_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ad7768_id_table[] = {
-	{ "ad7768-1", (kernel_ulong_t)&ad7768_chip_info },
-	{ "adaq7767-1", (kernel_ulong_t)&adaq7767_chip_info },
-	{ "adaq7768-1", (kernel_ulong_t)&adaq7768_chip_info },
-	{ "adaq7769-1", (kernel_ulong_t)&adaq7769_chip_info },
+	{ .name = "ad7768-1", .driver_data = (kernel_ulong_t)&ad7768_chip_info },
+	{ .name = "adaq7767-1", .driver_data = (kernel_ulong_t)&adaq7767_chip_info },
+	{ .name = "adaq7768-1", .driver_data = (kernel_ulong_t)&adaq7768_chip_info },
+	{ .name = "adaq7769-1", .driver_data = (kernel_ulong_t)&adaq7769_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad7768_id_table);

@@ -535,10 +535,13 @@ static int wilc_wfi_cfg_copy_wpa_info(struct wilc_wfi_key *key_info,
 }
 
 static int add_key(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id,
-		   u8 key_index, bool pairwise, const u8 *mac_addr,
+		   u8 key_index,
+		   enum nl80211_key_type type,
+		   const u8 *mac_addr,
 		   struct key_params *params)
 
 {
+	bool pairwise = type == NL80211_KEYTYPE_PAIRWISE;
 	int ret = 0, keylen = params->key_len;
 	const u8 *rx_mic = NULL;
 	const u8 *tx_mic = NULL;
@@ -641,9 +644,10 @@ static int add_key(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id,
 
 static int del_key(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id,
 		   u8 key_index,
-		   bool pairwise,
+		   enum nl80211_key_type type,
 		   const u8 *mac_addr)
 {
+	bool pairwise = type == NL80211_KEYTYPE_PAIRWISE;
 	struct wilc_vif *vif = netdev_priv(wdev->netdev);
 	struct wilc_priv *priv = &vif->priv;
 
@@ -681,10 +685,11 @@ static int del_key(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id,
 }
 
 static int get_key(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id,
-		   u8 key_index, bool pairwise, const u8 *mac_addr,
-		   void *cookie,
+		   u8 key_index, enum nl80211_key_type type,
+		   const u8 *mac_addr, void *cookie,
 		   void (*callback)(void *cookie, struct key_params *))
 {
+	bool pairwise = type == NL80211_KEYTYPE_PAIRWISE;
 	struct wilc_vif *vif = netdev_priv(wdev->netdev);
 	struct wilc_priv *priv = &vif->priv;
 	struct  key_params key_params;
@@ -1058,6 +1063,13 @@ void wilc_wfi_p2p_rx(struct wilc_vif *vif, u8 *buff, u32 size)
 	if (!ieee80211_is_public_action((struct ieee80211_hdr *)buff, size))
 		goto out_rx_mgmt;
 
+	/* ieee80211_is_public_action() only validates up to the category
+	 * byte, so reject frames too short for the P2P public action header
+	 * before dereferencing it or computing size - ie_offset.
+	 */
+	if (size < ie_offset)
+		goto out_rx_mgmt;
+
 	d = (struct wilc_p2p_pub_act_frame *)(&mgmt->u.action);
 	if (d->oui_subtype != GO_NEG_REQ && d->oui_subtype != GO_NEG_RSP &&
 	    d->oui_subtype != P2P_INV_REQ && d->oui_subtype != P2P_INV_RSP)
@@ -1100,24 +1112,19 @@ static void wilc_wfi_remain_on_channel_expired(struct wilc_vif *vif, u64 cookie)
 static int remain_on_channel(struct wiphy *wiphy,
 			     struct wireless_dev *wdev,
 			     struct ieee80211_channel *chan,
-			     unsigned int duration, u64 *cookie,
+			     unsigned int duration, u64 cookie,
 			     const u8 *rx_addr)
 {
 	int ret = 0;
 	struct wilc_vif *vif = netdev_priv(wdev->netdev);
 	struct wilc_priv *priv = &vif->priv;
-	u64 id;
 
 	if (wdev->iftype == NL80211_IFTYPE_AP) {
 		netdev_dbg(vif->ndev, "Required while in AP mode\n");
 		return ret;
 	}
 
-	id = ++priv->inc_roc_cookie;
-	if (id == 0)
-		id = ++priv->inc_roc_cookie;
-
-	ret = wilc_remain_on_channel(vif, id, chan->hw_value,
+	ret = wilc_remain_on_channel(vif, cookie, chan->hw_value,
 				     wilc_wfi_remain_on_channel_expired);
 	if (ret)
 		return ret;
@@ -1125,12 +1132,11 @@ static int remain_on_channel(struct wiphy *wiphy,
 	vif->wilc->op_ch = chan->hw_value;
 
 	priv->remain_on_ch_params.listen_ch = chan;
-	priv->remain_on_ch_params.listen_cookie = id;
-	*cookie = id;
+	priv->remain_on_ch_params.listen_cookie = cookie;
 	priv->p2p_listen_state = true;
 	priv->remain_on_ch_params.listen_duration = duration;
 
-	cfg80211_ready_on_channel(wdev, *cookie, chan, duration, GFP_KERNEL);
+	cfg80211_ready_on_channel(wdev, cookie, chan, duration, GFP_KERNEL);
 	mod_timer(&vif->hif_drv->remain_on_ch_timer,
 		  jiffies + msecs_to_jiffies(duration + 1000));
 
@@ -1153,7 +1159,7 @@ static int cancel_remain_on_channel(struct wiphy *wiphy,
 static int mgmt_tx(struct wiphy *wiphy,
 		   struct wireless_dev *wdev,
 		   struct cfg80211_mgmt_tx_params *params,
-		   u64 *cookie)
+		   u64 cookie)
 {
 	struct ieee80211_channel *chan = params->chan;
 	unsigned int wait = params->wait;
@@ -1170,8 +1176,7 @@ static int mgmt_tx(struct wiphy *wiphy,
 	const u8 *vendor_ie;
 	int ret = 0;
 
-	*cookie = get_random_u32();
-	priv->tx_cookie = *cookie;
+	priv->tx_cookie = cookie;
 	mgmt = (const struct ieee80211_mgmt *)buf;
 
 	if (!ieee80211_is_mgmt(mgmt->frame_control))
@@ -1206,6 +1211,13 @@ static int mgmt_tx(struct wiphy *wiphy,
 
 		goto out_set_timeout;
 	}
+
+	/* ieee80211_is_public_action() only validates up to the category
+	 * byte, so reject frames too short for the P2P public action header
+	 * before dereferencing it or computing len - ie_offset.
+	 */
+	if (len < ie_offset)
+		goto out_set_timeout;
 
 	d = (struct wilc_p2p_pub_act_frame *)(&mgmt->u.action);
 	if (d->oui_type != WLAN_OUI_TYPE_WFA_P2P ||

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <errno.h>
 #include <linux/hw_breakpoint.h>
 #include <linux/err.h>
 #include <linux/list_sort.h>
 #include <linux/zalloc.h>
 #include <dirent.h>
-#include <errno.h>
 #include <sys/ioctl.h>
 #include <sys/param.h>
 #include "cpumap.h"
@@ -269,6 +269,7 @@ __add_event(struct list_head *list, int *idx,
 	evsel->core.pmu_cpus = pmu_cpus;
 	evsel->core.requires_cpu = pmu ? pmu->is_uncore : false;
 	evsel->core.is_pmu_core = is_pmu_core;
+	evsel->core.is_pmu_uncore = pmu ? pmu->is_uncore : false;
 	evsel->core.reads_only_on_cpu_idx0 = perf_pmu__reads_only_on_cpu_idx0(attr);
 	evsel->pmu = pmu;
 	evsel->alternate_hw_config = alternate_hw_config;
@@ -427,6 +428,9 @@ bool parse_events__filter_pmu(const struct parse_events_state *parse_state,
 			      const struct perf_pmu *pmu)
 {
 	if (parse_state->pmu_filter == NULL)
+		return false;
+
+	if (parse_state->cputype_filter && !pmu->is_core)
 		return false;
 
 	return perf_pmu__wildcard_match(pmu, parse_state->pmu_filter) == 0;
@@ -1680,7 +1684,7 @@ int parse_events_multi_pmu_add(struct parse_events_state *parse_state,
 			strbuf_release(&sb);
 			ok++;
 		}
-		if (first_wildcard_match == NULL)
+		if (first_wildcard_match == NULL && !list_empty(list))
 			first_wildcard_match = container_of(list->prev, struct evsel, core.node);
 	}
 
@@ -1751,7 +1755,7 @@ int parse_events_multi_pmu_add_or_add_pmu(struct parse_events_state *parse_state
 			ok++;
 			parse_state->wild_card_pmus = true;
 		}
-		if (first_wildcard_match == NULL) {
+		if (first_wildcard_match == NULL && !list_empty(*listp)) {
 			first_wildcard_match =
 				container_of((*listp)->prev, struct evsel, core.node);
 		}
@@ -2288,18 +2292,20 @@ static int parse_events__sort_events_and_fix_groups(struct list_head *list)
 	return (idx_changed || num_leaders != orig_num_leaders) ? 1 : 0;
 }
 
-int __parse_events(struct evlist *evlist, const char *str, const char *pmu_filter,
+int __parse_events(struct evlist *evlist, const char *str,
+		   const char *pmu_filter, bool cputype_filter,
 		   struct parse_events_error *err, bool fake_pmu,
 		   bool warn_if_reordered, bool fake_tp)
 {
 	struct parse_events_state parse_state = {
-		.list	  = LIST_HEAD_INIT(parse_state.list),
-		.idx	  = evlist->core.nr_entries,
-		.error	  = err,
-		.stoken	  = PE_START_EVENTS,
-		.fake_pmu = fake_pmu,
-		.fake_tp  = fake_tp,
-		.pmu_filter = pmu_filter,
+		.list			= LIST_HEAD_INIT(parse_state.list),
+		.idx			= evlist__nr_entries(evlist),
+		.error			= err,
+		.stoken			= PE_START_EVENTS,
+		.fake_pmu		= fake_pmu,
+		.fake_tp		= fake_tp,
+		.pmu_filter		= pmu_filter,
+		.cputype_filter		= cputype_filter,
 		.match_legacy_cache_terms = true,
 	};
 	int ret, ret2;
@@ -2312,15 +2318,15 @@ int __parse_events(struct evlist *evlist, const char *str, const char *pmu_filte
 	}
 
 	ret2 = parse_events__sort_events_and_fix_groups(&parse_state.list);
-	if (ret2 < 0)
-		return ret;
+	if (ret2 < 0 && !ret)
+		ret = ret2;
 
 	/*
 	 * Add list to the evlist even with errors to allow callers to clean up.
 	 */
 	evlist__splice_list_tail(evlist, &parse_state.list);
 
-	if (ret2 && warn_if_reordered && !parse_state.wild_card_pmus) {
+	if (ret2 > 0 && warn_if_reordered && !parse_state.wild_card_pmus) {
 		evlist__uniquify_evsel_names(evlist, &stat_config);
 		pr_warning("WARNING: events were regrouped to match PMUs\n");
 
@@ -2343,7 +2349,7 @@ int __parse_events(struct evlist *evlist, const char *str, const char *pmu_filte
 
 	/*
 	 * There are 2 users - builtin-record and builtin-test objects.
-	 * Both call evlist__delete in case of error, so we dont
+	 * Both call evlist__put in case of error, so we dont
 	 * need to bother.
 	 */
 	return ret;
@@ -2518,8 +2524,9 @@ int parse_events_option(const struct option *opt, const char *str,
 	int ret;
 
 	parse_events_error__init(&err);
-	ret = __parse_events(*args->evlistp, str, args->pmu_filter, &err,
-			     /*fake_pmu=*/false, /*warn_if_reordered=*/true,
+	ret = __parse_events(*args->evlistp, str, args->pmu_filter,
+			     args->cputype_filter, &err, /*fake_pmu=*/false,
+			     /*warn_if_reordered=*/true,
 			     /*fake_tp=*/false);
 
 	if (ret) {
@@ -2546,7 +2553,7 @@ int parse_events_option_new_evlist(const struct option *opt, const char *str, in
 	}
 	ret = parse_events_option(opt, str, unset);
 	if (ret) {
-		evlist__delete(*args->evlistp);
+		evlist__put(*args->evlistp);
 		*args->evlistp = NULL;
 	}
 
@@ -2568,7 +2575,7 @@ foreach_evsel_in_last_glob(struct evlist *evlist,
 	 *
 	 * So no need to WARN here, let *func do this.
 	 */
-	if (evlist->core.nr_entries > 0)
+	if (evlist__nr_entries(evlist) > 0)
 		last = evlist__last(evlist);
 
 	do {
@@ -2578,7 +2585,7 @@ foreach_evsel_in_last_glob(struct evlist *evlist,
 		if (!last)
 			return 0;
 
-		if (last->core.node.prev == &evlist->core.entries)
+		if (last->core.node.prev == &evlist__core(evlist)->entries)
 			return 0;
 		last = list_entry(last->core.node.prev, struct evsel, core.node);
 	} while (!last->cmdline_group_boundary);

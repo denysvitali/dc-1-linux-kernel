@@ -9,14 +9,15 @@
 #include <linux/component.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
+#include <linux/string.h>
 #include <linux/timer.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
-#include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_vblank.h>
 #include <drm/exynos_drm.h>
 
@@ -273,14 +274,9 @@ int vidi_connection_ioctl(struct drm_device *drm_dev, void *data,
 
 		size = (hdr.extensions + 1) * EDID_LENGTH;
 
-		edid_buf = kmalloc(size, GFP_KERNEL);
-		if (!edid_buf)
-			return -ENOMEM;
-
-		if (copy_from_user(edid_buf, edid_userptr, size)) {
-			kfree(edid_buf);
-			return -EFAULT;
-		}
+		edid_buf = memdup_user(edid_userptr, size);
+		if (IS_ERR(edid_buf))
+			return PTR_ERR(edid_buf);
 
 		drm_edid = drm_edid_alloc(edid_buf, size);
 		kfree(edid_buf);
@@ -403,6 +399,10 @@ static void exynos_vidi_disable(struct drm_encoder *encoder)
 {
 }
 
+static const struct drm_encoder_funcs exynos_vidi_encoder_funcs = {
+	.destroy = drm_encoder_cleanup,
+};
+
 static const struct drm_encoder_helper_funcs exynos_vidi_encoder_helper_funcs = {
 	.mode_set = exynos_vidi_mode_set,
 	.enable = exynos_vidi_enable,
@@ -445,7 +445,12 @@ static int vidi_bind(struct device *dev, struct device *master, void *data)
 		return PTR_ERR(ctx->crtc);
 	}
 
-	drm_simple_encoder_init(drm_dev, encoder, DRM_MODE_ENCODER_TMDS);
+	ret = drm_encoder_init(drm_dev, encoder, &exynos_vidi_encoder_funcs,
+			       DRM_MODE_ENCODER_TMDS, NULL);
+	if (ret) {
+		drm_err(drm_dev, "failed to initialize encoder ret = %d\n", ret);
+		return ret;
+	}
 
 	drm_encoder_helper_add(encoder, &exynos_vidi_encoder_helper_funcs);
 
@@ -486,7 +491,7 @@ static int vidi_probe(struct platform_device *pdev)
 	struct vidi_context *ctx;
 	struct device *dev = &pdev->dev;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(dev, *ctx);
 	if (!ctx)
 		return -ENOMEM;
 

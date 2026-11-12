@@ -383,6 +383,7 @@ static const struct devlink_ops mlx5_devlink_ops = {
 	.rate_node_del = mlx5_esw_devlink_rate_node_del,
 	.rate_leaf_parent_set = mlx5_esw_devlink_rate_leaf_parent_set,
 	.rate_node_parent_set = mlx5_esw_devlink_rate_node_parent_set,
+	.supported_cross_device_rate_nodes = true,
 #endif
 #ifdef CONFIG_MLX5_SF_MANAGER
 	.port_new = mlx5_devlink_sf_port_new,
@@ -540,6 +541,12 @@ static int mlx5_devlink_num_doorbells_validate(struct devlink *devlink, u32 id,
 	struct mlx5_core_dev *mdev = devlink_priv(devlink);
 	u32 val32 = val->vu32;
 	u32 max_num_channels;
+
+	if (mlx5_dev_is_lightweight(mdev)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Setting num_doorbells requires full device initialization; reload the device first");
+		return -EOPNOTSUPP;
+	}
 
 	max_num_channels = mlx5e_get_max_num_channels(mdev);
 	if (val32 > max_num_channels) {

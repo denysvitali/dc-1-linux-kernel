@@ -1468,7 +1468,7 @@ static int anx7411_i2c_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_I2C_BLOCK))
 		return -ENODEV;
 
-	plat = devm_kzalloc(dev, sizeof(*plat), GFP_KERNEL);
+	plat = devm_kzalloc_obj(dev, *plat);
 	if (!plat)
 		return -ENOMEM;
 
@@ -1529,10 +1529,8 @@ static int anx7411_i2c_probe(struct i2c_client *client)
 					IRQF_TRIGGER_FALLING |
 					IRQF_ONESHOT,
 					"anx7411-intp", plat);
-	if (ret) {
-		dev_err(dev, "fail to request irq\n");
+	if (ret)
 		goto free_wq;
-	}
 
 	if (anx7411_typec_check_connection(plat))
 		dev_err(dev, "check status\n");
@@ -1566,8 +1564,11 @@ static void anx7411_i2c_remove(struct i2c_client *client)
 	anx7411_partner_unregister_altmode(plat);
 	anx7411_unregister_partner(plat);
 
-	if (plat->workqueue)
+	if (plat->workqueue) {
+		disable_irq(plat->intp_irq);
+		cancel_work_sync(&plat->work);
 		destroy_workqueue(plat->workqueue);
+	}
 
 	i2c_unregister_device(plat->spi_client);
 

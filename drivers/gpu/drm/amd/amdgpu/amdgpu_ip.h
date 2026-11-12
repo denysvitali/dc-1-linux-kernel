@@ -68,6 +68,7 @@ enum amd_hw_ip_block_type {
 	ISP_HWIP,
 	ATU_HWIP,
 	AIGC_HWIP,
+	UMSCH_HWIP,
 	MAX_HWIP
 };
 
@@ -84,15 +85,12 @@ enum amd_hw_ip_block_type {
 #define IP_VERSION_SUBREV(ver) ((ver) & 0xF)
 #define IP_VERSION_MAJ_MIN_REV(ver) ((ver) >> 8)
 
+struct amdgpu_ring;
+struct amdgpu_fence;
+
 struct amdgpu_ip_map_info {
 	/* Map of logical to actual dev instances/mask */
-	uint32_t dev_inst[MAX_HWIP][HWIP_MAX_INSTANCE];
-	int8_t (*logical_to_dev_inst)(struct amdgpu_device *adev,
-				      enum amd_hw_ip_block_type block,
-				      int8_t inst);
-	uint32_t (*logical_to_dev_mask)(struct amdgpu_device *adev,
-					enum amd_hw_ip_block_type block,
-					uint32_t mask);
+	unsigned int dev_inst[MAX_HWIP][HWIP_MAX_INSTANCE];
 };
 
 #define AMDGPU_MAX_IP_NUM AMD_IP_BLOCK_TYPE_NUM
@@ -121,6 +119,18 @@ struct amdgpu_ip_block {
 
 void amdgpu_ip_map_init(struct amdgpu_device *adev);
 
+u32 amdgpu_ip_map_logical_to_dev_mask(struct amdgpu_ip_map_info *ip_map,
+				      enum amd_hw_ip_block_type block,
+				      u32 mask);
+
+static inline unsigned int
+amdgpu_ip_map_logical_to_dev_inst(struct amdgpu_ip_map_info *ip_map,
+				  enum amd_hw_ip_block_type block,
+				  unsigned int inst)
+{
+	return ip_map->dev_inst[block][inst];
+}
+
 int amdgpu_ip_block_suspend(struct amdgpu_ip_block *ip_block);
 int amdgpu_ip_block_resume(struct amdgpu_ip_block *ip_block);
 
@@ -146,9 +156,9 @@ void amdgpu_device_ip_get_clockgating_state(struct amdgpu_device *adev,
 					    u64 *flags);
 int amdgpu_device_ip_wait_for_idle(struct amdgpu_device *adev,
 				   enum amd_ip_block_type block_type);
-bool amdgpu_device_ip_is_hw(struct amdgpu_device *adev,
-			    enum amd_ip_block_type block_type);
 bool amdgpu_device_ip_is_valid(struct amdgpu_device *adev,
 			       enum amd_ip_block_type block_type);
+int amdgpu_device_ip_soft_reset(struct amdgpu_ring *guilty_ring,
+				struct amdgpu_fence *guilty_fence);
 
 #endif /* __AMDGPU_IP_H__ */

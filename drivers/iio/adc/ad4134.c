@@ -472,7 +472,7 @@ static int ad4134_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ad4134_id[] = {
-	{ "ad4134" },
+	{ .name = "ad4134" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad4134_id);
@@ -496,4 +496,3 @@ module_spi_driver(ad4134_driver);
 MODULE_AUTHOR("Marcelo Schmitt <marcelo.schmitt@analog.com>");
 MODULE_DESCRIPTION("Analog Devices AD4134 SPI driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS("IIO_AD4134");

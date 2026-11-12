@@ -71,7 +71,6 @@ int get_proc_locked_vm_size(void)
 
 	fclose(f);
 	ksft_exit_fail_msg("cannot parse VmLck in /proc/self/status: %s\n", strerror(errno));
-	return -1;
 }
 
 /*
@@ -84,7 +83,7 @@ int get_proc_locked_vm_size(void)
 int get_proc_page_size(unsigned long addr)
 {
 	FILE *smaps;
-	char *line;
+	char *line = NULL;
 	unsigned long mmupage_size = 0;
 	size_t size;
 

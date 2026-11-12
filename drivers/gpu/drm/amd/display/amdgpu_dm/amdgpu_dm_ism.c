@@ -32,7 +32,7 @@
 #include "amdgpu_dm_ism.h"
 #include "amdgpu_dm_crtc.h"
 #include "amdgpu_dm_trace.h"
-#include "amdgpu_dm_kunit_helpers.h"
+#include "dm_helpers.h"
 
 
 /**
@@ -502,6 +502,7 @@ void amdgpu_dm_ism_commit_event(struct amdgpu_dm_ism *ism,
 
 	} while (next_event < DM_ISM_NUM_EVENTS);
 }
+EXPORT_IF_KUNIT(amdgpu_dm_ism_commit_event);
 
 
 static void dm_ism_delayed_work_func(struct work_struct *work)
@@ -568,6 +569,7 @@ void amdgpu_dm_ism_disable(struct amdgpu_display_manager *dm)
 		disable_delayed_work_sync(&ism->sso_delayed_work);
 	}
 }
+EXPORT_IF_KUNIT(amdgpu_dm_ism_disable);
 
 /**
  * amdgpu_dm_ism_force_full_power - Force every CRTC's ISM FSM to FULL_POWER
@@ -603,6 +605,7 @@ void amdgpu_dm_ism_force_full_power(struct amdgpu_display_manager *dm)
 					   DM_ISM_EVENT_EXIT_IDLE_REQUESTED);
 	}
 }
+EXPORT_IF_KUNIT(amdgpu_dm_ism_force_full_power);
 
 /**
  * amdgpu_dm_ism_enable - enable the ISM
@@ -626,6 +629,7 @@ void amdgpu_dm_ism_enable(struct amdgpu_display_manager *dm)
 		enable_delayed_work(&ism->sso_delayed_work);
 	}
 }
+EXPORT_IF_KUNIT(amdgpu_dm_ism_enable);
 
 void amdgpu_dm_ism_init(struct amdgpu_dm_ism *ism,
 			struct amdgpu_dm_ism_config *config)
@@ -643,9 +647,26 @@ void amdgpu_dm_ism_init(struct amdgpu_dm_ism *ism,
 EXPORT_IF_KUNIT(amdgpu_dm_ism_init);
 
 
-void amdgpu_dm_ism_fini(struct amdgpu_dm_ism *ism)
+/**
+ * amdgpu_dm_ism_flush - Cancel any pending, or wait out in-flight ISM work
+ *
+ * @ism: The CRTC's idle state manager
+ *
+ * Cancels the hysteresis and SSO timers and waits for a running worker to
+ * finish. Callers that are about to drop the CRTC's stream use this so that a
+ * timer armed while the stream was still around cannot allow idle afterwards.
+ *
+ * Must not be called with dc_lock held: the workers take dc_lock themselves,
+ * so waiting for them under it would deadlock.
+ */
+void amdgpu_dm_ism_flush(struct amdgpu_dm_ism *ism)
 {
+	struct amdgpu_crtc *acrtc = ism_to_amdgpu_crtc(ism);
+	struct amdgpu_device *adev = drm_to_adev(acrtc->base.dev);
+
+	lockdep_assert_not_held(&adev->dm.dc_lock);
+
 	cancel_delayed_work_sync(&ism->sso_delayed_work);
 	cancel_delayed_work_sync(&ism->delayed_work);
 }
-EXPORT_IF_KUNIT(amdgpu_dm_ism_fini);
+EXPORT_IF_KUNIT(amdgpu_dm_ism_flush);

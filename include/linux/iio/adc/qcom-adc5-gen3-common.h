@@ -137,7 +137,7 @@ struct adc5_sdam_data {
  */
 struct adc5_device_data {
 	struct regmap *regmap;
-	struct adc5_sdam_data *base;
+	struct adc5_sdam_data *base __counted_by_ptr(num_sdams);
 	int num_sdams;
 };
 
@@ -205,7 +205,5 @@ int adc5_gen3_get_scaled_reading(struct device *dev,
 int adc5_gen3_therm_code_to_temp(struct device *dev,
 				 struct adc5_channel_common_prop *common_props,
 				 u16 code, int *val);
-void adc5_gen3_register_tm_event_notifier(struct device *dev,
-					  void (*handler)(struct auxiliary_device *));
 
 #endif /* QCOM_ADC5_GEN3_COMMON_H */

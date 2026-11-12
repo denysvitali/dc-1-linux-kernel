@@ -12,6 +12,7 @@
 enum hyp_enter_exit_reason {
 	HYP_REASON_SMC,
 	HYP_REASON_HVC,
+	HYP_REASON_SYS,
 	HYP_REASON_PSCI,
 	HYP_REASON_HOST_ABORT,
 	HYP_REASON_GUEST_EXIT,
@@ -56,5 +57,19 @@ HYP_EVENT(selftest,
 		__entry->id = id;
 	),
 	RE_PRINTK("id=%llu", __entry->id)
+);
+
+/*
+ * trace_hyp_printk() has too many specificities to be declared with HYP_EVENT().
+ * However, we can use a REMOTE_EVENT macro to automatically do the declaration
+ * for the kernel side.
+ */
+REMOTE_EVENT_CUSTOM_PRINTK(hyp_printk,
+	0, /* id will be overwritten during hyp event init */
+	RE_STRUCT(
+		re_field(u16, fmt_id)
+		re_field(u64, args[])
+	),
+	__hyp_trace_printk(evt, seq)
 );
 #endif

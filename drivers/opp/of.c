@@ -599,7 +599,7 @@ static u32 *_parse_named_prop(struct dev_pm_opp *opp, struct device *dev,
 		return ERR_PTR(-EINVAL);
 	}
 
-	out = kmalloc_array(count, sizeof(*out), GFP_KERNEL);
+	out = kmalloc_objs(*out, count);
 	if (!out)
 		return ERR_PTR(-EINVAL);
 
@@ -737,7 +737,7 @@ static int _read_rate(struct dev_pm_opp *new_opp, struct opp_table *opp_table,
 		return -EINVAL;
 	}
 
-	rates = kmalloc_array(count, sizeof(*rates), GFP_KERNEL);
+	rates = kmalloc_objs(*rates, count);
 	if (!rates)
 		return -ENOMEM;
 
@@ -782,7 +782,7 @@ static int _read_bw(struct dev_pm_opp *new_opp, struct opp_table *opp_table,
 		return -EINVAL;
 	}
 
-	bw = kmalloc_array(count, sizeof(*bw), GFP_KERNEL);
+	bw = kmalloc_objs(*bw, count);
 	if (!bw)
 		return -ENOMEM;
 
@@ -1039,7 +1039,7 @@ static int _of_add_opp_table_v1(struct device *dev, struct opp_table *opp_table)
 
 	val = prop->value;
 	while (nr) {
-		unsigned long freq = be32_to_cpup(val++) * 1000;
+		unsigned long freq = (unsigned long)be32_to_cpup(val++) * 1000;
 		unsigned long volt = be32_to_cpup(val++);
 		struct dev_pm_opp_data data = {
 			.freq = freq,
@@ -1345,8 +1345,8 @@ int of_get_required_opp_performance_state(struct device_node *np, int index)
 		_find_table_of_opp_np(required_np);
 
 	if (IS_ERR(opp_table)) {
-		pr_err("%s: Failed to find required OPP table %pOF: %ld\n",
-		       __func__, np, PTR_ERR(opp_table));
+		pr_err("%s: Failed to find required OPP table %pOF: %pe\n",
+		       __func__, np, opp_table);
 		return PTR_ERR(opp_table);
 	}
 
@@ -1409,7 +1409,7 @@ bool dev_pm_opp_of_has_required_opp(struct device *dev)
  * dev_pm_opp_get_of_node() - Gets the DT node corresponding to an opp
  * @opp:	opp for which DT node has to be returned for
  *
- * Return: DT node corresponding to the opp, else 0 on success.
+ * Return: DT node corresponding to the opp, else NULL.
  *
  * The caller needs to put the node with of_node_put() after using it.
  */

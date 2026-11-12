@@ -390,11 +390,8 @@ static int stm_register_irq(struct stm_thermal_sensor *sensor)
 					stm_thermal_irq_handler,
 					IRQF_ONESHOT,
 					dev->driver->name, sensor);
-	if (ret) {
-		dev_err(dev, "%s: Failed to register IRQ %d\n", __func__,
-			sensor->irq);
+	if (ret)
 		return ret;
-	}
 
 	dev_dbg(dev, "%s: thermal IRQ registered", __func__);
 
@@ -492,7 +489,7 @@ static int stm_thermal_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	sensor = devm_kzalloc(&pdev->dev, sizeof(*sensor), GFP_KERNEL);
+	sensor = devm_kzalloc_obj(&pdev->dev, *sensor);
 	if (!sensor)
 		return -ENOMEM;
 

@@ -13,15 +13,17 @@ description: |
   PCIe host controller found in Renesas RZ/G3S and similar SoCs complies
   with PCIe Base Specification 4.0 and supports different link speeds
   depending on the SoC variant:
-    - Gen2 (5 GT/s): RZ/G3S
-    - Gen3 (8 GT/s): RZ/G3E, RZ/V2N
+    - Gen2 (5 GT/s): RZ/G3{L,S}
+    - Gen3 (8 GT/s): RZ/G3E, RZ/V2H(P), RZ/V2N
 
 properties:
   compatible:
     oneOf:
       - enum:
           - renesas,r9a08g045-pcie # RZ/G3S
+          - renesas,r9a08g046-pcie # RZ/G3L
           - renesas,r9a09g047-pcie # RZ/G3E
+          - renesas,r9a09g057-pcie # RZ/V2H(P)
       - items:
           - const: renesas,r9a09g056-pcie # RZ/V2N
           - const: renesas,r9a09g047-pcie
@@ -86,14 +88,18 @@ properties:
   interrupt-controller: true
 
   clocks:
+    minItems: 2
     items:
       - description: System clock
       - description: PM control clock or clock for L1 substate handling
+      - description: PM control clock
 
   clock-names:
+    minItems: 2
     items:
       - const: aclk
       - enum: [pm, pmu]
+      - const: pmu
 
   resets:
     minItems: 1
@@ -139,7 +145,13 @@ properties:
       - clkl1pm clock request state
       - power off information in L2 state
       - errors (fatal, non-fatal, correctable)
-    $ref: /schemas/types.yaml#/definitions/phandle
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    items:
+      - items:
+          - description: Phandle to system controller
+          - description: PCIe controller index
+            enum: [0, 1]
+        minItems: 1
 
 patternProperties:
   "^pcie@0,[0-0]$":
@@ -208,6 +220,8 @@ allOf:
           maxItems: 16
         interrupt-names:
           maxItems: 16
+        clocks:
+          maxItems: 2
         clock-names:
           items:
             - const: aclk
@@ -220,13 +234,39 @@ allOf:
       properties:
         compatible:
           contains:
-            const: renesas,r9a09g047-pcie
+            const: renesas,r9a08g046-pcie
+    then:
+      properties:
+        interrupts:
+          maxItems: 16
+        interrupt-names:
+          maxItems: 16
+        clocks:
+          minItems: 3
+        clock-names:
+          items:
+            - const: aclk
+            - const: pm
+            - const: pmu
+        resets:
+          maxItems: 1
+        reset-names:
+          maxItems: 1
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - renesas,r9a09g047-pcie
+              - renesas,r9a09g057-pcie
     then:
       properties:
         interrupts:
           minItems: 23
         interrupt-names:
           minItems: 23
+        clocks:
+          maxItems: 2
         clock-names:
           items:
             - const: aclk
@@ -235,6 +275,25 @@ allOf:
           maxItems: 1
         reset-names:
           maxItems: 1
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: renesas,r9a09g057-pcie
+    then:
+      properties:
+        num-lanes:
+          enum: [2, 4]
+        renesas,sysc:
+          items:
+            - minItems: 2
+      required:
+        - num-lanes
+    else:
+      properties:
+        renesas,sysc:
+          items:
+            - maxItems: 1
 
 unevaluatedProperties: false
 

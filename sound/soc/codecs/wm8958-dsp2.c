@@ -7,6 +7,7 @@
  * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
  */
 
+#include <linux/cleanup.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -864,9 +865,8 @@ static void wm8958_enh_eq_loaded(const struct firmware *fw, void *context)
 	struct wm8994_priv *wm8994 = snd_soc_component_get_drvdata(component);
 
 	if (fw && (wm8958_dsp2_fw(component, "ENH_EQ", fw, true) == 0)) {
-		mutex_lock(&wm8994->fw_lock);
+		guard(mutex)(&wm8994->fw_lock);
 		wm8994->enh_eq = fw;
-		mutex_unlock(&wm8994->fw_lock);
 	}
 }
 
@@ -876,9 +876,8 @@ static void wm8958_mbc_vss_loaded(const struct firmware *fw, void *context)
 	struct wm8994_priv *wm8994 = snd_soc_component_get_drvdata(component);
 
 	if (fw && (wm8958_dsp2_fw(component, "MBC+VSS", fw, true) == 0)) {
-		mutex_lock(&wm8994->fw_lock);
+		guard(mutex)(&wm8994->fw_lock);
 		wm8994->mbc_vss = fw;
-		mutex_unlock(&wm8994->fw_lock);
 	}
 }
 
@@ -888,9 +887,8 @@ static void wm8958_mbc_loaded(const struct firmware *fw, void *context)
 	struct wm8994_priv *wm8994 = snd_soc_component_get_drvdata(component);
 
 	if (fw && (wm8958_dsp2_fw(component, "MBC", fw, true) == 0)) {
-		mutex_lock(&wm8994->fw_lock);
+		guard(mutex)(&wm8994->fw_lock);
 		wm8994->mbc = fw;
-		mutex_unlock(&wm8994->fw_lock);
 	}
 }
 
@@ -929,9 +927,8 @@ void wm8958_dsp2_init(struct snd_soc_component *component)
 		};
 
 		/* We need an array of texts for the enum API */
-		wm8994->mbc_texts = kmalloc_array(pdata->num_mbc_cfgs,
-						  sizeof(char *),
-						  GFP_KERNEL);
+		wm8994->mbc_texts = kmalloc_objs(*wm8994->mbc_texts,
+						 pdata->num_mbc_cfgs);
 		if (!wm8994->mbc_texts)
 			return;
 
@@ -955,9 +952,8 @@ void wm8958_dsp2_init(struct snd_soc_component *component)
 		};
 
 		/* We need an array of texts for the enum API */
-		wm8994->vss_texts = kmalloc_array(pdata->num_vss_cfgs,
-						  sizeof(char *),
-						  GFP_KERNEL);
+		wm8994->vss_texts = kmalloc_objs(*wm8994->vss_texts,
+						 pdata->num_vss_cfgs);
 		if (!wm8994->vss_texts)
 			return;
 
@@ -982,9 +978,8 @@ void wm8958_dsp2_init(struct snd_soc_component *component)
 		};
 
 		/* We need an array of texts for the enum API */
-		wm8994->vss_hpf_texts = kmalloc_array(pdata->num_vss_hpf_cfgs,
-						      sizeof(char *),
-						      GFP_KERNEL);
+		wm8994->vss_hpf_texts = kmalloc_objs(*wm8994->vss_hpf_texts,
+						     pdata->num_vss_hpf_cfgs);
 		if (!wm8994->vss_hpf_texts)
 			return;
 
@@ -1010,9 +1005,8 @@ void wm8958_dsp2_init(struct snd_soc_component *component)
 		};
 
 		/* We need an array of texts for the enum API */
-		wm8994->enh_eq_texts = kmalloc_array(pdata->num_enh_eq_cfgs,
-						     sizeof(char *),
-						     GFP_KERNEL);
+		wm8994->enh_eq_texts = kmalloc_objs(*wm8994->enh_eq_texts,
+						    pdata->num_enh_eq_cfgs);
 		if (!wm8994->enh_eq_texts)
 			return;
 

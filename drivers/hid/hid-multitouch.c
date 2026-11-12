@@ -79,7 +79,8 @@ MODULE_LICENSE("GPL");
 #define MT_QUIRK_APPLE_TOUCHBAR		BIT(23)
 #define MT_QUIRK_YOGABOOK9I		BIT(24)
 #define MT_QUIRK_KEEP_LATENCY_ON_CLOSE	BIT(25)
-#define MT_QUIRK_CONTACTID_TRANSDUCER	BIT(26)
+#define MT_QUIRK_IGNORE_FEATURE_ID_MISMATCH	BIT(26)
+#define MT_QUIRK_CONTACTID_TRANSDUCER	BIT(27)
 
 #define MT_INPUTMODE_TOUCHSCREEN	0x02
 #define MT_INPUTMODE_TOUCHPAD		0x03
@@ -236,7 +237,8 @@ static void mt_post_parse(struct mt_device *td, struct mt_application *app);
 #define MT_CLS_APPLE_TOUCHBAR			0x0114
 #define MT_CLS_YOGABOOK9I			0x0115
 #define MT_CLS_EGALAX_P80H84			0x0116
-#define MT_CLS_BRYDGE_MAX			0x0117
+#define MT_CLS_ASUS_ROG_Z13_FOLIO		0x0117
+#define MT_CLS_BRYDGE_MAX			0x0118
 #define MT_CLS_SIS				0x0457
 
 #define MT_DEFAULT_MAXCONTACT	10
@@ -407,6 +409,16 @@ static const struct mt_class mt_classes[] = {
 		.quirks = MT_QUIRK_ALWAYS_VALID |
 			MT_QUIRK_CONTACT_CNT_ACCURATE |
 			MT_QUIRK_ASUS_CUSTOM_UP },
+	{ .name = MT_CLS_ASUS_ROG_Z13_FOLIO,
+		.quirks = MT_QUIRK_ALWAYS_VALID |
+			MT_QUIRK_IGNORE_DUPLICATES |
+			MT_QUIRK_HOVERING |
+			MT_QUIRK_CONTACT_CNT_ACCURATE |
+			MT_QUIRK_STICKY_FINGERS |
+			MT_QUIRK_WIN8_PTP_BUTTONS |
+			MT_QUIRK_CONFIDENCE |
+			MT_QUIRK_IGNORE_FEATURE_ID_MISMATCH,
+		.export_all_inputs = true },
 	{ .name = MT_CLS_VTL,
 		.quirks = MT_QUIRK_ALWAYS_VALID |
 			MT_QUIRK_CONTACT_CNT_ACCURATE |
@@ -515,6 +527,7 @@ static const struct attribute_group mt_attribute_group = {
 
 static void mt_get_feature(struct hid_device *hdev, struct hid_report *report)
 {
+	struct mt_device *td = hid_get_drvdata(hdev);
 	int ret;
 	u32 size = hid_report_len(report);
 	u8 *buf;
@@ -536,8 +549,14 @@ static void mt_get_feature(struct hid_device *hdev, struct hid_report *report)
 		dev_warn(&hdev->dev, "failed to fetch feature %d\n",
 			 report->id);
 	} else {
-		/* The report ID in the request and the response should match */
-		if (report->id != buf[0]) {
+		/*
+		 * The report ID in the request and the response should match.
+		 * Some firmware (e.g. the ASUS ROG Z13 Folio
+		 * touchpad) returns a mismatched ID on this specific fetch;
+		 * tolerate it only for devices explicitly flagged as such.
+		 */
+		if (report->id != buf[0] &&
+		    !(td->mtclass.quirks & MT_QUIRK_IGNORE_FEATURE_ID_MISMATCH)) {
 			hid_err(hdev, "Returned feature report did not match the request\n");
 			goto free;
 		}
@@ -612,7 +631,7 @@ static struct mt_usages *mt_allocate_usage(struct hid_device *hdev,
 {
 	struct mt_usages *usage;
 
-	usage = devm_kzalloc(&hdev->dev, sizeof(*usage), GFP_KERNEL);
+	usage = devm_kzalloc_obj(&hdev->dev, *usage);
 	if (!usage)
 		return NULL;
 
@@ -641,8 +660,7 @@ static struct mt_application *mt_allocate_application(struct mt_device *td,
 	unsigned int application = report->application;
 	struct mt_application *mt_application;
 
-	mt_application = devm_kzalloc(&td->hdev->dev, sizeof(*mt_application),
-				      GFP_KERNEL);
+	mt_application = devm_kzalloc_obj(&td->hdev->dev, *mt_application);
 	if (!mt_application)
 		return NULL;
 
@@ -700,7 +718,7 @@ static struct mt_report_data *mt_allocate_report_data(struct mt_device *td,
 	struct hid_field *field;
 	int r, n;
 
-	rdata = devm_kzalloc(&td->hdev->dev, sizeof(*rdata), GFP_KERNEL);
+	rdata = devm_kzalloc_obj(&td->hdev->dev, *rdata);
 	if (!rdata)
 		return NULL;
 
@@ -1329,21 +1347,18 @@ static void mt_touch_report(struct hid_device *hid,
 	 * Includes multi-packet support where subsequent
 	 * packets are sent with zero contactcount.
 	 */
-	if (contact_count >= 0) {
+	if (contact_count > 0)
+		app->num_expected = contact_count;
+	else if (app->num_received == 0 && app->prev_scantime != scantime) {
 		/*
+		 * New multi-report frame:
+		 *
 		 * For Win8 PTPs the first packet (td->num_received == 0) may
 		 * have a contactcount of 0 if there only is a button event.
-		 * We double check that this is not a continuation packet
-		 * of a possible multi-packet frame be checking that the
-		 * timestamp has changed.
+		 *
+		 * Some other devices use a sentinel frame with 0 to release all contacts
 		 */
-		if ((app->quirks & MT_QUIRK_WIN8_PTP_BUTTONS) &&
-		    app->num_received == 0 &&
-		    app->prev_scantime != scantime)
-			app->num_expected = contact_count;
-		/* A non 0 contact count always indicates a first packet */
-		else if (contact_count)
-			app->num_expected = contact_count;
+		app->num_expected = 0;
 	}
 	app->prev_scantime = scantime;
 
@@ -2123,12 +2138,12 @@ static int mt_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		}
 	}
 
-	td = devm_kzalloc(&hdev->dev, sizeof(struct mt_device), GFP_KERNEL);
+	td = devm_kzalloc_obj(&hdev->dev, struct mt_device);
 	if (!td) {
 		dev_err(&hdev->dev, "cannot allocate multitouch data\n");
 		return -ENOMEM;
 	}
-	td->haptic = devm_kzalloc(&hdev->dev, sizeof(*(td->haptic)), GFP_KERNEL);
+	td->haptic = devm_kzalloc_obj(&hdev->dev, *(td->haptic));
 	if (!td->haptic)
 		return -ENOMEM;
 
@@ -2203,16 +2218,8 @@ static int mt_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 	mt_set_modes(hdev, HID_LATENCY_NORMAL, TOUCHPAD_REPORT_ALL);
 
-	if (td->is_haptic_touchpad) {
-		if (hid_haptic_init(hdev, &td->haptic)) {
-			dev_warn(&hdev->dev, "Cannot allocate haptic for %s\n",
-				 hdev->name);
-			td->is_haptic_touchpad = false;
-			devm_kfree(&hdev->dev, td->haptic);
-		}
-	} else {
+	if (!td->is_haptic_touchpad)
 		devm_kfree(&hdev->dev, td->haptic);
-	}
 
 	return 0;
 }
@@ -2255,7 +2262,7 @@ static void mt_remove(struct hid_device *hdev)
 {
 	struct mt_device *td = hid_get_drvdata(hdev);
 
-	timer_delete_sync(&td->release_timer);
+	timer_shutdown_sync(&td->release_timer);
 
 	sysfs_remove_group(&hdev->dev.kobj, &mt_attribute_group);
 	hid_hw_stop(hdev);
@@ -2741,9 +2748,15 @@ static const struct hid_device_id mt_devices[] = {
 			HID_ANY_ID) },
 
 	/* Hantick */
-	{ .driver_data = MT_CLS_NSMU,
+	{ .driver_data = MT_CLS_WIN_8_FORCE_MULTI_INPUT_NSMU,
 		HID_DEVICE(BUS_I2C, HID_GROUP_MULTITOUCH_WIN_8,
 			   I2C_VENDOR_ID_HANTICK, I2C_PRODUCT_ID_HANTICK_5288) },
+
+	/* Asus ROG Flow Z13 (2025) GZ302EA keyboard-cover touchpad */
+	{ .driver_data = MT_CLS_ASUS_ROG_Z13_FOLIO,
+		HID_DEVICE(BUS_USB, HID_GROUP_MULTITOUCH_WIN_8,
+			USB_VENDOR_ID_ASUSTEK,
+			USB_DEVICE_ID_ASUSTEK_ROG_Z13_FOLIO) },
 
 	/* Generic MT device */
 	{ HID_DEVICE(HID_BUS_ANY, HID_GROUP_MULTITOUCH, HID_ANY_ID, HID_ANY_ID) },

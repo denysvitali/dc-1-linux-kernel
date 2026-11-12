@@ -683,8 +683,7 @@ __prestera_k_arb_n_offload_set(struct prestera_switch *sw,
 {
 	struct neighbour *n;
 
-	n = neigh_lookup(&arp_tbl, &nc->key.addr.u.ipv4,
-			 nc->key.dev);
+	n = ipv4_neigh_lookup(nc->key.dev, &nc->key.addr.u.ipv4);
 	if (!n)
 		return;
 
@@ -790,7 +789,7 @@ __prestera_k_arb_nc_kern_n_fetch(struct prestera_switch *sw,
 	int err;
 
 	memset(&nc->nh_neigh_info, 0, sizeof(nc->nh_neigh_info));
-	n = neigh_lookup(&arp_tbl, &nc->key.addr.u.ipv4, nc->key.dev);
+	n = ipv4_neigh_lookup(nc->key.dev, &nc->key.addr.u.ipv4);
 	if (!n)
 		goto out;
 
@@ -1052,11 +1051,10 @@ static void __prestera_k_arb_hw_state_upd(struct prestera_switch *sw,
 #endif /* PRESTERA_IMPLICITY_RESOLVE_DEAD_NEIGH */
 
 	if (nc->key.addr.v == PRESTERA_IPV4) {
-		n = neigh_lookup(&arp_tbl, &nc->key.addr.u.ipv4,
-				 nc->key.dev);
+		n = ipv4_neigh_lookup(nc->key.dev, &nc->key.addr.u.ipv4);
 		if (!n)
-			n = neigh_create(&arp_tbl, &nc->key.addr.u.ipv4,
-					 nc->key.dev);
+			n = ipv4_neigh_create(nc->key.dev,
+					      &nc->key.addr.u.ipv4);
 	} else {
 		n = NULL;
 	}
@@ -1302,10 +1300,8 @@ static int __prestera_inetaddr_port_event(struct net_device *port_dev,
 		dev_hold(port_dev);
 		break;
 	case NETDEV_DOWN:
-		if (!re) {
-			NL_SET_ERR_MSG_MOD(extack, "Can't find RIF");
-			return -EEXIST;
-		}
+		if (!re)
+			return 0;
 		prestera_rif_entry_destroy(port->sw, re);
 		dev_put(port_dev);
 		break;

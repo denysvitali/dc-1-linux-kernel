@@ -189,7 +189,7 @@ static int max77686_clk_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	drv_data = devm_kzalloc(dev, struct_size(drv_data, max_clk_data, num_clks), GFP_KERNEL);
+	drv_data = devm_kzalloc_flex(dev, *drv_data, max_clk_data, num_clks);
 	if (!drv_data)
 		return -ENOMEM;
 
@@ -264,10 +264,10 @@ static int max77686_clk_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id max77686_clk_id[] = {
-	{ "max77686-clk", .driver_data = CHIP_MAX77686, },
-	{ "max77802-clk", .driver_data = CHIP_MAX77802, },
-	{ "max77620-clock", .driver_data = CHIP_MAX77620, },
-	{},
+	{ .name = "max77686-clk", .driver_data = CHIP_MAX77686 },
+	{ .name = "max77802-clk", .driver_data = CHIP_MAX77802 },
+	{ .name = "max77620-clock", .driver_data = CHIP_MAX77620 },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, max77686_clk_id);
 

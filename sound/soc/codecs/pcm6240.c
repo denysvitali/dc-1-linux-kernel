@@ -12,6 +12,7 @@
 // Author: Shenghao Ding <shenghao-ding@ti.com>
 //
 
+#include <linux/cleanup.h>
 #include <linux/unaligned.h>
 #include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
@@ -605,7 +606,7 @@ static int pcmdev_get_volsw(struct snd_kcontrol *kcontrol,
 	unsigned int reg = mc->reg;
 	unsigned int val;
 
-	mutex_lock(&pcm_dev->codec_lock);
+	guard(mutex)(&pcm_dev->codec_lock);
 
 	if (pcm_dev->chip_id == PCM1690) {
 		ret = pcmdev_dev_read(pcm_dev, dev_no, PCM1690_REG_MODE_CTRL,
@@ -613,18 +614,18 @@ static int pcmdev_get_volsw(struct snd_kcontrol *kcontrol,
 		if (ret) {
 			dev_err(pcm_dev->dev, "%s: read mode err=%d\n",
 				__func__, ret);
-			goto out;
+			return ret;
 		}
 		val &= PCM1690_REG_MODE_CTRL_DAMS_MSK;
 		/* Set to wide-range mode, before using vol ctrl. */
 		if (!val && vol_ctrl_type == PCMDEV_PCM1690_VOL_CTRL) {
 			ucontrol->value.integer.value[0] = -25500;
-			goto out;
+			return 0;
 		}
 		/* Set to fine mode, before using fine vol ctrl. */
 		if (val && vol_ctrl_type == PCMDEV_PCM1690_FINE_VOL_CTRL) {
 			ucontrol->value.integer.value[0] = -12750;
-			goto out;
+			return 0;
 		}
 	}
 
@@ -632,16 +633,15 @@ static int pcmdev_get_volsw(struct snd_kcontrol *kcontrol,
 	if (ret) {
 		dev_err(pcm_dev->dev, "%s: read err=%d\n",
 			__func__, ret);
-		goto out;
+		return ret;
 	}
 
 	val = (val >> shift) & mask;
 	val = (val > max) ? max : val;
 	val = mc->invert ? max - val : val;
 	ucontrol->value.integer.value[0] = val;
-out:
-	mutex_unlock(&pcm_dev->codec_lock);
-	return ret;
+
+	return 0;
 }
 
 static int pcmdevice_get_volsw(struct snd_kcontrol *kcontrol,
@@ -678,7 +678,7 @@ static int pcmdev_put_volsw(struct snd_kcontrol *kcontrol,
 	unsigned int val, val_mask;
 	unsigned int reg = mc->reg;
 
-	mutex_lock(&pcm_dev->codec_lock);
+	guard(mutex)(&pcm_dev->codec_lock);
 	val = ucontrol->value.integer.value[0] & mask;
 	val = (val > max) ? max : val;
 	val = mc->invert ? max - val : val;
@@ -702,7 +702,7 @@ static int pcmdev_put_volsw(struct snd_kcontrol *kcontrol,
 			__func__, rc);
 	else
 		rc = 1;
-	mutex_unlock(&pcm_dev->codec_lock);
+
 	return rc;
 }
 
@@ -1346,8 +1346,8 @@ static int pcmdev_gain_ctrl_add(struct pcmdevice_priv *pcm_dev,
 		return 0;
 	}
 
-	pcmdev_controls = devm_kcalloc(pcm_dev->dev, nr_chn,
-				       sizeof(struct snd_kcontrol_new), GFP_KERNEL);
+	pcmdev_controls = devm_kzalloc_objs(pcm_dev->dev,
+					    struct snd_kcontrol_new, nr_chn);
 	if (!pcmdev_controls)
 		return -ENOMEM;
 
@@ -1407,8 +1407,7 @@ static int pcmdev_profile_ctrl_add(struct pcmdevice_priv *pcm_dev)
 	char *name;
 	int ret;
 
-	pcmdev_ctrl = devm_kzalloc(pcm_dev->dev,
-		sizeof(struct snd_kcontrol_new), GFP_KERNEL);
+	pcmdev_ctrl = devm_kzalloc_obj(pcm_dev->dev, struct snd_kcontrol_new);
 	if (!pcmdev_ctrl)
 		return -ENOMEM;
 
@@ -1577,10 +1576,10 @@ static int pcmdevice_comp_probe(struct snd_soc_component *comp)
 {
 	struct pcmdevice_priv *pcm_dev = snd_soc_component_get_drvdata(comp);
 	struct i2c_adapter *adap = pcm_dev->client->adapter;
-	const struct firmware *fw_entry = NULL;
+	const struct firmware *fw_entry __free(firmware) = NULL;
 	int ret, i, j;
 
-	mutex_lock(&pcm_dev->codec_lock);
+	guard(mutex)(&pcm_dev->codec_lock);
 
 	pcm_dev->component = comp;
 
@@ -1588,7 +1587,7 @@ static int pcmdevice_comp_probe(struct snd_soc_component *comp)
 		for (j = 0; j < 2; j++) {
 			ret = pcmdev_gain_ctrl_add(pcm_dev, i, j);
 			if (ret < 0)
-				goto out;
+				return ret;
 		}
 	}
 
@@ -1621,21 +1620,17 @@ static int pcmdevice_comp_probe(struct snd_soc_component *comp)
 	if (ret) {
 		dev_err(pcm_dev->dev, "%s: request %s err = %d\n", __func__,
 			pcm_dev->bin_name, ret);
-		goto out;
+		return ret;
 	}
 
 	ret = pcmdev_regbin_ready(fw_entry, pcm_dev);
 	if (ret) {
 		dev_err(pcm_dev->dev, "%s: %s parse err = %d\n", __func__,
 			pcm_dev->bin_name, ret);
-		goto out;
+		return ret;
 	}
-	ret = pcmdev_profile_ctrl_add(pcm_dev);
-out:
-	release_firmware(fw_entry);
 
-	mutex_unlock(&pcm_dev->codec_lock);
-	return ret;
+	return pcmdev_profile_ctrl_add(pcm_dev);
 }
 
 
@@ -1645,9 +1640,8 @@ static void pcmdevice_comp_remove(struct snd_soc_component *codec)
 
 	if (!pcm_dev)
 		return;
-	mutex_lock(&pcm_dev->codec_lock);
+	guard(mutex)(&pcm_dev->codec_lock);
 	pcmdevice_config_info_remove(pcm_dev);
-	mutex_unlock(&pcm_dev->codec_lock);
 }
 
 static const struct snd_soc_dapm_widget pcmdevice_dapm_widgets[] = {
@@ -1890,9 +1884,9 @@ static int pcmdevice_mute(struct snd_soc_dai *dai, int mute, int stream)
 	else
 		block_type = PCMDEVICE_BIN_BLK_PRE_POWER_UP;
 
-	mutex_lock(&pcm_dev->codec_lock);
+	guard(mutex)(&pcm_dev->codec_lock);
 	pcmdevice_select_cfg_blk(pcm_dev, pcm_dev->cur_conf, block_type);
-	mutex_unlock(&pcm_dev->codec_lock);
+
 	return 0;
 }
 
@@ -2024,8 +2018,6 @@ static const struct regmap_config pcmdevice_i2c_regmap = {
 
 static void pcmdevice_remove(struct pcmdevice_priv *pcm_dev)
 {
-	if (pcm_dev->irq)
-		free_irq(pcm_dev->irq, pcm_dev);
 	mutex_destroy(&pcm_dev->codec_lock);
 }
 
@@ -2051,7 +2043,7 @@ static int pcmdevice_i2c_probe(struct i2c_client *i2c)
 	unsigned int dev_addrs[PCMDEVICE_MAX_I2C_DEVICES];
 	int ret = 0, i = 0, ndev = 0;
 
-	pcm_dev = devm_kzalloc(&i2c->dev, sizeof(*pcm_dev), GFP_KERNEL);
+	pcm_dev = devm_kzalloc_obj(&i2c->dev, *pcm_dev);
 	if (!pcm_dev)
 		return -ENOMEM;
 

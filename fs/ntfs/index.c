@@ -14,6 +14,8 @@
  * Copyright (c) 2007-2021 Jean-Pierre Andre
  */
 
+#include <linux/overflow.h>
+
 #include "collate.h"
 #include "index.h"
 #include "ntfs.h"
@@ -255,6 +257,32 @@ static s64 ntfs_ie_get_vcn(struct index_entry *ie)
 	return le64_to_cpup(ntfs_ie_get_vcn_addr(ie));
 }
 
+static int ntfs_index_entry_vcn_inconsistent(const struct ntfs_volume *vol,
+					     struct index_entry *ie,
+					     u8 vcn_size_bits, u64 inum)
+{
+	s64 vcn, pos;
+
+	if (le16_to_cpu(ie->length) <
+	    sizeof(struct index_entry_header) + sizeof(s64)) {
+		ntfs_error(vol->sb,
+			   "Index entry with node flag has no VCN in inode %llu.",
+			   (unsigned long long)inum);
+		return -EIO;
+	}
+
+	vcn = ntfs_ie_get_vcn(ie);
+	if (vcn < 0 ||
+	    check_shl_overflow(vcn, vcn_size_bits, &pos)) {
+		ntfs_error(vol->sb,
+			   "Invalid index entry VCN %lld in inode %llu.",
+			   vcn, (unsigned long long)inum);
+		return -EIO;
+	}
+
+	return 0;
+}
+
 static struct index_entry *ntfs_ie_get_first(struct index_header *ih)
 {
 	return (struct index_entry *)((u8 *)ih + le32_to_cpu(ih->entries_offset));
@@ -326,10 +354,13 @@ static int ntfs_index_header_inconsistent(struct ntfs_volume *vol,
 
 int ntfs_index_entries_inconsistent(const struct ntfs_volume *vol,
 				    const struct index_header *ih,
+				    u32 block_size,
 				    __le32 collation_rule, u64 inum)
 {
 	struct index_entry *ie;
 	u8 *index_end = (u8 *)ih + le32_to_cpu(ih->index_length);
+	u8 vcn_size_bits = vol->cluster_size <= block_size ?
+			vol->cluster_size_bits : NTFS_BLOCK_SIZE_BITS;
 
 	for (ie = ntfs_ie_get_first((struct index_header *)ih);
 	      ; ie = ntfs_ie_get_next(ie)) {
@@ -347,6 +378,11 @@ int ntfs_index_entries_inconsistent(const struct ntfs_volume *vol,
 				   inum);
 			return -EIO;
 		}
+
+		if ((ie->flags & INDEX_ENTRY_NODE) &&
+		    ntfs_index_entry_vcn_inconsistent(vol, ie,
+						      vcn_size_bits, inum))
+			return -EIO;
 
 		if (ntfs_ie_end(ie))
 			break;
@@ -489,6 +525,14 @@ static struct index_entry *ntfs_ie_dup_novcn(struct index_entry *ie)
 	return dup;
 }
 
+/* Offset of the first entry in an index block created by ntfs_ib_alloc(). */
+static u32 ntfs_ib_canonical_entries_offset(u32 block_size)
+{
+	u32 usa_count = block_size / NTFS_BLOCK_SIZE + 1;
+
+	return (sizeof(struct index_header) + usa_count * 2 + 7) & ~7;
+}
+
 /*
  * Check the consistency of an index block
  *
@@ -548,7 +592,18 @@ int ntfs_index_block_inconsistent(struct ntfs_volume *vol,
 					   offsetof(struct index_block, index),
 					   inum))
 		return -EIO;
-	if (ntfs_index_entries_inconsistent(vol, &ib->index, cr, inum))
+
+	if (le32_to_cpu(ib->index.entries_offset) <
+	    ntfs_ib_canonical_entries_offset(block_size)) {
+		ntfs_error(sb,
+			   "Index block: entries offset %u is below the minimum for a %u-byte block: vcn %lld inode %llu\n",
+			   le32_to_cpu(ib->index.entries_offset), block_size,
+			   vcn, inum);
+		return -EIO;
+	}
+
+	if (ntfs_index_entries_inconsistent(vol, &ib->index, block_size,
+					    cr, inum))
 		return -EIO;
 	return 0;
 }
@@ -614,6 +669,31 @@ static struct index_root *ntfs_ir_lookup2(struct ntfs_inode *ni, __le16 *name, u
 	if (ir)
 		ntfs_attr_put_search_ctx(ctx);
 	return ir;
+}
+
+static int ntfs_ir_move_to_base(struct ntfs_index_context *icx)
+{
+	struct ntfs_attr_search_ctx *ctx = NULL;
+	struct index_root *ir;
+	bool moved = false;
+	int ret = 0;
+
+	ir = ntfs_ir_lookup(icx->idx_ni, icx->name, icx->name_len, &ctx);
+	if (!ir)
+		return -ENOENT;
+
+	if (ctx->ntfs_ino->mft_no != icx->idx_ni->mft_no) {
+		ret = ntfs_attr_record_move_to(ctx, icx->idx_ni);
+		if (!ret) {
+			moved = true;
+			ret = ntfs_attrlist_update(icx->idx_ni);
+		}
+	}
+
+	ntfs_attr_put_search_ctx(ctx);
+	if (!ret && moved)
+		ret = ntfs_inode_free_empty_extents(icx->idx_ni);
+	return ret;
 }
 
 /*
@@ -787,6 +867,9 @@ static int ntfs_icx_parent_dec(struct ntfs_index_context *icx)
  * after the search @key, i.e. this is the position in the index at which
  * an index entry with a key of @key would need to be inserted.
  *
+ * If the index cannot be searched, a negative error code other than -ENOENT
+ * is returned and @icx does not describe a valid index entry.
+ *
  * When finished with the entry and its data, call ntfs_index_ctx_put() to free
  * the context and other associated resources.
  *
@@ -827,7 +910,7 @@ int ntfs_index_lookup(const void *key, const u32 key_len, struct ntfs_index_cont
 	if (ni->vol->cluster_size <= icx->block_size)
 		icx->vcn_size_bits = ni->vol->cluster_size_bits;
 	else
-		icx->vcn_size_bits = ni->vol->sector_size_bits;
+		icx->vcn_size_bits = NTFS_BLOCK_SIZE_BITS;
 
 	icx->cr = ir->collation_rule;
 	if (!ntfs_is_collation_rule_supported(icx->cr)) {
@@ -852,7 +935,7 @@ int ntfs_index_lookup(const void *key, const u32 key_len, struct ntfs_index_cont
 	/* Child node present, descend into it. */
 	icx->ia_ni = ntfs_ia_open(icx, ni);
 	if (!icx->ia_ni) {
-		err = -ENOENT;
+		err = -EIO;
 		goto err_out;
 	}
 
@@ -932,8 +1015,8 @@ static struct index_block *ntfs_ib_alloc(s64 ib_vcn, u32 ib_size,
 	*(__le16 *)((char *)ib + le16_to_cpu(ib->usa_ofs)) = cpu_to_le16(1);
 	ib->lsn = 0;
 	ib->index_block_vcn = cpu_to_le64(ib_vcn);
-	ib->index.entries_offset = cpu_to_le32((ih_size +
-				le16_to_cpu(ib->usa_count) * 2 + 7) & ~7);
+	ib->index.entries_offset =
+		cpu_to_le32(ntfs_ib_canonical_entries_offset(ib_size));
 	ib->index.index_length = 0;
 	ib->index.allocated_size = cpu_to_le32(ib_size -
 			(sizeof(struct index_block) - ih_size));
@@ -989,6 +1072,7 @@ static s64 ntfs_ibm_pos_to_vcn(struct ntfs_index_context *icx, s64 pos)
 static int ntfs_ibm_add(struct ntfs_index_context *icx)
 {
 	u8 bmp[8];
+	int ret;
 
 	ntfs_debug("Entering\n");
 
@@ -998,10 +1082,11 @@ static int ntfs_ibm_add(struct ntfs_index_context *icx)
 	 * AT_BITMAP must be at least 8 bytes.
 	 */
 	memset(bmp, 0, sizeof(bmp));
-	if (ntfs_attr_add(icx->idx_ni, AT_BITMAP, icx->name, icx->name_len,
-				bmp, sizeof(bmp))) {
+	ret = ntfs_attr_add(icx->idx_ni, AT_BITMAP, icx->name, icx->name_len,
+			    bmp, sizeof(bmp));
+	if (ret) {
 		ntfs_error(icx->idx_ni->vol->sb, "Failed to add AT_BITMAP");
-		return -EINVAL;
+		return ret;
 	}
 
 	return 0;
@@ -1074,14 +1159,15 @@ static s64 ntfs_ibm_get_free(struct ntfs_index_context *icx)
 {
 	u8 *bm;
 	int bit;
+	int ret;
 	s64 vcn, byte, size;
 
 	ntfs_debug("Entering\n");
 
 	bm = ntfs_attr_readall(icx->idx_ni, AT_BITMAP,  icx->name, icx->name_len,
 			&size);
-	if (!bm)
-		return (s64)-1;
+	if (IS_ERR(bm))
+		return PTR_ERR(bm);
 
 	for (byte = 0; byte < size; byte++) {
 		if (bm[byte] == 255)
@@ -1099,10 +1185,12 @@ static s64 ntfs_ibm_get_free(struct ntfs_index_context *icx)
 out:
 	ntfs_debug("allocated vcn: %lld\n", vcn);
 
-	if (ntfs_ibm_set(icx, vcn))
-		vcn = (s64)-1;
+	ret = ntfs_ibm_set(icx, vcn);
 
 	kvfree(bm);
+	if (ret)
+		return ret;
+
 	return vcn;
 }
 
@@ -1112,6 +1200,7 @@ static struct index_block *ntfs_ir_to_ib(struct index_root *ir, s64 ib_vcn)
 	struct index_entry *ie_last;
 	char *ies_start, *ies_end;
 	int i;
+	u32 ib_cap;
 
 	ntfs_debug("Entering\n");
 
@@ -1127,6 +1216,16 @@ static struct index_block *ntfs_ir_to_ib(struct index_root *ir, s64 ib_vcn)
 	 * as well, which can never have any data.
 	 */
 	i = (char *)ie_last - ies_start + le16_to_cpu(ie_last->length);
+
+	/* Entries must fit in the allocated index block */
+	ib_cap = le32_to_cpu(ib->index.allocated_size) -
+			le32_to_cpu(ib->index.entries_offset);
+	if ((u32)i > ib_cap) {
+		ntfs_error(NULL, "Entries (%d B) exceed IB capacity", i);
+		kvfree(ib);
+		return NULL;
+	}
+
 	memcpy(ntfs_ie_get_first(&ib->index), ies_start, i);
 
 	ib->index.flags = ir->index.flags;
@@ -1264,7 +1363,7 @@ static int ntfs_ir_reparent(struct ntfs_index_context *icx)
 
 	new_ib_vcn = ntfs_ibm_get_free(icx);
 	if (new_ib_vcn < 0) {
-		ret = -EINVAL;
+		ret = (int)new_ib_vcn;
 		goto out;
 	}
 
@@ -1335,19 +1434,42 @@ resize_failed:
 	 * When there is no space to build a non-resident
 	 * index, we may have to move the root to an extent
 	 */
-	if ((ret == -ENOSPC) && (ctx->al_entry || !ntfs_inode_add_attrlist(icx->idx_ni))) {
-		ntfs_attr_put_search_ctx(ctx);
-		ctx = NULL;
-		ir = ntfs_ir_lookup(icx->idx_ni, icx->name, icx->name_len, &ctx);
-		if (ir && !ntfs_attr_record_move_away(ctx, ix_root_size -
-				le32_to_cpu(ctx->attr->data.resident.value_length))) {
-			if (ntfs_attrlist_update(ctx->base_ntfs_ino ?
-						 ctx->base_ntfs_ino : ctx->ntfs_ino))
+	if (ret == -ENOSPC) {
+		if (!ctx->al_entry) {
+			ret = ntfs_inode_add_attrlist(icx->idx_ni);
+			if (ret)
 				goto clear_bmp;
+
 			ntfs_attr_put_search_ctx(ctx);
 			ctx = NULL;
 			goto retry;
 		}
+
+		if (ctx->ntfs_ino->mft_no != icx->idx_ni->mft_no)
+			goto clear_bmp;
+
+		ret = ntfs_attr_record_move_away(ctx, ix_root_size -
+				le32_to_cpu(ctx->attr->data.resident.value_length));
+		if (ret)
+			goto clear_bmp;
+
+		ret = ntfs_attrlist_update(icx->idx_ni);
+		if (ret) {
+			int rollback_ret;
+
+			ntfs_attr_put_search_ctx(ctx);
+			ctx = NULL;
+			rollback_ret = ntfs_ir_move_to_base(icx);
+			if (rollback_ret)
+				ntfs_error(icx->idx_ni->vol->sb,
+					   "Failed to roll back INDEX_ROOT relocation: %d",
+					   rollback_ret);
+			goto clear_bmp;
+		}
+
+		ntfs_attr_put_search_ctx(ctx);
+		ctx = NULL;
+		goto retry;
 	}
 clear_bmp:
 	ntfs_ibm_clear(icx, new_ib_vcn);
@@ -1462,9 +1584,9 @@ static int ntfs_ih_insert(struct index_header *ih, struct index_entry *orig_ie, 
 	ie_node = ntfs_ie_get_by_pos(ih, pos);
 	old_vcn = ntfs_ie_get_vcn(ie_node);
 	ntfs_ie_set_vcn(ie_node, new_vcn);
+	ntfs_ie_set_vcn(ie, old_vcn);
 
 	ntfs_ie_insert(ih, ie, ie_node);
-	ntfs_ie_set_vcn(ie_node, old_vcn);
 out:
 	kfree(ie);
 	return ret;
@@ -1579,7 +1701,7 @@ resplit:
 	median  = ntfs_ie_get_median(&ib->index);
 	new_vcn = ntfs_ibm_get_free(icx);
 	if (new_vcn < 0) {
-		ret = -EINVAL;
+		ret = (int)new_vcn;
 		goto out;
 	}
 
@@ -1596,7 +1718,7 @@ resplit:
 			goto out;
 		}
 	} else {
-		si = kzalloc(sizeof(struct split_info), GFP_NOFS);
+		si = kzalloc_obj(struct split_info, GFP_NOFS);
 		if (!si) {
 			ntfs_ibm_clear(icx, new_vcn);
 			ret = -ENOMEM;

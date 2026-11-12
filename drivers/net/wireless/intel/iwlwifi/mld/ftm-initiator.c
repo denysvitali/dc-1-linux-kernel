@@ -8,7 +8,7 @@
 #include "mld.h"
 #include "iface.h"
 #include "phy.h"
-#include "iwl-io.h"
+#include "iwl-trans.h"
 #include "iwl-prph.h"
 #include "constants.h"
 #include "fw/api/location.h"
@@ -457,5 +457,26 @@ void iwl_mld_ftm_restart_cleanup(struct iwl_mld *mld)
 
 	cfg80211_pmsr_complete(mld->ftm_initiator.req_wdev,
 			       mld->ftm_initiator.req, GFP_KERNEL);
+	iwl_mld_ftm_reset(mld);
+}
+
+void iwl_mld_ftm_abort(struct iwl_mld *mld, struct cfg80211_pmsr_request *req)
+{
+	struct iwl_tof_range_abort_cmd cmd = {
+		.request_id = req->cookie,
+	};
+
+	lockdep_assert_wiphy(mld->wiphy);
+
+	if (req != mld->ftm_initiator.req)
+		return;
+
+	if (iwl_mld_send_cmd_pdu(mld, WIDE_ID(LOCATION_GROUP,
+					      TOF_RANGE_ABORT_CMD),
+				 &cmd))
+		IWL_ERR(mld, "failed to abort FTM process\n");
+
+	iwl_mld_cancel_notifications_of_object(mld, IWL_MLD_OBJECT_TYPE_FTM_REQ,
+					       mld->ftm_initiator.req->cookie);
 	iwl_mld_ftm_reset(mld);
 }

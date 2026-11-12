@@ -124,6 +124,11 @@ static int cros_usbpd_charger_get_num_ports(struct charger_data *charger)
 	if (ret < 0)
 		return ret;
 
+	if (resp.port_count > EC_USB_PD_MAX_PORTS) {
+		dev_warn(charger->dev, "Charge port count out of bounds\n");
+		return EC_USB_PD_MAX_PORTS;
+	}
+
 	return resp.port_count;
 }
 
@@ -136,6 +141,11 @@ static int cros_usbpd_charger_get_usbpd_num_ports(struct charger_data *charger)
 					    NULL, 0, &resp, sizeof(resp));
 	if (ret < 0)
 		return ret;
+
+	if (resp.num_ports > EC_USB_PD_MAX_PORTS) {
+		dev_warn(charger->dev, "USB PD port count out of bounds\n");
+		return EC_USB_PD_MAX_PORTS;
+	}
 
 	return resp.num_ports;
 }
@@ -536,8 +546,7 @@ static int cros_usbpd_charger_probe(struct platform_device *pd)
 	int ret = -EINVAL;
 	int i;
 
-	charger = devm_kzalloc(dev, sizeof(struct charger_data),
-			       GFP_KERNEL);
+	charger = devm_kzalloc_obj(dev, struct charger_data);
 	if (!charger)
 		return -ENOMEM;
 
@@ -588,10 +597,13 @@ static int cros_usbpd_charger_probe(struct platform_device *pd)
 
 	/*
 	 * Sanity checks on the number of ports:
-	 *  there should be at most 1 dedicated port
+	 *  there should be at most 1 dedicated port, and the count must
+	 *  not exceed the maximum number of supported ports
+	 *  (EC_USB_PD_MAX_PORTS).
 	 */
 	if (charger->num_charger_ports < charger->num_usbpd_ports ||
-	    charger->num_charger_ports > (charger->num_usbpd_ports + 1)) {
+	    charger->num_charger_ports > (charger->num_usbpd_ports + 1) ||
+	    charger->num_charger_ports > EC_USB_PD_MAX_PORTS) {
 		dev_err(dev, "Unexpected number of charge port count\n");
 		ret = -EPROTO;
 		goto fail_nowarn;
@@ -600,7 +612,7 @@ static int cros_usbpd_charger_probe(struct platform_device *pd)
 	for (i = 0; i < charger->num_charger_ports; i++) {
 		struct power_supply_config psy_cfg = {};
 
-		port = devm_kzalloc(dev, sizeof(struct port_data), GFP_KERNEL);
+		port = devm_kzalloc_obj(dev, struct port_data);
 		if (!port) {
 			ret = -ENOMEM;
 			goto fail;

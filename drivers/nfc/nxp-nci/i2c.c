@@ -284,8 +284,7 @@ static int nxp_nci_i2c_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	phy = devm_kzalloc(&client->dev, sizeof(struct nxp_nci_i2c_phy),
-			   GFP_KERNEL);
+	phy = devm_kzalloc_obj(&client->dev, struct nxp_nci_i2c_phy);
 	if (!phy)
 		return -ENOMEM;
 
@@ -334,8 +333,10 @@ static int nxp_nci_i2c_probe(struct i2c_client *client)
 				 nxp_nci_i2c_irq_thread_fn,
 				 irqflags | IRQF_ONESHOT,
 				 NXP_NCI_I2C_DRIVER_NAME, phy);
-	if (r < 0)
+	if (r < 0) {
 		nfc_err(&client->dev, "Unable to register IRQ handler\n");
+		nxp_nci_remove(phy->ndev);
+	}
 
 	return r;
 }
@@ -355,16 +356,16 @@ static const struct i2c_device_id nxp_nci_i2c_id_table[] = {
 MODULE_DEVICE_TABLE(i2c, nxp_nci_i2c_id_table);
 
 static const struct of_device_id of_nxp_nci_i2c_match[] = {
-	{ .compatible = "nxp,nxp-nci-i2c", },
-	{}
+	{ .compatible = "nxp,nxp-nci-i2c" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, of_nxp_nci_i2c_match);
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id acpi_id[] = {
-	{ "NXP1001" },
-	{ "NXP1002" },
-	{ "NXP7471" },
+	{ .id = "NXP1001" },
+	{ .id = "NXP1002" },
+	{ .id = "NXP7471" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, acpi_id);

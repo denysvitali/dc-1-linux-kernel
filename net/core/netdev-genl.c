@@ -312,11 +312,14 @@ int netdev_nl_napi_get_dumpit(struct sk_buff *skb, struct netlink_callback *cb)
 			err = -ENODEV;
 		}
 	} else {
+		unsigned long start_ifindex = ctx->ifindex;
+
 		for_each_netdev_lock_scoped(net, netdev, ctx->ifindex) {
+			if (ctx->ifindex != start_ifindex)
+				ctx->napi_id = 0;
 			err = netdev_nl_napi_dump_one(netdev, skb, info, ctx);
 			if (err < 0)
 				break;
-			ctx->napi_id = 0;
 		}
 	}
 
@@ -335,6 +338,12 @@ netdev_nl_napi_set_config(struct napi_struct *napi, struct genl_info *info)
 		int ret;
 
 		threaded = nla_get_uint(info->attrs[NETDEV_A_NAPI_THREADED]);
+		if (threaded && test_bit(NAPI_STATE_PERCPU, &napi->state)) {
+			NL_SET_BAD_ATTR(info->extack,
+					info->attrs[NETDEV_A_NAPI_THREADED]);
+			return -EOPNOTSUPP;
+		}
+
 		ret = napi_set_threaded(napi, threaded);
 		if (ret)
 			return ret;
@@ -434,7 +443,7 @@ netdev_nl_queue_fill_lease(struct sk_buff *rsp, struct net_device *netdev,
 nla_put_failure_unlock:
 	rcu_read_unlock();
 nla_put_failure:
-	return -ENOMEM;
+	return -EMSGSIZE;
 }
 
 static int
@@ -636,13 +645,17 @@ int netdev_nl_queue_get_dumpit(struct sk_buff *skb, struct netlink_callback *cb)
 			err = -ENODEV;
 		}
 	} else {
+		unsigned long start_ifindex = ctx->ifindex;
+
 		for_each_netdev_lock_ops_compat_scoped(net, netdev,
 						       ctx->ifindex) {
+			if (ctx->ifindex != start_ifindex) {
+				ctx->rxq_idx = 0;
+				ctx->txq_idx = 0;
+			}
 			err = netdev_nl_queue_dump_one(netdev, skb, info, ctx);
 			if (err < 0)
 				break;
-			ctx->rxq_idx = 0;
-			ctx->txq_idx = 0;
 		}
 	}
 
@@ -768,7 +781,7 @@ netdev_nl_stats_by_queue(struct net_device *netdev, struct sk_buff *rsp,
 	const struct netdev_stat_ops *ops = netdev->stat_ops;
 	int i, err;
 
-	if (!(netdev->flags & IFF_UP))
+	if (!netdev->up)
 		return 0;
 
 	i = ctx->rxq_idx;
@@ -788,8 +801,6 @@ netdev_nl_stats_by_queue(struct net_device *netdev, struct sk_buff *rsp,
 		ctx->txq_idx = ++i;
 	}
 
-	ctx->rxq_idx = 0;
-	ctx->txq_idx = 0;
 	return 0;
 }
 
@@ -904,6 +915,7 @@ int netdev_nl_qstats_get_dumpit(struct sk_buff *skb,
 	struct netdev_nl_dump_ctx *ctx = netdev_dump_ctx(cb);
 	const struct genl_info *info = genl_info_dump(cb);
 	struct net *net = sock_net(skb->sk);
+	unsigned long start_ifindex;
 	struct net_device *netdev;
 	unsigned int ifindex;
 	unsigned int scope;
@@ -936,7 +948,13 @@ int netdev_nl_qstats_get_dumpit(struct sk_buff *skb,
 		return err;
 	}
 
+	start_ifindex = ctx->ifindex;
+
 	for_each_netdev_lock_ops_compat_scoped(net, netdev, ctx->ifindex) {
+		if (ctx->ifindex != start_ifindex) {
+			ctx->rxq_idx = 0;
+			ctx->txq_idx = 0;
+		}
 		err = netdev_nl_qstats_get_dump_one(netdev, scope, skb,
 						    info, ctx);
 		if (err < 0)
@@ -1013,6 +1031,7 @@ netdev_nl_get_dma_dev(struct net_device *netdev, unsigned long *rxq_bitmap,
 int netdev_nl_bind_rx_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net_devmem_dmabuf_binding *binding;
+	unsigned int niov_shift = PAGE_SHIFT;
 	u32 ifindex, dmabuf_fd, rxq_idx;
 	struct netdev_nl_sock *priv;
 	struct net_device *netdev;
@@ -1029,6 +1048,18 @@ int netdev_nl_bind_rx_doit(struct sk_buff *skb, struct genl_info *info)
 
 	ifindex = nla_get_u32(info->attrs[NETDEV_A_DEV_IFINDEX]);
 	dmabuf_fd = nla_get_u32(info->attrs[NETDEV_A_DMABUF_FD]);
+
+	if (info->attrs[NETDEV_A_DMABUF_RX_PAGE_SIZE]) {
+		u32 rx_page_size = nla_get_u32(info->attrs[NETDEV_A_DMABUF_RX_PAGE_SIZE]);
+
+		if (!is_power_of_2(rx_page_size)) {
+			NL_SET_ERR_MSG_ATTR(info->extack,
+					    info->attrs[NETDEV_A_DMABUF_RX_PAGE_SIZE],
+					    "rx-page-size must be a power of 2");
+			return -EINVAL;
+		}
+		niov_shift = ilog2(rx_page_size);
+	}
 
 	priv = genl_sk_priv_get(&netdev_nl_family, NETLINK_CB(skb).sk);
 	if (IS_ERR(priv))
@@ -1080,7 +1111,8 @@ int netdev_nl_bind_rx_doit(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	binding = net_devmem_bind_dmabuf(netdev, NULL, dma_dev, DMA_FROM_DEVICE,
-					 dmabuf_fd, priv, info->extack);
+					 dmabuf_fd, niov_shift, priv,
+					 NETLINK_CB(skb).sk, info->extack);
 	if (IS_ERR(binding)) {
 		err = PTR_ERR(binding);
 		goto err_rxq_bitmap;
@@ -1093,7 +1125,9 @@ int netdev_nl_bind_rx_doit(struct sk_buff *skb, struct genl_info *info)
 			goto err_unbind;
 	}
 
-	nla_put_u32(rsp, NETDEV_A_DMABUF_ID, binding->id);
+	/* rsp was allocated large enough */
+	WARN_ON_ONCE(nla_put_u32(rsp, NETDEV_A_DMABUF_ID, binding->id));
+
 	genlmsg_end(rsp, hdr);
 
 	err = genlmsg_reply(rsp, info);
@@ -1152,6 +1186,12 @@ netdev_find_netmem_tx_dev(struct net_device *dev)
 	return NULL;
 }
 
+/* Note: NETDEV_CMD_BIND_TX is intentionally unprivileged (no
+ * GENL_ADMIN_PERM / GENL_UNS_ADMIN_PERM). Unlike bind-rx, which configures
+ * shared NIC RX queues, bind-tx only DMA-maps the caller's dmabuf so they can
+ * transmit from it on their own sockets without affecting other traffic or
+ * device state.
+ */
 int netdev_nl_bind_tx_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net_devmem_dmabuf_binding *binding;
@@ -1221,13 +1261,16 @@ int netdev_nl_bind_tx_doit(struct sk_buff *skb, struct genl_info *info)
 	binding = net_devmem_bind_dmabuf(bind_dev,
 					 bind_dev != netdev ? netdev : NULL,
 					 dma_dev, DMA_TO_DEVICE, dmabuf_fd,
-					 priv, info->extack);
+					 PAGE_SHIFT, priv, NETLINK_CB(skb).sk,
+					 info->extack);
 	if (IS_ERR(binding)) {
 		err = PTR_ERR(binding);
 		goto err_unlock_bind_dev;
 	}
 
-	nla_put_u32(rsp, NETDEV_A_DMABUF_ID, binding->id);
+	/* rsp was allocated large enough */
+	WARN_ON_ONCE(nla_put_u32(rsp, NETDEV_A_DMABUF_ID, binding->id));
+
 	genlmsg_end(rsp, hdr);
 
 	if (bind_dev != netdev)
@@ -1394,7 +1437,9 @@ int netdev_nl_queue_create_doit(struct sk_buff *skb, struct genl_info *info)
 
 	netdev_rx_queue_lease(rxq, rxq_lease);
 
-	nla_put_u32(rsp, NETDEV_A_QUEUE_ID, queue_id);
+	/* rsp was allocated large enough */
+	WARN_ON_ONCE(nla_put_u32(rsp, NETDEV_A_QUEUE_ID, queue_id));
+
 	genlmsg_end(rsp, hdr);
 
 	netdev_unlock(dev_lease);
@@ -1461,6 +1506,12 @@ static int netdev_genl_netdevice_event(struct notifier_block *nb,
 		netdev_unlock_full_to_ops(netdev);
 		break;
 	case NETDEV_UNREGISTER:
+		/* netdev_wait_allrefs_any() rebroadcasts NETDEV_UNREGISTER
+		 * while waiting for the last references to be dropped; the
+		 * netns may already be torn down by then. Notify only once.
+		 */
+		if (READ_ONCE(netdev->reg_state) == NETREG_UNREGISTERED)
+			break;
 		netdev_lock(netdev);
 		netdev_genl_dev_notify(netdev, NETDEV_CMD_DEV_DEL_NTF);
 		netdev_unlock(netdev);

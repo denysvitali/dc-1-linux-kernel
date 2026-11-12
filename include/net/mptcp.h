@@ -19,10 +19,6 @@ struct seq_file;
 
 /* MPTCP sk_buff extension data */
 struct mptcp_ext {
-	union {
-		u64	data_ack;
-		u32	data_ack32;
-	};
 	u64		data_seq;
 	u32		subflow_seq;
 	u16		data_len;
@@ -223,6 +219,9 @@ int mptcp_subflow_init_cookie_req(struct request_sock *req,
 struct request_sock *mptcp_subflow_reqsk_alloc(const struct request_sock_ops *ops,
 					       struct sock *sk_listener,
 					       bool attach_listener);
+/* Caller must hold an RCU read-side lock. */
+void mptcp_subflow_reqsk_clone(struct request_sock *req,
+			       struct request_sock *new_req);
 
 __be32 mptcp_get_reset_option(const struct sk_buff *skb);
 
@@ -307,6 +306,12 @@ static inline struct request_sock *mptcp_subflow_reqsk_alloc(const struct reques
 							     bool attach_listener)
 {
 	return NULL;
+}
+
+/* Caller must hold an RCU read-side lock. */
+static inline void mptcp_subflow_reqsk_clone(struct request_sock *req,
+					     struct request_sock *new_req)
+{
 }
 
 static inline __be32 mptcp_reset_option(const struct sk_buff *skb)  { return htonl(0u); }

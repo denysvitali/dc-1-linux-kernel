@@ -260,7 +260,7 @@ static int ipc4_probes_points_info(struct sof_client_dev *cdev,
 	*num_desc = info->num_elems;
 	dev_dbg(dev, "%s: got %zu probe points", __func__, *num_desc);
 
-	*desc = kcalloc(*num_desc, sizeof(**desc), GFP_KERNEL);
+	*desc = kzalloc_objs(**desc, *num_desc);
 	if (!*desc) {
 		kfree(msg.data_ptr);
 		return -ENOMEM;
@@ -383,8 +383,7 @@ static int ipc4_probes_points_remove(struct sof_client_dev *cdev,
 	if (!mentry)
 		return -ENODEV;
 
-	probe_point_ids = kcalloc(num_buffer_id, sizeof(*probe_point_ids),
-				  GFP_KERNEL);
+	probe_point_ids = kzalloc_objs(*probe_point_ids, num_buffer_id);
 	if (!probe_point_ids)
 		return -ENOMEM;
 

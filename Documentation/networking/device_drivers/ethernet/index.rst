@@ -35,6 +35,7 @@ Contents:
    intel/idpf
    intel/igb
    intel/igbvf
+   intel/ixd
    intel/ixgbe
    intel/ixgbevf
    intel/i40e
@@ -47,6 +48,7 @@ Contents:
    meta/fbnic
    microsoft/netvsc
    mucse/rnpgbe
+   nebula-matrix/nbl
    netronome/nfp
    pensando/ionic
    pensando/ionic_rdma

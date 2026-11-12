@@ -132,8 +132,7 @@ static int pl061_irq_type(struct irq_data *d, unsigned trigger)
 	if (offset < 0 || offset >= PL061_GPIO_NR)
 		return -EINVAL;
 
-	if ((trigger & (IRQ_TYPE_LEVEL_HIGH | IRQ_TYPE_LEVEL_LOW)) &&
-	    (trigger & (IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING)))
+	if ((trigger & IRQ_TYPE_LEVEL_MASK) && (trigger & IRQ_TYPE_EDGE_BOTH))
 	{
 		dev_err(gc->parent,
 			"trying to configure line %d for both level and edge "
@@ -149,7 +148,7 @@ static int pl061_irq_type(struct irq_data *d, unsigned trigger)
 	gpiois = readb(pl061->base + GPIOIS);
 	gpioibe = readb(pl061->base + GPIOIBE);
 
-	if (trigger & (IRQ_TYPE_LEVEL_HIGH | IRQ_TYPE_LEVEL_LOW)) {
+	if (trigger & IRQ_TYPE_LEVEL_MASK) {
 		bool polarity = trigger & IRQ_TYPE_LEVEL_HIGH;
 
 		/* Disable edge detection */
@@ -310,7 +309,7 @@ static int pl061_probe(struct amba_device *adev, const struct amba_id *id)
 	struct gpio_irq_chip *girq;
 	int ret, irq;
 
-	pl061 = devm_kzalloc(dev, sizeof(*pl061), GFP_KERNEL);
+	pl061 = devm_kzalloc_obj(dev, *pl061);
 	if (pl061 == NULL)
 		return -ENOMEM;
 
@@ -345,8 +344,7 @@ static int pl061_probe(struct amba_device *adev, const struct amba_id *id)
 	gpio_irq_chip_set_chip(girq, &pl061_irq_chip);
 	girq->parent_handler = pl061_irq_handler;
 	girq->num_parents = 1;
-	girq->parents = devm_kcalloc(dev, 1, sizeof(*girq->parents),
-				     GFP_KERNEL);
+	girq->parents = devm_kzalloc_objs(dev, *girq->parents, 1);
 	if (!girq->parents)
 		return -ENOMEM;
 	girq->parents[0] = irq;

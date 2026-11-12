@@ -17,7 +17,7 @@
 #define SYNTHVID_VER_GET_MAJOR(ver) (ver & 0x0000ffff)
 #define SYNTHVID_VER_GET_MINOR(ver) ((ver & 0xffff0000) >> 16)
 
-/* Support for VERSION_WIN7 is removed. #define is retained for reference. */
+/* Support for WIN7 and WIN8 is removed. #define's retained for reference. */
 #define SYNTHVID_VERSION_WIN7 SYNTHVID_VERSION(3, 0)
 #define SYNTHVID_VERSION_WIN8 SYNTHVID_VERSION(3, 2)
 #define SYNTHVID_VERSION_WIN10 SYNTHVID_VERSION(3, 5)
@@ -181,20 +181,10 @@ struct synthvid_msg {
 	};
 } __packed;
 
-static inline bool hyperv_version_ge(u32 ver1, u32 ver2)
-{
-	if (SYNTHVID_VER_GET_MAJOR(ver1) > SYNTHVID_VER_GET_MAJOR(ver2) ||
-	    (SYNTHVID_VER_GET_MAJOR(ver1) == SYNTHVID_VER_GET_MAJOR(ver2) &&
-	     SYNTHVID_VER_GET_MINOR(ver1) >= SYNTHVID_VER_GET_MINOR(ver2)))
-		return true;
-
-	return false;
-}
-
-static inline int hyperv_sendpacket(struct hv_device *hdev, struct synthvid_msg *msg)
+static inline int hv_drm_sendpacket(struct hv_device *hdev, struct synthvid_msg *msg)
 {
 	static atomic64_t request_id = ATOMIC64_INIT(0);
-	struct hyperv_drm_device *hv = hv_get_drvdata(hdev);
+	struct hv_drm_device *hv = hv_get_drvdata(hdev);
 	int ret;
 
 	msg->pipe_hdr.type = PIPE_MSG_DATA;
@@ -211,9 +201,9 @@ static inline int hyperv_sendpacket(struct hv_device *hdev, struct synthvid_msg 
 	return ret;
 }
 
-static int hyperv_negotiate_version(struct hv_device *hdev, u32 ver)
+static int hv_drm_negotiate_version(struct hv_device *hdev, u32 ver)
 {
-	struct hyperv_drm_device *hv = hv_get_drvdata(hdev);
+	struct hv_drm_device *hv = hv_get_drvdata(hdev);
 	struct synthvid_msg *msg = (struct synthvid_msg *)hv->init_buf;
 	struct drm_device *dev = &hv->dev;
 	unsigned long t;
@@ -223,7 +213,7 @@ static int hyperv_negotiate_version(struct hv_device *hdev, u32 ver)
 	msg->vid_hdr.size = sizeof(struct synthvid_msg_hdr) +
 		sizeof(struct synthvid_version_req);
 	msg->ver_req.version = ver;
-	hyperv_sendpacket(hdev, msg);
+	hv_drm_sendpacket(hdev, msg);
 
 	t = wait_for_completion_timeout(&hv->wait, VMBUS_VSP_TIMEOUT);
 	if (!t) {
@@ -236,16 +226,15 @@ static int hyperv_negotiate_version(struct hv_device *hdev, u32 ver)
 		return -ENODEV;
 	}
 
-	hv->synthvid_version = ver;
 	drm_info(dev, "Synthvid Version major %d, minor %d\n",
 		 SYNTHVID_VER_GET_MAJOR(ver), SYNTHVID_VER_GET_MINOR(ver));
 
 	return 0;
 }
 
-int hyperv_update_vram_location(struct hv_device *hdev, phys_addr_t vram_pp)
+int hv_drm_update_vram_location(struct hv_device *hdev, phys_addr_t vram_pp)
 {
-	struct hyperv_drm_device *hv = hv_get_drvdata(hdev);
+	struct hv_drm_device *hv = hv_get_drvdata(hdev);
 	struct synthvid_msg *msg = (struct synthvid_msg *)hv->init_buf;
 	struct drm_device *dev = &hv->dev;
 	unsigned long t;
@@ -257,7 +246,7 @@ int hyperv_update_vram_location(struct hv_device *hdev, phys_addr_t vram_pp)
 	msg->vram.user_ctx = vram_pp;
 	msg->vram.vram_gpa = vram_pp;
 	msg->vram.is_vram_gpa_specified = 1;
-	hyperv_sendpacket(hdev, msg);
+	hv_drm_sendpacket(hdev, msg);
 
 	t = wait_for_completion_timeout(&hv->wait, VMBUS_VSP_TIMEOUT);
 	if (!t) {
@@ -272,7 +261,7 @@ int hyperv_update_vram_location(struct hv_device *hdev, phys_addr_t vram_pp)
 	return 0;
 }
 
-int hyperv_update_situation(struct hv_device *hdev, u8 active, u32 bpp,
+int hv_drm_update_situation(struct hv_device *hdev, u8 active, u32 bpp,
 			    u32 w, u32 h, u32 pitch)
 {
 	struct synthvid_msg msg;
@@ -292,7 +281,7 @@ int hyperv_update_situation(struct hv_device *hdev, u8 active, u32 bpp,
 	msg.situ.video_output[0].height_pixels = h;
 	msg.situ.video_output[0].pitch_bytes = pitch;
 
-	hyperv_sendpacket(hdev, &msg);
+	hv_drm_sendpacket(hdev, &msg);
 
 	return 0;
 }
@@ -306,11 +295,11 @@ int hyperv_update_situation(struct hv_device *hdev, u8 active, u32 bpp,
  * the msg.ptr_shape.data. Note: setting msg.ptr_pos.is_visible to 0 doesn't
  * work in tests.
  *
- * The hyperv_hide_hw_ptr() is also called in the handler of the
+ * The hv_drm_hide_hw_ptr() is also called in the handler of the
  * SYNTHVID_FEATURE_CHANGE event, otherwise the host still draws an extra
  * unwanted mouse pointer after the VM Connection window is closed and reopened.
  */
-int hyperv_hide_hw_ptr(struct hv_device *hdev)
+int hv_drm_hide_hw_ptr(struct hv_device *hdev)
 {
 	struct synthvid_msg msg;
 
@@ -322,7 +311,7 @@ int hyperv_hide_hw_ptr(struct hv_device *hdev)
 	msg.ptr_pos.video_output = 0;
 	msg.ptr_pos.image_x = 0;
 	msg.ptr_pos.image_y = 0;
-	hyperv_sendpacket(hdev, &msg);
+	hv_drm_sendpacket(hdev, &msg);
 
 	memset(&msg, 0, sizeof(struct synthvid_msg));
 	msg.vid_hdr.type = SYNTHVID_POINTER_SHAPE;
@@ -338,14 +327,14 @@ int hyperv_hide_hw_ptr(struct hv_device *hdev)
 	msg.ptr_shape.data[1] = 1;
 	msg.ptr_shape.data[2] = 1;
 	msg.ptr_shape.data[3] = 1;
-	hyperv_sendpacket(hdev, &msg);
+	hv_drm_sendpacket(hdev, &msg);
 
 	return 0;
 }
 
-int hyperv_update_dirt(struct hv_device *hdev, struct drm_rect *rect)
+int hv_drm_update_dirt(struct hv_device *hdev, struct drm_rect *rect)
 {
-	struct hyperv_drm_device *hv = hv_get_drvdata(hdev);
+	struct hv_drm_device *hv = hv_get_drvdata(hdev);
 	struct synthvid_msg msg;
 
 	if (!hv->dirt_needed)
@@ -363,14 +352,14 @@ int hyperv_update_dirt(struct hv_device *hdev, struct drm_rect *rect)
 	msg.dirt.rect[0].x2 = rect->x2;
 	msg.dirt.rect[0].y2 = rect->y2;
 
-	hyperv_sendpacket(hdev, &msg);
+	hv_drm_sendpacket(hdev, &msg);
 
 	return 0;
 }
 
-static int hyperv_get_supported_resolution(struct hv_device *hdev)
+static int hv_drm_get_supported_resolution(struct hv_device *hdev)
 {
-	struct hyperv_drm_device *hv = hv_get_drvdata(hdev);
+	struct hv_drm_device *hv = hv_get_drvdata(hdev);
 	struct synthvid_msg *msg = (struct synthvid_msg *)hv->init_buf;
 	struct drm_device *dev = &hv->dev;
 	unsigned long t;
@@ -383,7 +372,7 @@ static int hyperv_get_supported_resolution(struct hv_device *hdev)
 		sizeof(struct synthvid_supported_resolution_req);
 	msg->resolution_req.maximum_resolution_count =
 		SYNTHVID_MAX_RESOLUTION_COUNT;
-	hyperv_sendpacket(hdev, msg);
+	hv_drm_sendpacket(hdev, msg);
 
 	t = wait_for_completion_timeout(&hv->wait, VMBUS_VSP_TIMEOUT);
 	if (!t) {
@@ -420,9 +409,9 @@ static int hyperv_get_supported_resolution(struct hv_device *hdev)
 	return 0;
 }
 
-static void hyperv_receive_sub(struct hv_device *hdev, u32 bytes_recvd)
+static void hv_drm_receive_sub(struct hv_device *hdev, u32 bytes_recvd)
 {
-	struct hyperv_drm_device *hv = hv_get_drvdata(hdev);
+	struct hv_drm_device *hv = hv_get_drvdata(hdev);
 	struct synthvid_msg *msg;
 	size_t hdr_size;
 	size_t need;
@@ -486,7 +475,7 @@ static void hyperv_receive_sub(struct hv_device *hdev, u32 bytes_recvd)
 		}
 		hv->dirt_needed = msg->feature_chg.is_dirt_needed;
 		if (hv->dirt_needed)
-			hyperv_hide_hw_ptr(hv->hdev);
+			hv_drm_hide_hw_ptr(hv->hdev);
 		return;
 	default:
 		return;
@@ -508,10 +497,10 @@ static void hyperv_receive_sub(struct hv_device *hdev, u32 bytes_recvd)
 	complete(&hv->wait);
 }
 
-static void hyperv_receive(void *ctx)
+static void hv_drm_receive(void *ctx)
 {
 	struct hv_device *hdev = ctx;
-	struct hyperv_drm_device *hv = hv_get_drvdata(hdev);
+	struct hv_drm_device *hv = hv_get_drvdata(hdev);
 	struct synthvid_msg *recv_buf;
 	u32 bytes_recvd;
 	u64 req_id;
@@ -539,41 +528,30 @@ static void hyperv_receive(void *ctx)
 					    ret, bytes_recvd);
 		} else if (bytes_recvd > 0 &&
 			   recv_buf->pipe_hdr.type == PIPE_MSG_DATA) {
-			hyperv_receive_sub(hdev, bytes_recvd);
+			hv_drm_receive_sub(hdev, bytes_recvd);
 		}
 	} while (bytes_recvd > 0 && ret == 0);
 }
 
-int hyperv_connect_vsp(struct hv_device *hdev)
+int hv_drm_connect_vsp(struct hv_device *hdev)
 {
-	struct hyperv_drm_device *hv = hv_get_drvdata(hdev);
+	struct hv_drm_device *hv = hv_get_drvdata(hdev);
 	struct drm_device *dev = &hv->dev;
 	int ret;
 
 	ret = vmbus_open(hdev->channel, VMBUS_RING_BUFSIZE, VMBUS_RING_BUFSIZE,
-			 NULL, 0, hyperv_receive, hdev);
+			 NULL, 0, hv_drm_receive, hdev);
 	if (ret) {
 		drm_err(dev, "Unable to open vmbus channel\n");
 		return ret;
 	}
 
-	/* Negotiate the protocol version with host */
-	switch (vmbus_proto_version) {
-	case VERSION_WIN10:
-	case VERSION_WIN10_V5:
-		ret = hyperv_negotiate_version(hdev, SYNTHVID_VERSION_WIN10);
-		if (!ret)
-			break;
-		fallthrough;
-	case VERSION_WIN8:
-	case VERSION_WIN8_1:
-		ret = hyperv_negotiate_version(hdev, SYNTHVID_VERSION_WIN8);
-		break;
-	default:
-		ret = hyperv_negotiate_version(hdev, SYNTHVID_VERSION_WIN10);
-		break;
-	}
-
+	/*
+	 * Negotiate the protocol version with host. Since support for hosts
+	 * older than WIN10 has been removed from Linux, only negotiate the
+	 * WIN10 version.
+	 */
+	ret = hv_drm_negotiate_version(hdev, SYNTHVID_VERSION_WIN10);
 	if (ret) {
 		drm_err(dev, "Synthetic video device version not accepted %d\n", ret);
 		goto error;
@@ -581,11 +559,9 @@ int hyperv_connect_vsp(struct hv_device *hdev)
 
 	hv->screen_depth = SYNTHVID_DEPTH_WIN8;
 
-	if (hyperv_version_ge(hv->synthvid_version, SYNTHVID_VERSION_WIN10)) {
-		ret = hyperv_get_supported_resolution(hdev);
-		if (ret)
-			drm_err(dev, "Failed to get supported resolution from host, use default\n");
-	}
+	ret = hv_drm_get_supported_resolution(hdev);
+	if (ret)
+		drm_err(dev, "Failed to get supported resolution from host, use default\n");
 
 	if (!hv->screen_width_max) {
 		hv->screen_width_max = SYNTHVID_WIDTH_WIN8;

@@ -11,6 +11,7 @@
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/clk.h>
+#include <linux/platform_device.h>
 #include <asm/machdep.h>
 #include <asm/coldfire.h>
 #include <asm/mcfsim.h>
@@ -160,6 +161,7 @@ static struct clk * const enable_clks[] __initconst = {
 	&__clk_0_33, /* pit.1 */
 	&__clk_0_36, /* eport */
 	&__clk_0_48, /* pll */
+	&__clk_0_49, /* rng */
 	&__clk_0_51, /* esdhc */
 
 	&__clk_1_36, /* CCM/reset module/Power management */
@@ -182,7 +184,6 @@ static struct clk * const disable_clks[] __initconst = {
 	&__clk_0_44, /* usb otg */
 	&__clk_0_45, /* usb host */
 	&__clk_0_47, /* ssi.0 */
-	&__clk_0_49, /* rng */
 	&__clk_0_50, /* ssi.1 */
 	&__clk_0_53, /* enet-fec */
 	&__clk_0_54, /* enet-fec */
@@ -241,6 +242,30 @@ static void __init m5441x_fec_init(void)
 {
 	mcf_write8(0x03, MCFGPIO_PAR_FEC);
 }
+
+/*
+ * Reset Controller Module status register. Exposed to userspace as
+ * /sys/devices/platform/mcf-rcm-reset/power_on_reason by the mcf-rcm-reset
+ * driver (drivers/power/reset/mcf-rcm-reset.c).
+ */
+static struct resource m5441x_rcm_resource[] = {
+	{
+		.start	= MCF_RSR,
+		.end	= MCF_RSR,
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static int __init m5441x_rcm_init(void)
+{
+	struct platform_device *pdev;
+
+	pdev = platform_device_register_simple("mcf-rcm-reset", -1,
+					       m5441x_rcm_resource,
+					       ARRAY_SIZE(m5441x_rcm_resource));
+	return PTR_ERR_OR_ZERO(pdev);
+}
+arch_initcall(m5441x_rcm_init);
 
 void __init config_BSP(char *commandp, int size)
 {

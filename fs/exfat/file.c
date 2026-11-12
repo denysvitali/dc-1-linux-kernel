@@ -16,10 +16,70 @@
 #include <linux/falloc.h>
 #include <linux/fileattr.h>
 #include <linux/iomap.h>
+#include <linux/pagemap.h>
+#include <linux/rmap.h>
 
 #include "exfat_raw.h"
 #include "exfat_fs.h"
 #include "iomap.h"
+
+/*
+ * Unlike pagecache_isize_extended(), this function updates i_size while
+ * holding the straddling folio lock, and does not skip the straddling
+ * folio when the filesystem block size is >= PAGE_SIZE or when 'from'
+ * and 'to' fall within the same filesystem block.
+ *
+ * This ensures that the folio is marked RO and the post-EOF range is
+ * zeroed before readers or writeback can observe the updated i_size.
+ */
+static void exfat_pagecache_isize_extended(struct inode *inode, loff_t from,
+					   loff_t to)
+{
+	struct folio *folio;
+
+	if (!(from & (PAGE_SIZE - 1))) {
+		i_size_write(inode, to);
+		return;
+	}
+
+	folio = filemap_lock_folio(inode->i_mapping, from >> PAGE_SHIFT);
+
+	/* Folio not cached? Nothing to do */
+	if (IS_ERR(folio)) {
+		i_size_write(inode, to);
+		return;
+	}
+
+	/*
+	 * See folio_clear_dirty_for_io() for details why folio_mark_dirty()
+	 * is needed.
+	 */
+	if (folio_mkclean(folio))
+		folio_mark_dirty(folio);
+
+	/*
+	 * Zero the post-EOF range before publishing the new size. Writeback
+	 * normally does this, but the extension would expose the tail to
+	 * readers before writeback gets a chance to zero it.
+	 */
+	if (folio_test_dirty(folio)) {
+		loff_t offset, end;
+
+		offset = from - folio_pos(folio);
+		end = min_t(loff_t, to - folio_pos(folio),
+			    folio_size(folio));
+		folio_zero_segment(folio, offset, end);
+	}
+
+	/*
+	 * Publish the new size after zeroing the tail. Uptodate folios can
+	 * be read without taking the folio lock.
+	 */
+	i_size_write(inode, to);
+
+	folio_unlock(folio);
+	folio_put(folio);
+}
 
 static int exfat_cont_expand(struct inode *inode, loff_t size)
 {
@@ -30,8 +90,6 @@ static int exfat_cont_expand(struct inode *inode, loff_t size)
 	struct exfat_sb_info *sbi = EXFAT_SB(sb);
 	struct exfat_chain clu;
 	loff_t oldsize = i_size_read(inode);
-
-	truncate_pagecache(inode, oldsize);
 
 	ret = inode_newsize_ok(inode, size);
 	if (ret)
@@ -80,15 +138,12 @@ static int exfat_cont_expand(struct inode *inode, loff_t size)
 
 out:
 	inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
-	/* Expanded range not zeroed, do not update valid_size */
-	i_size_write(inode, size);
 	/*
-	 * When extending file size, call truncate_pagecache() first,
-	 * then update i_size, and call pagecache_isize_extended()
-	 * to ensures the straddling folio is properly marked RO so
-	 * page_mkwrite() is called and post-EOF area is zeroed.
+	 * When extending file size, call exfat_pagecache_isize_extended()
+	 * to update i_size and ensure the straddling folio is properly
+	 * marked RO so page_mkwrite() is called and post-EOF area is zeroed.
 	 */
-	pagecache_isize_extended(inode, oldsize, inode->i_size);
+	exfat_pagecache_isize_extended(inode, oldsize, size);
 
 	inode->i_blocks = round_up(size, sbi->cluster_size) >> 9;
 	mark_inode_dirty(inode);
@@ -142,7 +197,7 @@ error:
 	return err;
 }
 
-static bool exfat_allow_set_time(struct mnt_idmap *idmap,
+static bool exfat_allow_set_time(const struct mnt_idmap *idmap,
 				 struct exfat_sb_info *sbi, struct inode *inode)
 {
 	mode_t allow_utime = sbi->options.allow_utime;
@@ -246,8 +301,10 @@ int __exfat_truncate(struct inode *inode)
 		ei->start_clu = EXFAT_EOF_CLUSTER;
 	}
 
-	if (i_size_read(inode) < ei->valid_size)
-		ei->valid_size = ei->zeroed_size = i_size_read(inode);
+	if (i_size_read(inode) < exfat_get_valid_size(ei)) {
+		exfat_set_valid_size(ei, i_size_read(inode));
+		exfat_set_zeroed_size(ei, i_size_read(inode));
+	}
 
 	if (ei->type == TYPE_FILE)
 		ei->attr |= EXFAT_ATTR_ARCHIVE;
@@ -318,7 +375,7 @@ write_size:
 	mutex_unlock(&sbi->s_lock);
 }
 
-int exfat_getattr(struct mnt_idmap *idmap, const struct path *path,
+int exfat_getattr(const struct mnt_idmap *idmap, const struct path *path,
 		  struct kstat *stat, unsigned int request_mask,
 		  unsigned int query_flags)
 {
@@ -346,7 +403,7 @@ int exfat_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 	return 0;
 }
 
-int exfat_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+int exfat_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		  struct iattr *attr)
 {
 	struct exfat_sb_info *sbi = EXFAT_SB(dentry->d_sb);
@@ -412,7 +469,7 @@ int exfat_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		 * about to be freed.
 		 */
 		inode_dio_wait(inode);
-		down_write(&EXFAT_I(inode)->truncate_lock);
+		filemap_invalidate_lock(inode->i_mapping);
 		truncate_setsize(inode, attr->ia_size);
 
 		/*
@@ -420,7 +477,7 @@ int exfat_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		 * is already written by it, so mark_inode_dirty() is unneeded.
 		 */
 		exfat_truncate(inode);
-		up_write(&EXFAT_I(inode)->truncate_lock);
+		filemap_invalidate_unlock(inode->i_mapping);
 	} else
 		mark_inode_dirty(inode);
 
@@ -565,7 +622,7 @@ static int exfat_ioctl_get_volume_label(struct super_block *sb, unsigned long ar
 	if (ret < 0)
 		return ret;
 
-	ret = exfat_utf16_to_nls(sb, &uniname, label, uniname.name_len);
+	ret = exfat_utf16_to_nls(sb, &uniname, label, sizeof(label));
 	if (ret < 0)
 		return ret;
 
@@ -654,28 +711,110 @@ int exfat_file_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
 	return blkdev_issue_flush(inode->i_sb->s_bdev);
 }
 
+/*
+ * exfat_prepare_valid_range - populate and dirty folios covering [start, end)
+ *
+ * Populate missing blocks via the read path, which zero-fills data
+ * beyond the current valid_size and skips uptodate blocks.
+ * Mark entire folios dirty so the newly valid range is written back.
+ *
+ * Call before advancing valid_size.
+ */
+static int exfat_prepare_valid_range(struct inode *inode, loff_t start,
+				    loff_t end)
+{
+	struct address_space *mapping = inode->i_mapping;
+	loff_t next, pos = start;
+	struct folio *folio;
+	pgoff_t index;
+
+	if (pos >= end)
+		return 0;
+
+	while (pos < end) {
+		index = pos >> PAGE_SHIFT;
+		next = min(((loff_t)index + 1) << PAGE_SHIFT, end);
+
+		balance_dirty_pages_ratelimited(mapping);
+
+		folio = read_mapping_folio(mapping, index, NULL);
+		if (IS_ERR(folio))
+			return PTR_ERR(folio);
+
+		folio_lock(folio);
+		if (folio->mapping == mapping) {
+			folio_mark_dirty(folio);
+			pos = next;
+		}
+		folio_unlock(folio);
+		folio_put(folio);
+	}
+
+	return 0;
+}
+
 static int exfat_extend_valid_size(struct inode *inode, loff_t new_valid_size)
 {
 	struct exfat_inode_info *ei = EXFAT_I(inode);
-	loff_t old_valid_size = ei->valid_size;
+	loff_t old_valid_size = exfat_get_valid_size(ei);
 	int ret = 0;
 
 	if (old_valid_size < new_valid_size) {
+		inode_dio_wait(inode);
+
+		/* Do not re-zero blocks already covered by zeroed_size. */
+		loff_t gap_start = max(old_valid_size, exfat_get_zeroed_size(ei));
+
 		if (i_size_read(inode) < new_valid_size) {
-			i_size_write(inode, new_valid_size);
-			mark_inode_dirty(inode);
+			/*
+			 * Allocate clusters before increasing i_size. The gap
+			 * may already be zeroed, so the subsequent zeroing
+			 * can be skipped.
+			 */
+			ret = exfat_cont_expand(inode, new_valid_size);
+			if (ret)
+				return ret;
 		}
 
-		ret = iomap_zero_range(inode, old_valid_size,
-				new_valid_size - old_valid_size, NULL,
-				&exfat_write_iomap_ops, NULL, NULL);
+		/*
+		 * Revoke writable PTEs while zeroing the gap. A racing mmap
+		 * store re-faults through exfat_page_mkwrite() after valid_size
+		 * is updated.
+		 */
+		filemap_invalidate_lock(inode->i_mapping);
+		if (gap_start < new_valid_size)
+			unmap_mapping_range(inode->i_mapping, gap_start,
+					new_valid_size - gap_start, 0);
+		ret = exfat_prepare_valid_range(inode, gap_start, new_valid_size);
+		filemap_invalidate_unlock(inode->i_mapping);
 		if (ret) {
+			filemap_invalidate_lock(inode->i_mapping);
 			truncate_setsize(inode, old_valid_size);
 			exfat_truncate(inode);
+			filemap_invalidate_unlock(inode->i_mapping);
+			return ret;
 		}
+
+		exfat_set_valid_size(ei, new_valid_size);
+		exfat_advance_zeroed_size(ei,
+				round_up(new_valid_size, i_blocksize(inode)));
+		mark_inode_dirty(inode);
 	}
 
 	return ret;
+}
+
+/*
+ * The clusters for a write are allocated before the data is copied. Free the
+ * ones that a failed or short write has left beyond the end of the file.
+ */
+static void exfat_write_failed(struct inode *inode)
+{
+	inode_dio_wait(inode);
+	filemap_invalidate_lock(inode->i_mapping);
+	truncate_pagecache(inode, i_size_read(inode));
+	exfat_truncate(inode);
+	filemap_invalidate_unlock(inode->i_mapping);
 }
 
 static ssize_t exfat_fallback_buffered_write(struct kiocb *iocb,
@@ -686,6 +825,8 @@ static ssize_t exfat_fallback_buffered_write(struct kiocb *iocb,
 	int ret;
 
 	iocb->ki_flags &= ~IOCB_DIRECT;
+
+	inode_dio_wait(file_inode(iocb->ki_filp));
 
 	written = iomap_file_buffered_write(iocb, from, &exfat_write_iomap_ops,
 			NULL, NULL);
@@ -734,19 +875,13 @@ static ssize_t exfat_file_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file_inode(file);
 	struct exfat_inode_info *ei = EXFAT_I(inode);
-	loff_t pos = iocb->ki_pos;
-	loff_t valid_size;
+	loff_t pos, valid_size, end;
 	int err;
 
 	if (unlikely(exfat_forced_shutdown(inode->i_sb)))
 		return -EIO;
 
 	inode_lock(inode);
-
-	if (pos > i_size_read(inode))
-		truncate_pagecache(inode, i_size_read(inode));
-
-	valid_size = ei->valid_size;
 
 	ret = generic_write_checks(iocb, iter);
 	if (ret <= 0)
@@ -758,6 +893,12 @@ static ssize_t exfat_file_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 		goto unlock;
 	}
 
+	pos = iocb->ki_pos;
+	end = pos + iov_iter_count(iter);
+	if (pos > i_size_read(inode))
+		truncate_pagecache(inode, i_size_read(inode));
+
+	valid_size = exfat_get_valid_size(ei);
 	if (pos > valid_size) {
 		ret = exfat_extend_valid_size(inode, pos);
 		if (ret < 0 && ret != -ENOSPC) {
@@ -767,20 +908,27 @@ static ssize_t exfat_file_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 		}
 		if (ret < 0)
 			goto unlock;
+
+		pos = valid_size;
 	}
 
-	if (iocb->ki_flags & IOCB_DIRECT)
+	if (iocb->ki_flags & IOCB_DIRECT) {
 		ret = exfat_dio_write_iter(iocb, iter);
-	else
+	} else {
+		/*
+		 * Prevent concurrent direct I/O and buffered I/O to the same file
+		 * range. Wait for in-flight DIO to finish before dirtying pages.
+		 */
+		inode_dio_wait(inode);
 		ret = iomap_file_buffered_write(iocb, iter,
 				&exfat_write_iomap_ops, NULL, NULL);
+	}
+	if (ret != -EIOCBQUEUED && end > i_size_read(inode))
+		exfat_write_failed(inode);
 	if (ret < 0)
 		goto unlock;
 
 	inode_unlock(inode);
-
-	if (pos > valid_size)
-		pos = valid_size;
 
 	if (iocb->ki_pos > pos) {
 		ssize_t err = generic_write_sync(iocb, iocb->ki_pos - pos);
@@ -825,40 +973,42 @@ static vm_fault_t exfat_page_mkwrite(struct vm_fault *vmf)
 	struct inode *inode = file_inode(vmf->vma->vm_file);
 	struct exfat_inode_info *ei = EXFAT_I(inode);
 	vm_fault_t ret;
-	loff_t new_valid_size, mmap_valid_size;
+	loff_t new_valid_size, mmap_valid_size, fault_page_start;
 
 	if (!inode_trylock(inode))
 		return VM_FAULT_RETRY;
 
 	mmap_valid_size = ((loff_t)vmf->pgoff + 1) << PAGE_SHIFT;
+	fault_page_start = ((loff_t)vmf->pgoff) << PAGE_SHIFT;
 	new_valid_size = min(mmap_valid_size, i_size_read(inode));
 
-	if (ei->valid_size < new_valid_size) {
-		if (ei->zeroed_size < mmap_valid_size) {
+	if (exfat_get_valid_size(ei) < new_valid_size) {
+		loff_t zeroed_size = exfat_get_zeroed_size(ei);
+
+		if (zeroed_size < fault_page_start) {
 			int err;
 
 			/*
-			 * Only zero the range that hasn't been zeroed yet for
-			 * this mmap write path. zeroed_size tracks the largest
-			 * page-aligned offset that has already been zeroed.
-			 *
-			 * This prevents unnecessarily zeroing out the entire
-			 * tail page on every page fault when userspace writes
-			 * data byte-by-byte through mmap (after a small
-			 * fallocate). It fixes data corruption in the tail page
-			 * while preserving the existing valid_size semantics.
+			 * Zero only the gap below the faulting page. The read
+			 * fault populated its folio and iomap_page_mkwrite()
+			 * will dirty it.
 			 */
-			err = iomap_zero_range(inode, ei->zeroed_size,
-					mmap_valid_size - ei->zeroed_size, NULL,
-					&exfat_iomap_ops, NULL, NULL);
+			err = exfat_prepare_valid_range(inode, zeroed_size,
+					fault_page_start);
 			if (err < 0) {
 				inode_unlock(inode);
 				return vmf_fs_error(err);
 			}
-			ei->zeroed_size = mmap_valid_size;
 		}
 
-		ei->valid_size = new_valid_size;
+		/*
+		 * Track zeroed_size by block, not page, because writeback stops
+		 * at i_size recording blocks wholly beyond it could skip a
+		 * later required zeroing.
+		 */
+		exfat_advance_zeroed_size(ei,
+				round_up(new_valid_size, i_blocksize(inode)));
+		exfat_set_valid_size(ei, new_valid_size);
 		mark_inode_dirty(inode);
 	}
 
@@ -866,7 +1016,7 @@ static vm_fault_t exfat_page_mkwrite(struct vm_fault *vmf)
 	file_update_time(vmf->vma->vm_file);
 
 	filemap_invalidate_lock_shared(inode->i_mapping);
-	ret = iomap_page_mkwrite(vmf, &exfat_write_iomap_ops, NULL);
+	ret = iomap_page_mkwrite(vmf, &exfat_iomap_ops, NULL);
 	filemap_invalidate_unlock_shared(inode->i_mapping);
 	sb_end_pagefault(inode->i_sb);
 	inode_unlock(inode);
@@ -876,7 +1026,6 @@ static vm_fault_t exfat_page_mkwrite(struct vm_fault *vmf)
 
 static const struct vm_operations_struct exfat_file_vm_ops = {
 	.fault		= filemap_fault,
-	.map_pages	= filemap_map_pages,
 	.page_mkwrite	= exfat_page_mkwrite,
 };
 
@@ -886,21 +1035,6 @@ static int exfat_file_mmap_prepare(struct vm_area_desc *desc)
 
 	if (unlikely(exfat_forced_shutdown(file_inode(desc->file)->i_sb)))
 		return -EIO;
-
-	if (vma_desc_test_all(desc, VMA_SHARED_BIT, VMA_MAYWRITE_BIT)) {
-		struct inode *inode = file_inode(file);
-		loff_t from, to;
-		int err;
-
-		from = ((loff_t)desc->pgoff << PAGE_SHIFT);
-		to = min_t(loff_t, i_size_read(inode),
-				from + vma_desc_size(desc));
-		if (EXFAT_I(inode)->valid_size < to) {
-			err = exfat_extend_valid_size(inode, to);
-			if (err)
-				return err;
-		}
-	}
 
 	file_accessed(file);
 	desc->vm_ops = &exfat_file_vm_ops;

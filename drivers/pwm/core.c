@@ -2389,6 +2389,7 @@ static const struct file_operations pwm_cdev_fileops = {
 	.release = pwm_cdev_release,
 	.owner = THIS_MODULE,
 	.unlocked_ioctl = pwm_cdev_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
 };
 
 static dev_t pwm_devt;
@@ -2647,14 +2648,14 @@ static void pwm_dbg_show(struct pwm_chip *chip, struct seq_file *s)
 		if (test_bit(PWMF_REQUESTED, &pwm->flags))
 			seq_puts(s, " requested");
 
-		seq_puts(s, "\n");
+		seq_putc(s, '\n');
 
 		seq_printf(s, "  requested configuration: %3sabled, %llu/%llu ns, %s polarity",
 			   state.enabled ? "en" : "dis", state.duty_cycle, state.period,
 			   state.polarity ? "inverse" : "normal");
 		if (state.usage_power)
 			seq_puts(s, ", usage_power");
-		seq_puts(s, "\n");
+		seq_putc(s, '\n');
 
 		if (pwmchip_supports_waveform(chip)) {
 			struct pwm_waveform wf;
@@ -2677,7 +2678,7 @@ static void pwm_dbg_show(struct pwm_chip *chip, struct seq_file *s)
 				seq_printf(s, "  actual configuration: read out error: %pe", ERR_PTR(err));
 		}
 
-		seq_puts(s, "\n");
+		seq_putc(s, '\n');
 	}
 }
 

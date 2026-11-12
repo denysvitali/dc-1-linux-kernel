@@ -1290,7 +1290,7 @@ static int alvium_set_ctrl_auto_exposure(struct alvium_dev *alvium, bool on)
 	struct device *dev = &alvium->i2c_client->dev;
 	int ret;
 
-	ret = alvium_write_hshake(alvium, REG_BCRM_WHITE_BALANCE_AUTO_RW,
+	ret = alvium_write_hshake(alvium, REG_BCRM_EXPOSURE_AUTO_RW,
 				  on ? 0x02 : 0x00);
 	if (ret) {
 		dev_err(dev, "Fail to set autoexposure reg\n");
@@ -1887,6 +1887,7 @@ static int alvium_init_state(struct v4l2_subdev *sd,
 }
 
 static int alvium_set_fmt(struct v4l2_subdev *sd,
+			  const struct v4l2_subdev_client_info *ci,
 			  struct v4l2_subdev_state *sd_state,
 			  struct v4l2_subdev_format *format)
 {
@@ -1922,6 +1923,7 @@ static int alvium_set_fmt(struct v4l2_subdev *sd,
 }
 
 static int alvium_set_selection(struct v4l2_subdev *sd,
+				const struct v4l2_subdev_client_info *ci,
 				struct v4l2_subdev_state *sd_state,
 				struct v4l2_subdev_selection *sel)
 {
@@ -1957,6 +1959,7 @@ static int alvium_set_selection(struct v4l2_subdev *sd,
 }
 
 static int alvium_get_selection(struct v4l2_subdev *sd,
+				const struct v4l2_subdev_client_info *ci,
 				struct v4l2_subdev_state *sd_state,
 				struct v4l2_subdev_selection *sel)
 {
@@ -2425,7 +2428,7 @@ static int alvium_probe(struct i2c_client *client)
 	struct alvium_dev *alvium;
 	int ret;
 
-	alvium = devm_kzalloc(dev, sizeof(*alvium), GFP_KERNEL);
+	alvium = devm_kzalloc_obj(dev, *alvium);
 	if (!alvium)
 		return -ENOMEM;
 
@@ -2523,6 +2526,7 @@ static void alvium_remove(struct i2c_client *client)
 	 * make sure to turn power off manually.
 	 */
 	pm_runtime_disable(dev);
+	pm_runtime_put_noidle(dev);
 	if (!pm_runtime_status_suspended(dev))
 		alvium_set_power(alvium, false);
 	pm_runtime_set_suspended(dev);

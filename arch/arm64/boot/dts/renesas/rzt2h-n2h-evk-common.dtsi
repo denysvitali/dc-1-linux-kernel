@@ -20,6 +20,7 @@
 		i2c1 = &i2c1;
 		mmc0 = &sdhi0;
 		mmc1 = &sdhi1;
+		rtc0 = &rtc0;
 		serial0 = &sci0;
 		spi0 = &xspi0;
 		spi1 = &xspi1;
@@ -27,6 +28,17 @@
 
 	chosen {
 		stdout-path = "serial0:115200n8";
+	};
+
+	memory@c8000000 {
+		device_type = "memory";
+		/* first 128MiB is reserved for secure area. */
+		reg = <0x0 0xc8000000 0x0 0x38000000>;
+	};
+
+	memory@240000000 {
+		device_type = "memory";
+		reg = <0x2 0x40000000 0x1 0xc0000000>;
 	};
 
 	reg_1p8v: regulator-1p8v {
@@ -257,6 +269,9 @@
 	sci0_pins: sci0-pins {
 		pinmux = <RZT2H_PORT_PINMUX(27, 4, 0x14)>,
 			 <RZT2H_PORT_PINMUX(27, 5, 0x14)>;
+		drive-strength-microamp = <9000>;
+		slew-rate = <1>;
+		input-schmitt-disable;
 	};
 
 #if SD0_EMMC
@@ -500,6 +515,10 @@
 	};
 };
 
+&rtc0 {
+	status = "okay";
+};
+
 &sci0 {
 	pinctrl-0 = <&sci0_pins>;
 	pinctrl-names = "default";
@@ -633,11 +652,13 @@
 			partition@0 {
 				label = "bl2-1";
 				reg = <0x00000000 0x00060000>;
+				read-only;
 			};
 
 			partition@60000 {
 				label = "fip-1";
 				reg = <0x00060000 0x007a0000>;
+				read-only;
 			};
 
 			partition@800000 {

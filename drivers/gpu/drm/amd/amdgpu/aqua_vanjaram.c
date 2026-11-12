@@ -30,6 +30,7 @@
 #include "gfxhub_v1_2.h"
 #include "sdma_v4_4_2.h"
 #include "amdgpu_ip.h"
+#include "amdgpu_sdma.h"
 
 void aqua_vanjaram_doorbell_index_init(struct amdgpu_device *adev)
 {
@@ -273,8 +274,10 @@ static int aqua_vanjaram_get_xcp_res_info(struct amdgpu_xcp_mgr *xcp_mgr,
 	xcp_cfg->num_res = ARRAY_SIZE(max_res);
 
 	for (i = 0; i < xcp_cfg->num_res; i++) {
-		res_lt_xcp = max_res[i] < num_xcp;
 		xcp_cfg->xcp_res[i].id = i;
+		if (!max_res[i])
+			continue;
+		res_lt_xcp = max_res[i] < num_xcp;
 		xcp_cfg->xcp_res[i].num_inst =
 			res_lt_xcp ? 1 : max_res[i] / num_xcp;
 		xcp_cfg->xcp_res[i].num_inst =
@@ -389,15 +392,9 @@ static int aqua_vanjaram_switch_partition_mode(struct amdgpu_xcp_mgr *xcp_mgr,
 		!adev->in_suspend)
 		flags |= AMDGPU_XCP_OPS_KFD;
 
-	if (flags & AMDGPU_XCP_OPS_KFD) {
-		ret = amdgpu_amdkfd_check_and_lock_kfd(adev);
-		if (ret)
-			goto out;
-	}
-
 	ret = amdgpu_xcp_pre_partition_switch(xcp_mgr, flags);
 	if (ret)
-		goto unlock;
+		goto out;
 
 	num_xcc_per_xcp = __aqua_vanjaram_get_xcc_per_xcp(xcp_mgr, mode);
 	if (adev->gfx.funcs->switch_partition_mode)
@@ -411,9 +408,6 @@ static int aqua_vanjaram_switch_partition_mode(struct amdgpu_xcp_mgr *xcp_mgr,
 	ret = amdgpu_xcp_post_partition_switch(xcp_mgr, flags);
 	if (!ret)
 		__aqua_vanjaram_update_available_partition_mode(xcp_mgr);
-unlock:
-	if (flags & AMDGPU_XCP_OPS_KFD)
-		amdgpu_amdkfd_unlock_kfd(adev);
 out:
 	return ret;
 }
@@ -511,6 +505,34 @@ static int aqua_vanjaram_xcp_mgr_init(struct amdgpu_device *adev)
 	return ret;
 }
 
+static void amdgpu_populate_ip_map(struct amdgpu_device *adev,
+				   enum amd_hw_ip_block_type ip_block,
+				   uint32_t inst_mask)
+{
+	int l = 0, i;
+
+	while (inst_mask) {
+		i = ffs(inst_mask) - 1;
+		adev->ip_map.dev_inst[ip_block][l++] = i;
+		inst_mask &= ~(1 << i);
+	}
+	for (; l < HWIP_MAX_INSTANCE; l++)
+		adev->ip_map.dev_inst[ip_block][l] = -1;
+}
+
+static void amdgpu_ip_map_aqua_vanjaram_override(struct amdgpu_device *adev)
+{
+	u32 ip_map[][2] = {
+		{ GC_HWIP, adev->gfx.xcc_mask },
+		{ SDMA0_HWIP, adev->sdma.sdma_mask },
+		{ VCN_HWIP, adev->vcn.inst_mask },
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ip_map); ++i)
+		amdgpu_populate_ip_map(adev, ip_map[i][0], ip_map[i][1]);
+}
+
 int aqua_vanjaram_init_soc_config(struct amdgpu_device *adev)
 {
 	u32 mask, avail_inst, inst_mask = adev->sdma.sdma_mask;
@@ -545,7 +567,7 @@ int aqua_vanjaram_init_soc_config(struct amdgpu_device *adev)
 	if (ret)
 		return ret;
 
-	amdgpu_ip_map_init(adev);
+	amdgpu_ip_map_aqua_vanjaram_override(adev);
 
 	return 0;
 }
@@ -589,6 +611,29 @@ static struct aqua_reg_list pcie_reg_addrs[] = {
 	{ smreg_0x1A380088, 6, DW_ADDR_INCR },
 };
 
+/*
+ * Return the GPU's internal US switch port, or NULL if it is not visible
+ * (e.g. passthrough) or the EP is parented under an unrelated bridge.
+ */
+static struct pci_dev *aqua_vanjaram_get_us_pdev(struct amdgpu_device *adev)
+{
+	struct pci_dev *ds_pdev, *us_pdev;
+
+	ds_pdev = pci_upstream_bridge(adev->pdev);
+	if (!ds_pdev || ds_pdev->vendor != PCI_VENDOR_ID_ATI ||
+	    pci_pcie_type(ds_pdev) != PCI_EXP_TYPE_DOWNSTREAM)
+		return NULL;
+
+	us_pdev = pci_upstream_bridge(ds_pdev);
+	if (!us_pdev ||
+	    (us_pdev->vendor != PCI_VENDOR_ID_ATI &&
+	     us_pdev->vendor != PCI_VENDOR_ID_AMD) ||
+	    pci_pcie_type(us_pdev) != PCI_EXP_TYPE_UPSTREAM)
+		return NULL;
+
+	return us_pdev;
+}
+
 static ssize_t aqua_vanjaram_read_pcie_state(struct amdgpu_device *adev,
 					     void *buf, size_t max_size)
 {
@@ -596,7 +641,7 @@ static ssize_t aqua_vanjaram_read_pcie_state(struct amdgpu_device *adev,
 	uint32_t start_addr, incrx, num_regs, szbuf;
 	struct amdgpu_regs_pcie_v1_0 *pcie_regs;
 	struct amdgpu_smn_reg_data *reg_data;
-	struct pci_dev *us_pdev, *ds_pdev;
+	struct pci_dev *us_pdev;
 	int aer_cap, r, n;
 
 	if (!buf || !max_size)
@@ -628,24 +673,26 @@ static ssize_t aqua_vanjaram_read_pcie_state(struct amdgpu_device *adev,
 		}
 	}
 
-	ds_pdev = pci_upstream_bridge(adev->pdev);
-	us_pdev = pci_upstream_bridge(ds_pdev);
+	us_pdev = aqua_vanjaram_get_us_pdev(adev);
+	if (us_pdev) {
+		pcie_capability_read_word(us_pdev, PCI_EXP_DEVSTA,
+					  &pcie_regs->device_status);
+		pcie_capability_read_word(us_pdev, PCI_EXP_LNKSTA,
+					  &pcie_regs->link_status);
 
-	pcie_capability_read_word(us_pdev, PCI_EXP_DEVSTA,
-				  &pcie_regs->device_status);
-	pcie_capability_read_word(us_pdev, PCI_EXP_LNKSTA,
-				  &pcie_regs->link_status);
+		aer_cap = pci_find_ext_capability(us_pdev, PCI_EXT_CAP_ID_ERR);
+		if (aer_cap) {
+			pci_read_config_dword(us_pdev,
+					      aer_cap + PCI_ERR_COR_STATUS,
+					      &pcie_regs->pcie_corr_err_status);
+			pci_read_config_dword(us_pdev,
+					      aer_cap + PCI_ERR_UNCOR_STATUS,
+					      &pcie_regs->pcie_uncorr_err_status);
+		}
 
-	aer_cap = pci_find_ext_capability(us_pdev, PCI_EXT_CAP_ID_ERR);
-	if (aer_cap) {
-		pci_read_config_dword(us_pdev, aer_cap + PCI_ERR_COR_STATUS,
-				      &pcie_regs->pcie_corr_err_status);
-		pci_read_config_dword(us_pdev, aer_cap + PCI_ERR_UNCOR_STATUS,
-				      &pcie_regs->pcie_uncorr_err_status);
+		pci_read_config_dword(us_pdev, PCI_PRIMARY_BUS,
+				      &pcie_regs->sub_bus_number_latency);
 	}
-
-	pci_read_config_dword(us_pdev, PCI_PRIMARY_BUS,
-			      &pcie_regs->sub_bus_number_latency);
 
 	pcie_reg_state->common_header.structure_size = szbuf;
 	pcie_reg_state->common_header.format_revision = 1;

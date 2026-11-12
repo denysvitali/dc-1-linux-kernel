@@ -381,11 +381,17 @@ static int rockchip_pdm_dai_probe(struct snd_soc_dai *dai)
 	return 0;
 }
 
+static const u64 rockchip_pdm_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF;
+
 static const struct snd_soc_dai_ops rockchip_pdm_dai_ops = {
-	.probe = rockchip_pdm_dai_probe,
-	.set_fmt = rockchip_pdm_set_fmt,
-	.trigger = rockchip_pdm_trigger,
-	.hw_params = rockchip_pdm_hw_params,
+	.probe				= rockchip_pdm_dai_probe,
+	.set_fmt			= rockchip_pdm_set_fmt,
+	.trigger			= rockchip_pdm_trigger,
+	.hw_params			= rockchip_pdm_hw_params,
+	.auto_selectable_formats	= &rockchip_pdm_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 #define ROCKCHIP_PDM_RATES SNDRV_PCM_RATE_8000_192000
@@ -580,7 +586,7 @@ static int rockchip_pdm_probe(struct platform_device *pdev)
 	void __iomem *regs;
 	int ret;
 
-	pdm = devm_kzalloc(&pdev->dev, sizeof(*pdm), GFP_KERNEL);
+	pdm = devm_kzalloc_obj(&pdev->dev, *pdm);
 	if (!pdm)
 		return -ENOMEM;
 
@@ -630,10 +636,8 @@ static int rockchip_pdm_probe(struct platform_device *pdev)
 					      &rockchip_pdm_component,
 					      &rockchip_pdm_dai, 1);
 
-	if (ret) {
-		dev_err(&pdev->dev, "could not register dai: %d\n", ret);
+	if (ret)
 		goto err_suspend;
-	}
 
 	rockchip_pdm_rxctrl(pdm, 0);
 
@@ -642,10 +646,8 @@ static int rockchip_pdm_probe(struct platform_device *pdev)
 		goto err_suspend;
 
 	ret = devm_snd_dmaengine_pcm_register(&pdev->dev, NULL, 0);
-	if (ret) {
-		dev_err(&pdev->dev, "could not register pcm: %d\n", ret);
+	if (ret)
 		goto err_suspend;
-	}
 
 	return 0;
 

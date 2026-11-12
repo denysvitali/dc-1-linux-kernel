@@ -225,7 +225,7 @@ static int imx91_tmu_change_mode(struct thermal_zone_device *tz, enum thermal_de
 	return 0;
 }
 
-static struct thermal_zone_device_ops tmu_tz_ops = {
+static const struct thermal_zone_device_ops tmu_tz_ops = {
 	.get_temp = imx91_tmu_get_temp,
 	.change_mode = imx91_tmu_change_mode,
 	.set_trips = imx91_tmu_set_trips,
@@ -239,7 +239,7 @@ static int imx91_tmu_probe(struct platform_device *pdev)
 	int irq, ret;
 	u32 div;
 
-	tmu = devm_kzalloc(dev, sizeof(struct imx91_tmu), GFP_KERNEL);
+	tmu = devm_kzalloc_obj(dev, struct imx91_tmu);
 	if (!tmu)
 		return -ENOMEM;
 
@@ -331,7 +331,7 @@ static int imx91_tmu_probe(struct platform_device *pdev)
 					IRQF_ONESHOT, "imx91_thermal", tmu);
 
 	if (ret < 0)
-		return dev_err_probe(dev, ret, "failed to request alarm irq\n");
+		return ret;
 
 	pm_runtime_put(dev);
 

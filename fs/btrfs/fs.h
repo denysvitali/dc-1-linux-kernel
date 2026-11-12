@@ -259,7 +259,6 @@ enum {
 	BTRFS_MOUNT_NOSSD			= (1ULL << 9),
 	BTRFS_MOUNT_DISCARD_SYNC		= (1ULL << 10),
 	BTRFS_MOUNT_FORCE_COMPRESS		= (1ULL << 11),
-	BTRFS_MOUNT_SPACE_CACHE			= (1ULL << 12),
 	BTRFS_MOUNT_CLEAR_CACHE			= (1ULL << 13),
 	BTRFS_MOUNT_USER_SUBVOL_RM_ALLOWED	= (1ULL << 14),
 	BTRFS_MOUNT_ENOSPC_DEBUG		= (1ULL << 15),
@@ -289,7 +288,8 @@ enum {
 	 BTRFS_MOUNT_IGNOREBADROOTS |		\
 	 BTRFS_MOUNT_IGNOREDATACSUMS |		\
 	 BTRFS_MOUNT_IGNOREMETACSUMS |		\
-	 BTRFS_MOUNT_IGNORESUPERFLAGS)
+	 BTRFS_MOUNT_IGNORESUPERFLAGS |		\
+	 BTRFS_MOUNT_USEBACKUPROOT)
 
 /*
  * Compat flags that we support.  If any incompat flags are set other than the
@@ -711,8 +711,9 @@ struct btrfs_fs_info {
 	struct workqueue_struct *endio_meta_workers;
 	struct workqueue_struct *rmw_workers;
 	struct btrfs_workqueue *endio_write_workers;
-	struct btrfs_workqueue *endio_freespace_worker;
 	struct btrfs_workqueue *caching_workers;
+
+	struct workqueue_struct *fixup_workers;
 	struct btrfs_workqueue *delayed_workers;
 
 	struct task_struct *transaction_kthread;
@@ -808,7 +809,7 @@ struct btrfs_fs_info {
 	struct btrfs_discard_ctl discard_ctl;
 
 	/* Is qgroup tracking in a consistent state? */
-	u64 qgroup_flags;
+	unsigned long qgroup_flags;
 
 	/* Holds configuration and tracking. Protected by qgroup_lock. */
 	struct rb_root qgroup_tree;
@@ -854,6 +855,7 @@ struct btrfs_fs_info {
 
 	/* Next backup root to be overwritten */
 	int backup_root_index;
+	int use_backup_slot;
 
 	/* Device replace state */
 	struct btrfs_dev_replace dev_replace;
@@ -888,7 +890,6 @@ struct btrfs_fs_info {
 	u32 sectorsize_bits;
 	u32 block_min_order;
 	u32 block_max_order;
-	u32 stripesize;
 	u32 writeback_bio_size;
 	u32 csum_size;
 	u32 csums_per_leaf;
@@ -1058,8 +1059,6 @@ static inline u64 btrfs_calc_metadata_size(const struct btrfs_fs_info *fs_info,
 #define BTRFS_MAX_EXTENT_ITEM_SIZE(r) ((BTRFS_LEAF_DATA_SIZE(r->fs_info) >> 4) - \
 					sizeof(struct btrfs_item))
 
-#define BTRFS_BYTES_TO_BLKS(fs_info, bytes) ((bytes) >> (fs_info)->sectorsize_bits)
-
 static inline bool btrfs_is_zoned(const struct btrfs_fs_info *fs_info)
 {
 	return IS_ENABLED(CONFIG_BLK_DEV_ZONED) && fs_info->zone_size > 0;
@@ -1159,6 +1158,15 @@ void __btrfs_clear_fs_compat_ro(struct btrfs_fs_info *fs_info, u64 flag,
 #define btrfs_test_opt(fs_info, opt)	((fs_info)->mount_opt & \
 					 BTRFS_MOUNT_##opt)
 
+static inline bool btrfs_is_full_ro(const struct btrfs_fs_info *fs_info)
+{
+	if (!sb_rdonly(fs_info->sb))
+		return false;
+	if (unlikely(fs_info->mount_opt & BTRFS_MOUNT_FULL_RO_MASK))
+		return true;
+	return false;
+}
+
 static inline bool btrfs_fs_closing(const struct btrfs_fs_info *fs_info)
 {
 	return unlikely(test_bit(BTRFS_FS_CLOSING_START, &fs_info->flags));
@@ -1190,6 +1198,16 @@ static inline void btrfs_wake_unfinished_drop(struct btrfs_fs_info *fs_info)
 {
 	clear_and_wake_up_bit(BTRFS_FS_UNFINISHED_DROPS, &fs_info->flags);
 }
+
+/*
+ * We use the folio owner_2 flag to indicate the folio has blocks that were
+ * dirtied without a space reservation and need the writepage fixup before
+ * writeback. For bs < folio_size the fixup bitmap tracks the affected
+ * blocks.
+ */
+#define folio_test_fixup_pending(folio) folio_test_owner_2(folio)
+#define folio_set_fixup_pending(folio) folio_set_owner_2(folio)
+#define folio_clear_fixup_pending(folio) folio_clear_owner_2(folio)
 
 #define BTRFS_FS_ERROR(fs_info)	(READ_ONCE((fs_info)->fs_error))
 

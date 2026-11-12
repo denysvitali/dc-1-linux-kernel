@@ -328,7 +328,6 @@ static int tas2781_read_acpi(struct tas2781_hda *tas_hda,
 {
 	struct tasdevice_priv *p = tas_hda->priv;
 	struct acpi_device *adev;
-	struct device *physdev;
 	u32 values[HDA_MAX_COMPONENTS];
 	const char *property;
 	size_t nval;
@@ -341,8 +340,11 @@ static int tas2781_read_acpi(struct tas2781_hda *tas_hda,
 	}
 
 	strscpy(p->dev_name, hid, sizeof(p->dev_name));
-	physdev = get_device(acpi_get_first_physical_node(adev));
+
+	struct device *physdev __free(put_device) = acpi_bus_get_primary_device(adev);
 	acpi_dev_put(adev);
+	if (!physdev)
+		return -ENODEV;
 
 	property = "ti,dev-index";
 	ret = device_property_count_u32(physdev, property);
@@ -379,14 +381,11 @@ static int tas2781_read_acpi(struct tas2781_hda *tas_hda,
 			goto err;
 		}
 	}
-	put_device(physdev);
 
 	return 0;
+
 err:
 	dev_err(p->dev, "read acpi error, ret: %d\n", ret);
-	put_device(physdev);
-	acpi_dev_put(adev);
-
 	return ret;
 }
 
@@ -399,11 +398,11 @@ static void tas2781_hda_playback_hook(struct device *dev, int action)
 		pm_runtime_get_sync(dev);
 		guard(mutex)(&tas_priv->codec_lock);
 		if (tas_priv->fw_state == TASDEVICE_DSP_FW_ALL_OK)
-			tasdevice_tuning_switch(tas_hda->priv, 0);
+			tasdevice_tuning_switch(tas_hda->priv, 0, false);
 	} else if (action == HDA_GEN_PCM_ACT_CLOSE) {
 		guard(mutex)(&tas_priv->codec_lock);
 		if (tas_priv->fw_state == TASDEVICE_DSP_FW_ALL_OK)
-			tasdevice_tuning_switch(tas_priv, 1);
+			tasdevice_tuning_switch(tas_priv, 1, false);
 		pm_runtime_put_autosuspend(dev);
 	}
 }
@@ -773,18 +772,18 @@ static int tas2781_hda_spi_probe(struct spi_device *spi)
 	const char *device_name;
 	int ret = 0;
 
-	tas_hda = devm_kzalloc(&spi->dev, sizeof(*tas_hda), GFP_KERNEL);
+	tas_hda = devm_kzalloc_obj(&spi->dev, *tas_hda);
 	if (!tas_hda)
 		return -ENOMEM;
 
-	hda_priv = devm_kzalloc(&spi->dev, sizeof(*hda_priv), GFP_KERNEL);
+	hda_priv = devm_kzalloc_obj(&spi->dev, *hda_priv);
 	if (!hda_priv)
 		return -ENOMEM;
 
 	tas_hda->hda_priv = hda_priv;
 	spi->max_speed_hz = TAS2781_SPI_MAX_FREQ;
 
-	tas_priv = devm_kzalloc(&spi->dev, sizeof(*tas_priv), GFP_KERNEL);
+	tas_priv = devm_kzalloc_obj(&spi->dev, *tas_priv);
 	if (!tas_priv)
 		return -ENOMEM;
 	tas_priv->dev = &spi->dev;
@@ -847,7 +846,7 @@ static int tas2781_runtime_suspend(struct device *dev)
 
 	if (tas_priv->fw_state == TASDEVICE_DSP_FW_ALL_OK
 		&& tas_priv->playback_started)
-		tasdevice_tuning_switch(tas_priv, 1);
+		tasdevice_tuning_switch(tas_priv, 1, false);
 
 	tas_priv->tasdevice[tas_priv->index].cur_book = -1;
 	tas_priv->tasdevice[tas_priv->index].cur_conf = -1;
@@ -864,7 +863,7 @@ static int tas2781_runtime_resume(struct device *dev)
 
 	if (tas_priv->fw_state == TASDEVICE_DSP_FW_ALL_OK
 		&& tas_priv->playback_started)
-		tasdevice_tuning_switch(tas_priv, 0);
+		tasdevice_tuning_switch(tas_priv, 0, false);
 
 	return 0;
 }
@@ -882,7 +881,7 @@ static int tas2781_system_suspend(struct device *dev)
 	/* Shutdown chip before system suspend */
 	if (tas_priv->fw_state == TASDEVICE_DSP_FW_ALL_OK
 		&& tas_priv->playback_started)
-		tasdevice_tuning_switch(tas_priv, 1);
+		tasdevice_tuning_switch(tas_priv, 1, false);
 
 	return 0;
 }
@@ -917,7 +916,7 @@ static int tas2781_system_resume(struct device *dev)
 		tas_priv->fw_state = TASDEVICE_DSP_FW_ALL_OK;
 
 		if (tas_priv->playback_started)
-			tasdevice_tuning_switch(tas_priv, 0);
+			tasdevice_tuning_switch(tas_priv, 0, false);
 	}
 
 	return ret;

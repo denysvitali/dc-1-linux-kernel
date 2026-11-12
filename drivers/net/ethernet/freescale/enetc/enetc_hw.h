@@ -80,6 +80,14 @@ static inline u32 enetc_vsi_set_msize(u32 size)
 #define ENETC_SIMSGSR_SET_MC(val) ((val) << 16)
 #define ENETC_SIMSGSR_GET_MC(val) ((val) >> 16)
 
+#define ENETC_PSIMSGSR		0x208
+/* n is VF index, which is less than 15 */
+#define  PSIMSGSR_MS(n)		BIT((n) + 1)
+#define  PSIMSGSR_MC		GENMASK(31, 16)
+
+#define ENETC_VSIMSGRR		0x208
+#define  VSIMSGRR_MC		GENMASK(31, 16)
+
 /* SI statistics */
 #define ENETC_SIROCT	0x300
 #define ENETC_SIRFRM	0x308
@@ -103,8 +111,26 @@ static inline u32 enetc_vsi_set_msize(u32 size)
 #define ENETC_SICAPR0	0x900
 #define ENETC_SICAPR1	0x904
 
+#define ENETC_VSIIER	0xa00
+#define  VSIIER_MRIE	BIT(9)
+
+#define ENETC_VSIIDR	0xa08
+#define  VSIIDR_MR	BIT(9)
+
 #define ENETC_PSIIER	0xa00
 #define ENETC_PSIIDR	0xa08
+
+/* VF FLR interrupt mask, n is the active number of VFs.
+ * It is available for ENETC_PSIIER and ENETC_PSIIDR registers.
+ */
+#define ENETC_VFFLR_MASK(n)	\
+	({ typeof(n) _n = (n); (_n) ? GENMASK(16 + (_n), 17) : 0; })
+
+/* VF FLR interrupt bit, n is VF index. It is available
+ * for ENETC_PSIIER and ENETC_PSIIDR registers.
+ */
+#define ENETC_VFFLR_BIT(n)	BIT(17 + (n))
+
 #define ENETC_SITXIDR	0xa18
 #define ENETC_SIRXIDR	0xa28
 #define ENETC_SIMSIVR	0xa30
@@ -180,13 +206,13 @@ enum enetc_bdr_type {TX, RX};
 #define ENETC_PMR_PSPEED_1000M	BIT(9)
 #define ENETC_PMR_PSPEED_2500M	BIT(10)
 #define ENETC_PSR		0x0004 /* RO */
-#define ENETC_PSIPMR		0x0018
-#define ENETC_PSIPMR_SET_UP(n)	BIT(n) /* n = SI index */
-#define ENETC_PSIPMR_SET_MP(n)	BIT((n) + 16)
+#define ENETC_PSIPMMR		0x0018
+#define  PSIPMMR_SI_MAC_UP(n)	BIT(n) /* n = SI index */
+#define  PSIPMMR_SI_MAC_MP(n)	BIT((n) + 16)
+
 #define ENETC_PSIPVMR		0x001c
-#define ENETC_VLAN_PROMISC_MAP_ALL	0x7
-#define ENETC_PSIPVMR_SET_VP(simap)	((simap) & 0x7)
-#define ENETC_PSIPVMR_SET_VUTA(simap)	(((simap) & 0x7) << 16)
+#define  PSIPVMR_SI_VLAN_P(n)	BIT(n) /* n = SI index */
+
 #define ENETC_PSIPMAR0(n)	(0x0100 + (n) * 0x8) /* n = SI index */
 #define ENETC_PSIPMAR1(n)	(0x0104 + (n) * 0x8)
 #define ENETC_PVCLCTR		0x0208

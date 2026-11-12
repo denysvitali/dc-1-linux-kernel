@@ -54,8 +54,6 @@ static void guest_read_aperf_mperf(void)
 		GUEST_SYNC2(rdmsr(MSR_IA32_APERF), rdmsr(MSR_IA32_MPERF));
 }
 
-#define L2_GUEST_STACK_SIZE	64
-
 static void l2_guest_code(void)
 {
 	guest_read_aperf_mperf();
@@ -64,31 +62,28 @@ static void l2_guest_code(void)
 
 static void l1_svm_code(struct svm_test_data *svm)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 	struct vmcb *vmcb = svm->vmcb;
 
-	generic_svm_setup(svm, l2_guest_code, &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	generic_svm_setup(svm, l2_guest_code);
 	run_guest(vmcb, svm->vmcb_gpa);
 }
 
 static void l1_vmx_code(struct vmx_pages *vmx)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
+	prepare_for_vmx_operation(vmx);
+	load_vmcs(vmx);
 
-	GUEST_ASSERT_EQ(prepare_for_vmx_operation(vmx), true);
-	GUEST_ASSERT_EQ(load_vmcs(vmx), true);
-
-	prepare_vmcs(vmx, NULL, &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	prepare_vmcs(vmx, NULL);
 
 	/*
 	 * Enable MSR bitmaps (the bitmap itself is allocated, zeroed, and set
 	 * in the VMCS by prepare_vmcs()), as MSR exiting mandatory on Intel.
 	 */
 	vmwrite(CPU_BASED_VM_EXEC_CONTROL,
-		vmreadz(CPU_BASED_VM_EXEC_CONTROL) | CPU_BASED_USE_MSR_BITMAPS);
+		vmread(CPU_BASED_VM_EXEC_CONTROL) | CPU_BASED_USE_MSR_BITMAPS);
 
-	GUEST_ASSERT(!vmwrite(GUEST_RIP, (u64)l2_guest_code));
-	GUEST_ASSERT(!vmlaunch());
+	vmwrite(GUEST_RIP, (u64)l2_guest_code);
+	vmlaunch();
 }
 
 static void guest_code(void *nested_test_data)

@@ -265,7 +265,7 @@ int usbio_bulk_msg(struct auxiliary_device *adev, u8 type, u8 cmd, bool last,
 	lockdep_assert_held(&usbio->bulk_mutex);
 
 	if ((obuf_len > (usbio->txbuf_len - sizeof(*bpkt))) ||
-	    (ibuf_len > (usbio->txbuf_len - sizeof(*bpkt))))
+	    (ibuf_len > (usbio->rxbuf_len - sizeof(*bpkt))))
 		return -EMSGSIZE;
 
 	if (ibuf_len)
@@ -555,7 +555,7 @@ static int usbio_probe(struct usb_interface *intf, const struct usb_device_id *i
 	struct usbio_fwver fwver;
 	int ret;
 
-	usbio = devm_kzalloc(dev, sizeof(*usbio), GFP_KERNEL);
+	usbio = devm_kzalloc_obj(dev, *usbio);
 	if (!usbio)
 		return -ENOMEM;
 

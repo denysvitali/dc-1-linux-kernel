@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * This file contians vfs dentry ops for the 9P2000 protocol.
+ * This file contains vfs dentry ops for the 9P2000 protocol.
  *
  *  Copyright (C) 2004 by Eric Van Hensbergen <ericvh@gmail.com>
  *  Copyright (C) 2002 by Ron Minnich <rminnich@lanl.gov>
@@ -113,8 +113,7 @@ void v9fs_dentry_fid_remove(struct dentry *dentry)
  */
 static int v9fs_dentry_init(struct dentry *dentry)
 {
-	struct v9fs_dentry *v9fs_dentry = kzalloc(sizeof(*v9fs_dentry),
-						  GFP_KERNEL);
+	struct v9fs_dentry *v9fs_dentry = kzalloc_obj(*v9fs_dentry);
 
 	if (!v9fs_dentry)
 		return -ENOMEM;

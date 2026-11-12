@@ -4,6 +4,8 @@
 
 use crate::transaction::Transaction;
 
+use core::ptr;
+
 use kernel::bindings::{rust_binder_transaction, task_struct};
 use kernel::error::Result;
 use kernel::ffi::{c_int, c_uint, c_ulong};
@@ -22,11 +24,16 @@ declare_trace! {
     unsafe fn binder_transaction_fd_recv(t_debug_id: c_int, fd: c_int, offset: usize);
     unsafe fn binder_command(cmd: u32);
     unsafe fn binder_return(ret: u32);
+    unsafe fn binder_transaction_alloc_buf(
+        debug_id: c_int,data_size: usize, offset_size: usize, extra_buffers_size: usize);
+    unsafe fn binder_transaction_buffer_release(debug_id: c_int);
+    unsafe fn binder_transaction_failed_buffer_release(debug_id: c_int);
+    unsafe fn binder_transaction_update_buffer_release(debug_id: c_int);
 }
 
 #[inline]
 fn raw_transaction(t: &Transaction) -> rust_binder_transaction {
-    t as *const Transaction as rust_binder_transaction
+    ptr::from_ref(t).cast_mut().cast()
 }
 
 #[inline]
@@ -102,4 +109,36 @@ pub(crate) fn trace_command(cmd: u32) {
 pub(crate) fn trace_return(ret: u32) {
     // SAFETY: This function is always safe to call.
     unsafe { binder_return(ret) }
+}
+#[inline]
+pub(crate) fn trace_transaction_alloc_buf(
+    debug_id: usize,
+    data_size: usize,
+    offset_size: usize,
+    extra_buffers_size: usize,
+) {
+    // SAFETY: The `data` pointer is valid.
+    unsafe {
+        binder_transaction_alloc_buf(
+            debug_id as c_int,
+            data_size,
+            offset_size,
+            extra_buffers_size,
+        )
+    }
+}
+#[inline]
+pub(crate) fn trace_transaction_buffer_release(debug_id: usize) {
+    // SAFETY: This function is always safe to call.
+    unsafe { binder_transaction_buffer_release(debug_id as c_int) }
+}
+#[inline]
+pub(crate) fn trace_transaction_failed_buffer_release(debug_id: usize) {
+    // SAFETY: This function is always safe to call.
+    unsafe { binder_transaction_failed_buffer_release(debug_id as c_int) }
+}
+#[inline]
+pub(crate) fn trace_transaction_update_buffer_release(debug_id: usize) {
+    // SAFETY: This function is always safe to call.
+    unsafe { binder_transaction_update_buffer_release(debug_id as c_int) }
 }

@@ -382,7 +382,7 @@ static int da9121_of_parse_cb(struct device_node *np,
 	struct gpio_desc *ena_gpiod;
 
 	if (chip->pdata == NULL) {
-		pdata = devm_kzalloc(chip->dev, sizeof(*pdata), GFP_KERNEL);
+		pdata = devm_kzalloc_obj(chip->dev, *pdata);
 		if (!pdata)
 			return -ENOMEM;
 	} else {
@@ -1151,7 +1151,7 @@ static int da9121_i2c_probe(struct i2c_client *i2c)
 	const int mask_all[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 	int ret = 0;
 
-	chip = devm_kzalloc(&i2c->dev, sizeof(struct da9121), GFP_KERNEL);
+	chip = devm_kzalloc_obj(&i2c->dev, struct da9121);
 	if (!chip) {
 		ret = -ENOMEM;
 		goto error;
@@ -1195,16 +1195,16 @@ static void da9121_i2c_remove(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id da9121_i2c_id[] = {
-	{"da9121", DA9121_SUBTYPE_DA9121},
-	{"da9130", DA9121_SUBTYPE_DA9130},
-	{"da9217", DA9121_SUBTYPE_DA9217},
-	{"da9122", DA9121_SUBTYPE_DA9122},
-	{"da9131", DA9121_SUBTYPE_DA9131},
-	{"da9220", DA9121_SUBTYPE_DA9220},
-	{"da9132", DA9121_SUBTYPE_DA9132},
-	{"da9141", DA9121_SUBTYPE_DA9141},
-	{"da9142", DA9121_SUBTYPE_DA9142},
-	{},
+	{ .name = "da9121", .driver_data = DA9121_SUBTYPE_DA9121 },
+	{ .name = "da9130", .driver_data = DA9121_SUBTYPE_DA9130 },
+	{ .name = "da9217", .driver_data = DA9121_SUBTYPE_DA9217 },
+	{ .name = "da9122", .driver_data = DA9121_SUBTYPE_DA9122 },
+	{ .name = "da9131", .driver_data = DA9121_SUBTYPE_DA9131 },
+	{ .name = "da9220", .driver_data = DA9121_SUBTYPE_DA9220 },
+	{ .name = "da9132", .driver_data = DA9121_SUBTYPE_DA9132 },
+	{ .name = "da9141", .driver_data = DA9121_SUBTYPE_DA9141 },
+	{ .name = "da9142", .driver_data = DA9121_SUBTYPE_DA9142 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, da9121_i2c_id);
 

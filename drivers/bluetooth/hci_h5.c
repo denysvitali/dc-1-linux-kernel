@@ -543,12 +543,8 @@ static void h5_unslip_one_byte(struct h5 *h5, unsigned char c)
 	const u8 delim = SLIP_DELIMITER, esc = SLIP_ESC;
 	const u8 *byte = &c;
 
-	if (!test_bit(H5_RX_ESC, &h5->flags) && c == SLIP_ESC) {
-		set_bit(H5_RX_ESC, &h5->flags);
-		return;
-	}
-
-	if (test_and_clear_bit(H5_RX_ESC, &h5->flags)) {
+	if (test_bit(H5_RX_ESC, &h5->flags)) {
+		clear_bit(H5_RX_ESC, &h5->flags);
 		switch (c) {
 		case SLIP_ESC_DELIM:
 			byte = &delim;
@@ -561,6 +557,9 @@ static void h5_unslip_one_byte(struct h5 *h5, unsigned char c)
 			h5_reset_rx(h5);
 			return;
 		}
+	} else if (c == SLIP_ESC) {
+		set_bit(H5_RX_ESC, &h5->flags);
+		return;
 	}
 
 	skb_put_data(h5->rx_skb, byte, 1);
@@ -858,7 +857,7 @@ static int h5_serdev_probe(struct serdev_device *serdev)
 	struct h5 *h5;
 	const struct h5_device_data *data;
 
-	h5 = devm_kzalloc(dev, sizeof(*h5), GFP_KERNEL);
+	h5 = devm_kzalloc_obj(dev, *h5);
 	if (!h5)
 		return -ENOMEM;
 
@@ -1023,8 +1022,10 @@ static void h5_btrtl_open(struct h5 *h5)
 
 static void h5_btrtl_close(struct h5 *h5)
 {
-	if (!test_bit(H5_WAKEUP_DISABLE, &h5->flags))
+	if (!test_bit(H5_WAKEUP_DISABLE, &h5->flags)) {
+		pm_runtime_dont_use_autosuspend(&h5->hu->serdev->dev);
 		pm_runtime_disable(&h5->hu->serdev->dev);
+	}
 
 	gpiod_set_value_cansleep(h5->device_wake_gpio, 0);
 	gpiod_set_value_cansleep(h5->enable_gpio, 0);
@@ -1124,10 +1125,10 @@ static const struct h5_device_data h5_data_rtl8723bs = {
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id h5_acpi_match[] = {
 #ifdef CONFIG_BT_HCIUART_RTL
-	{ "OBDA0623", (kernel_ulong_t)&h5_data_rtl8723bs },
-	{ "OBDA8723", (kernel_ulong_t)&h5_data_rtl8723bs },
+	{ .id = "OBDA0623", .driver_data = (kernel_ulong_t)&h5_data_rtl8723bs },
+	{ .id = "OBDA8723", .driver_data = (kernel_ulong_t)&h5_data_rtl8723bs },
 #endif
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, h5_acpi_match);
 #endif

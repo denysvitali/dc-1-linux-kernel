@@ -1185,7 +1185,8 @@ extern ssize_t usb_show_dynids(struct usb_dynids *dynids, char *buf);
  *	interface.  It may also use usb_set_interface() to specify the
  *	appropriate altsetting.  If unwilling to manage the interface,
  *	return -ENODEV, if genuine IO errors occurred, an appropriate
- *	negative errno value.
+ *	negative errno value.  The usb_device_id parameter is only valid during
+ *	probe.
  * @disconnect: Called when the interface is no longer accessible, usually
  *	because its device has been (or is being) disconnected or the
  *	driver module is being unloaded.
@@ -1368,8 +1369,10 @@ extern void usb_deregister(struct usb_driver *);
 	module_driver(__usb_driver, usb_register, \
 		       usb_deregister)
 
-extern int usb_register_device_driver(struct usb_device_driver *,
-			struct module *);
+#define usb_register_device_driver(new_udriver) \
+	__usb_register_device_driver(new_udriver, THIS_MODULE, KBUILD_MODNAME)
+extern int __usb_register_device_driver(struct usb_device_driver *,
+			struct module *, const char *);
 extern void usb_deregister_device_driver(struct usb_device_driver *);
 
 extern int usb_register_dev(struct usb_interface *intf,
@@ -1605,7 +1608,12 @@ typedef void (*usb_complete_t)(struct urb *);
  *
  * Completion Callbacks:
  *
- * The completion callback is made in_interrupt(), and one of the first
+ * The completion callback can occur in any context: process, interrupt,
+ * BH, or anything else.  Also, interrupts may or may not be disabled on
+ * the local CPU when the callback runs.  A completion handler routine
+ * must not depend on any particular properties of its environment.
+ *
+ * One of the first
  * things that a completion handler should do is check the status field.
  * The status field is provided for all URBs.  It is used to report
  * unlinked URBs, and status for all non-ISO transfers.  It should not

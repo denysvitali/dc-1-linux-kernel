@@ -42,8 +42,7 @@ int cn20k_register_afvf_mbox_intr(struct rvu *rvu, int pf_vec_start)
 	int err;
 
 	/* irq data for 4 VFPF intr vectors */
-	irq_data = devm_kcalloc(rvu->dev, 4,
-				sizeof(struct rvu_irq_data), GFP_KERNEL);
+	irq_data = devm_kzalloc_objs(rvu->dev, struct rvu_irq_data, 4);
 	if (!irq_data)
 		return -ENOMEM;
 
@@ -174,8 +173,7 @@ int cn20k_register_afpf_mbox_intr(struct rvu *rvu)
 	int intr_vec, ret, vec = 0;
 
 	/* irq data for 4 PF intr vectors */
-	irq_data = devm_kcalloc(rvu->dev, 4,
-				sizeof(struct rvu_irq_data), GFP_KERNEL);
+	irq_data = devm_kzalloc_objs(rvu->dev, struct rvu_irq_data, 4);
 	if (!irq_data)
 		return -ENOMEM;
 
@@ -335,13 +333,30 @@ int cn20k_rvu_mbox_init(struct rvu *rvu, int type, int ndevs)
 	return rvu_alloc_mbox_memory(rvu, type, ndevs, MBOX_SIZE);
 }
 
+void cn20k_free_mbox_memory_type(struct rvu *rvu, int type)
+{
+	if (!is_cn20k(rvu->pdev) || !rvu->ng_rvu)
+		return;
+
+	switch (type) {
+	case TYPE_AFPF:
+		qmem_free(rvu->dev, rvu->ng_rvu->pf_mbox_addr);
+		rvu->ng_rvu->pf_mbox_addr = NULL;
+		break;
+	case TYPE_AFVF:
+		qmem_free(rvu->dev, rvu->ng_rvu->vf_mbox_addr);
+		rvu->ng_rvu->vf_mbox_addr = NULL;
+		break;
+	}
+}
+
 void cn20k_free_mbox_memory(struct rvu *rvu)
 {
 	if (!is_cn20k(rvu->pdev))
 		return;
 
-	qmem_free(rvu->dev, rvu->ng_rvu->pf_mbox_addr);
-	qmem_free(rvu->dev, rvu->ng_rvu->vf_mbox_addr);
+	cn20k_free_mbox_memory_type(rvu, TYPE_AFPF);
+	cn20k_free_mbox_memory_type(rvu, TYPE_AFVF);
 }
 
 void cn20k_rvu_disable_afvf_intr(struct rvu *rvu, int vfs)

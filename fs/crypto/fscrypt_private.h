@@ -66,9 +66,6 @@
 #define FSCRYPT_CONTEXT_V1	1
 #define FSCRYPT_CONTEXT_V2	2
 
-/* Keep this in sync with include/uapi/linux/fscrypt.h */
-#define FSCRYPT_MODE_MAX	FSCRYPT_MODE_AES_256_HCTR2
-
 struct fscrypt_context_v1 {
 	u8 version; /* FSCRYPT_CONTEXT_V1 */
 	u8 contents_encryption_mode;
@@ -222,15 +219,6 @@ fscrypt_policy_du_bits(const union fscrypt_policy *policy,
 	BUG();
 }
 
-/*
- * For encrypted symlinks, the ciphertext length is stored at the beginning
- * of the string in little-endian format.
- */
-struct fscrypt_symlink_data {
-	__le16 len;
-	char encrypted_path[];
-} __packed;
-
 /**
  * struct fscrypt_prepared_key - a key prepared for actual encryption/decryption
  * @tfm: crypto API transform object
@@ -268,14 +256,6 @@ struct fscrypt_inode_info {
 
 	/* True if ci_enc_key should be freed when this struct is freed */
 	u8 ci_owns_key : 1;
-
-#ifdef CONFIG_FS_ENCRYPTION_INLINE_CRYPT
-	/*
-	 * True if this inode will use inline encryption (blk-crypto) instead of
-	 * the traditional filesystem-layer encryption.
-	 */
-	u8 ci_inlinecrypt : 1;
-#endif
 
 	/* True if ci_dirhash_key is initialized */
 	u8 ci_dirhash_key_initialized : 1;
@@ -332,19 +312,9 @@ struct fscrypt_inode_info {
 	u8 ci_nonce[FSCRYPT_FILE_NONCE_SIZE];
 };
 
-typedef enum {
-	FS_DECRYPT = 0,
-	FS_ENCRYPT,
-} fscrypt_direction_t;
-
 /* crypto.c */
 extern struct kmem_cache *fscrypt_inode_info_cachep;
 int fscrypt_initialize(struct super_block *sb);
-int fscrypt_crypt_data_unit(const struct fscrypt_inode_info *ci,
-			    fscrypt_direction_t rw, u64 index,
-			    struct page *src_page, struct page *dest_page,
-			    unsigned int len, unsigned int offs);
-struct page *fscrypt_alloc_bounce_page(gfp_t gfp_flags);
 
 void __printf(3, 4) __cold
 fscrypt_msg(const struct inode *inode, const char *level, const char *fmt, ...);
@@ -411,15 +381,14 @@ void fscrypt_hkdf_expand(const struct hmac_sha512_key *hkdf, u8 context,
 			 const u8 *info, unsigned int infolen,
 			 u8 *okm, unsigned int okmlen);
 
-/* inline_crypt.c */
+/* block.c */
 #ifdef CONFIG_FS_ENCRYPTION_INLINE_CRYPT
-int fscrypt_select_encryption_impl(struct fscrypt_inode_info *ci,
-				   bool is_hw_wrapped_key);
-
 static inline bool
 fscrypt_using_inline_encryption(const struct fscrypt_inode_info *ci)
 {
-	return ci->ci_inlinecrypt;
+	const struct inode *inode = ci->ci_inode;
+
+	return S_ISREG(inode->i_mode) && inode->i_sb->s_cop->is_block_based;
 }
 
 int fscrypt_prepare_inline_crypt_key(struct fscrypt_prepared_key *prep_key,
@@ -448,12 +417,6 @@ fscrypt_is_key_prepared(const struct fscrypt_prepared_key *prep_key,
 }
 
 #else /* CONFIG_FS_ENCRYPTION_INLINE_CRYPT */
-
-static inline int fscrypt_select_encryption_impl(struct fscrypt_inode_info *ci,
-						 bool is_hw_wrapped_key)
-{
-	return 0;
-}
 
 static inline bool
 fscrypt_using_inline_encryption(const struct fscrypt_inode_info *ci)
@@ -495,19 +458,6 @@ fscrypt_is_key_prepared(const struct fscrypt_prepared_key *prep_key,
 #endif /* !CONFIG_FS_ENCRYPTION_INLINE_CRYPT */
 
 /* keyring.c */
-
-/*
- * fscrypt_master_key_user - a user's claim to a master key
- */
-struct fscrypt_master_key_user {
-	struct list_head link;
-	kuid_t uid;
-	/*
-	 * This 'struct key' contains no secret.  It exists solely to charge the
-	 * appropriate user's key quota.
-	 */
-	struct key *quota_key;
-};
 
 /*
  * fscrypt_master_key_secret - secret key material of an in-use master key
@@ -718,7 +668,7 @@ int fscrypt_add_test_dummy_key(struct super_block *sb,
 int fscrypt_verify_key_added(struct super_block *sb,
 			     const u8 identifier[FSCRYPT_KEY_IDENTIFIER_SIZE]);
 
-int __init fscrypt_init_keyring(void);
+void __init fscrypt_init_keyring(void);
 
 /* keysetup.c */
 

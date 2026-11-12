@@ -490,7 +490,7 @@ static int bond_ipsec_add_sa(struct net_device *bond_dev,
 	    !real_dev->xfrmdev_ops->xdo_dev_state_add ||
 	    netif_is_bond_master(real_dev)) {
 		NL_SET_ERR_MSG_MOD(extack, "Slave does not support ipsec offload");
-		err = -EINVAL;
+		err = -EOPNOTSUPP;
 		goto out;
 	}
 
@@ -1245,7 +1245,7 @@ static void bond_peer_notify_may_events(struct bonding *bond, bool force)
 	}
 
 	if (notified || force)
-		bond->send_peer_notif--;
+		WRITE_ONCE(bond->send_peer_notif, bond->send_peer_notif - 1);
 }
 
 /**
@@ -2284,7 +2284,7 @@ skip_mac_set:
 		}
 	}
 
-	bond->slave_cnt++;
+	WRITE_ONCE(bond->slave_cnt, bond->slave_cnt + 1);
 	netdev_compute_master_upper_features(bond->dev, true);
 	bond_set_carrier(bond);
 
@@ -2517,9 +2517,7 @@ static int __bond_release_one(struct net_device *bond_dev,
 		bond_alb_deinit_slave(bond, slave);
 	}
 
-	if (all) {
-		RCU_INIT_POINTER(bond->curr_active_slave, NULL);
-	} else if (oldcurrent == slave) {
+	if (!all && oldcurrent == slave) {
 		/* Note that we hold RTNL over this sequence, so there
 		 * is no concern that another slave add/remove event
 		 * will interfere.
@@ -2533,7 +2531,7 @@ static int __bond_release_one(struct net_device *bond_dev,
 
 	unblock_netpoll_tx();
 	synchronize_rcu();
-	bond->slave_cnt--;
+	WRITE_ONCE(bond->slave_cnt, bond->slave_cnt - 1);
 
 	if (!bond_has_slaves(bond)) {
 		call_netdevice_notifiers(NETDEV_CHANGEADDR, bond->dev);
@@ -2781,6 +2779,27 @@ static void bond_miimon_link_change(struct bonding *bond,
 	}
 }
 
+static bool bond_miimon_slave_down(struct bonding *bond,
+				   struct slave *slave)
+{
+	if (slave->link_failure_count < UINT_MAX)
+		slave->link_failure_count++;
+
+	bond_set_slave_link_state(slave, BOND_LINK_DOWN,
+				  BOND_SLAVE_NOTIFY_NOW);
+
+	if (BOND_MODE(bond) == BOND_MODE_ACTIVEBACKUP ||
+	    BOND_MODE(bond) == BOND_MODE_8023AD)
+		bond_set_slave_inactive_flags(slave,
+					      BOND_SLAVE_NOTIFY_NOW);
+
+	slave_info(bond->dev, slave->dev, "link status definitely down, disabling slave\n");
+
+	bond_miimon_link_change(bond, slave, BOND_LINK_DOWN);
+
+	return slave == rcu_access_pointer(bond->curr_active_slave);
+}
+
 static void bond_miimon_commit(struct bonding *bond)
 {
 	struct slave *slave, *primary, *active;
@@ -2809,10 +2828,22 @@ static void bond_miimon_commit(struct bonding *bond)
 			err = bond_update_speed_duplex(slave);
 			netdev_unlock_ops(slave->dev);
 			if (err && bond_needs_speed_duplex(bond)) {
-				slave->link = BOND_LINK_DOWN;
 				if (net_ratelimit())
 					slave_warn(bond->dev, slave->dev,
 						   "failed to get link speed/duplex\n");
+				/* Coming from FAIL/UP, the slave may still be
+				 * in use and may be curr_active_slave, so take
+				 * it through the full down path. Coming from
+				 * DOWN/BACK, it was never brought up, so just
+				 * revert it to DOWN.
+				 */
+				if (slave->link == BOND_LINK_FAIL ||
+				    slave->link == BOND_LINK_UP) {
+					if (bond_miimon_slave_down(bond, slave))
+						do_failover = true;
+					continue;
+				}
+				slave->link = BOND_LINK_DOWN;
 				continue;
 			}
 			bond_set_slave_link_state(slave, BOND_LINK_UP,
@@ -2841,28 +2872,13 @@ static void bond_miimon_commit(struct bonding *bond)
 			continue;
 
 		case BOND_LINK_DOWN:
-			if (slave->link_failure_count < UINT_MAX)
-				slave->link_failure_count++;
-
-			bond_set_slave_link_state(slave, BOND_LINK_DOWN,
-						  BOND_SLAVE_NOTIFY_NOW);
-
-			if (BOND_MODE(bond) == BOND_MODE_ACTIVEBACKUP ||
-			    BOND_MODE(bond) == BOND_MODE_8023AD)
-				bond_set_slave_inactive_flags(slave,
-							      BOND_SLAVE_NOTIFY_NOW);
-
-			slave_info(bond->dev, slave->dev, "link status definitely down, disabling slave\n");
-
-			bond_miimon_link_change(bond, slave, BOND_LINK_DOWN);
-
-			if (slave == rcu_access_pointer(bond->curr_active_slave))
+			if (bond_miimon_slave_down(bond, slave))
 				do_failover = true;
-
 			continue;
 
 		case BOND_LINK_FAIL:
 		case BOND_LINK_BACK:
+			bond_commit_link_state(slave, BOND_SLAVE_NOTIFY_LATER);
 			slave_dbg(bond->dev, slave->dev, "link_new_state %d on slave\n",
 				  slave->link_new_state);
 			continue;
@@ -2896,8 +2912,6 @@ static void bond_mii_monitor(struct work_struct *work)
 {
 	struct bonding *bond = container_of(work, struct bonding,
 					    mii_work.work);
-	struct list_head *iter;
-	struct slave *slave;
 	unsigned long delay;
 	bool commit;
 
@@ -2919,13 +2933,8 @@ static void bond_mii_monitor(struct work_struct *work)
 			goto re_arm;
 		}
 
-		if (commit) {
-			bond_for_each_slave(bond, slave, iter) {
-				bond_commit_link_state(slave,
-						       BOND_SLAVE_NOTIFY_LATER);
-			}
+		if (commit)
 			bond_miimon_commit(bond);
-		}
 
 		if (bond->send_peer_notif)
 			bond_peer_notify_may_events(bond, true);
@@ -3975,18 +3984,13 @@ static int bond_slave_netdev_event(unsigned long event,
 	case NETDEV_CHANGE:
 		/* For 802.3ad mode only:
 		 * Getting invalid Speed/Duplex values here will put slave
-		 * in weird state. Mark it as link-fail if the link was
-		 * previously up or link-down if it hasn't yet come up, and
-		 * let link-monitoring (miimon) set it right when correct
-		 * speeds/duplex are available.
+		 * in weird state. Mark an up slave as link-fail and let
+		 * miimon set it right when correct speed/duplex are available.
 		 */
 		if (bond_update_speed_duplex(slave) &&
-		    BOND_MODE(bond) == BOND_MODE_8023AD) {
-			if (slave->last_link_up)
-				slave->link = BOND_LINK_FAIL;
-			else
-				slave->link = BOND_LINK_DOWN;
-		}
+		    BOND_MODE(bond) == BOND_MODE_8023AD &&
+		    slave->link == BOND_LINK_UP)
+			slave->link = BOND_LINK_FAIL;
 
 		if (BOND_MODE(bond) == BOND_MODE_8023AD)
 			bond_3ad_adapter_speed_duplex_changed(slave);
@@ -4385,13 +4389,13 @@ static int bond_open(struct net_device *bond_dev)
 
 	if (bond->params.arp_interval) {  /* arp interval, in milliseconds. */
 		queue_delayed_work(bond->wq, &bond->arp_work, 0);
-		bond->recv_probe = bond_rcv_validate;
+		WRITE_ONCE(bond->recv_probe, bond_rcv_validate);
 	}
 
 	if (BOND_MODE(bond) == BOND_MODE_8023AD) {
 		queue_delayed_work(bond->wq, &bond->ad_work, 0);
 		/* register to receive LACPDUs */
-		bond->recv_probe = bond_3ad_lacpdu_recv;
+		WRITE_ONCE(bond->recv_probe, bond_3ad_lacpdu_recv);
 		bond_3ad_initiate_agg_selection(bond, 1);
 
 		bond_for_each_slave(bond, slave, iter)
@@ -4413,7 +4417,7 @@ static int bond_close(struct net_device *bond_dev)
 	struct slave *slave;
 
 	bond_work_cancel_all(bond);
-	bond->send_peer_notif = 0;
+	WRITE_ONCE(bond->send_peer_notif, 0);
 	WRITE_ONCE(bond->recv_probe, NULL);
 
 	/* Wait for any in-flight RX handlers */
@@ -4858,12 +4862,6 @@ static int bond_set_mac_address(struct net_device *bond_dev, void *addr)
 			  __func__, slave);
 		res = dev_set_mac_address(slave->dev, addr, NULL);
 		if (res) {
-			/* TODO: consider downing the slave
-			 * and retry ?
-			 * User should expect communications
-			 * breakage anyway until ARP finish
-			 * updating, so...
-			 */
 			slave_dbg(bond_dev, slave->dev, "%s: err %d\n",
 				  __func__, res);
 			goto unwind;
@@ -5124,7 +5122,7 @@ static void bond_skip_slave(struct bond_up_slave *slaves,
 		if (skipslave == slaves->arr[idx]) {
 			slaves->arr[idx] =
 				slaves->arr[slaves->count - 1];
-			slaves->count--;
+			WRITE_ONCE(slaves->count, slaves->count - 1);
 			break;
 		}
 	}
@@ -5740,12 +5738,12 @@ static int bond_xdp_set(struct net_device *dev, struct bpf_prog *prog,
 			bpf_prog_inc(prog);
 	}
 
-	if (prog) {
+	if (prog && !old_prog)
 		static_branch_inc(&bpf_master_redirect_enabled_key);
-	} else if (old_prog) {
-		bpf_prog_put(old_prog);
+	else if (!prog && old_prog)
 		static_branch_dec(&bpf_master_redirect_enabled_key);
-	}
+	if (old_prog)
+		bpf_prog_put(old_prog);
 
 	return 0;
 
@@ -6281,7 +6279,7 @@ static int __init bond_check_params(struct bond_params *params)
 	}
 
 	for (arp_ip_count = 0, i = 0;
-	     (arp_ip_count < BOND_MAX_ARP_TARGETS) && arp_ip_target[i]; i++) {
+	     (i < BOND_MAX_ARP_TARGETS) && arp_ip_target[i]; i++) {
 		__be32 ip;
 
 		/* not a complete check, but good enough to catch mistakes */
@@ -6644,7 +6642,9 @@ static int __init bonding_init(void)
 				flow_keys_bonding_keys,
 				ARRAY_SIZE(flow_keys_bonding_keys));
 
-	register_netdevice_notifier(&bond_netdev_notifier);
+	res = register_netdevice_notifier(&bond_netdev_notifier);
+	if (res)
+		goto err;
 out:
 	return res;
 err:

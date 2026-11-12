@@ -16,7 +16,7 @@
 #include "iwl-modparams.h"
 #include "iwl-nvm-parse.h"
 #include "iwl-prph.h"
-#include "iwl-io.h"
+#include "iwl-trans.h"
 #include "iwl-csr.h"
 #include "fw/api/nvm-reg.h"
 #include "fw/api/commands.h"
@@ -225,6 +225,18 @@ enum iwl_reg_capa_flags_v5 {
 	REG_CAPA_V5_11BN_DISABLED		= BIT(17),
 }; /* GEO_CHANNEL_CAPABILITIES_API_S_VER_4, 5 */
 
+/**
+ * enum iwl_reg_capa_flags_v6 - global capability flags,
+ *	applicable from MCC response version 10 onwards.
+ * Response v6 includes all members of iwl_reg_capa_flags_v5; only v6-specific
+ * additions are listed here.
+ * @REG_CAPA_V6_EHT_PUNCTURING_ENABLED: EHT puncturing is enabled for this
+ *	regulatory domain.
+ */
+enum iwl_reg_capa_flags_v6 {
+	REG_CAPA_V6_EHT_PUNCTURING_ENABLED	= BIT(18),
+}; /* GEO_CHANNEL_CAPABILITIES_API_S_VER_6 */
+
 /*
 * API v2 for reg_capa_flags is relevant from version 6 and onwards of the
 * MCC update command response.
@@ -235,6 +247,11 @@ enum iwl_reg_capa_flags_v5 {
  * MCC update command response.
  */
 #define REG_CAPA_V4_RESP_VER	8
+
+/* API v6 for reg_capa_flags is relevant from version 10 and onwards of the
+ * MCC update command response.
+ */
+#define REG_CAPA_V6_RESP_VER	10
 
 static inline void iwl_nvm_print_channel_flags(struct device *dev, u32 level,
 					       int chan, u32 flags)
@@ -595,7 +612,6 @@ static const struct ieee80211_sband_iftype_data iwl_iftype_cap[] = {
 					IEEE80211_HE_PHY_CAP7_POWER_BOOST_FACTOR_SUPP |
 					IEEE80211_HE_PHY_CAP7_HE_SU_MU_PPDU_4XLTF_AND_08_US_GI,
 				.phy_cap_info[8] =
-					IEEE80211_HE_PHY_CAP8_HE_ER_SU_PPDU_4XLTF_AND_08_US_GI |
 					IEEE80211_HE_PHY_CAP8_20MHZ_IN_40MHZ_HE_PPDU_IN_2G |
 					IEEE80211_HE_PHY_CAP8_20MHZ_IN_160MHZ_HE_PPDU |
 					IEEE80211_HE_PHY_CAP8_80MHZ_IN_160MHZ_HE_PPDU |
@@ -693,11 +709,14 @@ static const struct ieee80211_sband_iftype_data iwl_iftype_cap[] = {
 			.has_uhr = true,
 			/* Note: asymmetry is fixed later */
 			.phy.cap = cpu_to_le32(IEEE80211_UHR_PHY_CAP_ELR_RX |
-					       IEEE80211_UHR_PHY_CAP_ELR_TX),
+					       IEEE80211_UHR_PHY_CAP_ELR_TX |
+					       IEEE80211_UHR_PHY_CAP_2XLDPC_RX),
 			.mac.mac_cap = {
 				[0] = IEEE80211_UHR_MAC_CAP0_NPCA_SUPP |
 				      IEEE80211_UHR_MAC_CAP0_DPS_SUPP,
-				[1] = IEEE80211_UHR_MAC_CAP1_DUO_SUPP,
+				[1] = IEEE80211_UHR_MAC_CAP1_DUO_SUPP |
+				      IEEE80211_UHR_MAC_CAP1_DBE_SUPP,
+				[4] = IEEE80211_UHR_MAC_CAP4_CO_BF_SUPP,
 			},
 		},
 	},
@@ -728,7 +747,6 @@ static const struct ieee80211_sband_iftype_data iwl_iftype_cap[] = {
 				.phy_cap_info[7] =
 					IEEE80211_HE_PHY_CAP7_HE_SU_MU_PPDU_4XLTF_AND_08_US_GI,
 				.phy_cap_info[8] =
-					IEEE80211_HE_PHY_CAP8_HE_ER_SU_PPDU_4XLTF_AND_08_US_GI |
 					IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_242,
 				.phy_cap_info[9] =
 					IEEE80211_HE_PHY_CAP9_TX_1024_QAM_LESS_THAN_242_TONE_RU |
@@ -802,7 +820,8 @@ static const struct ieee80211_sband_iftype_data iwl_iftype_cap[] = {
 			.has_uhr = true,
 			/* Note: asymmetry is fixed later */
 			.phy.cap = cpu_to_le32(IEEE80211_UHR_PHY_CAP_ELR_RX |
-					       IEEE80211_UHR_PHY_CAP_ELR_TX),
+					       IEEE80211_UHR_PHY_CAP_ELR_TX |
+					       IEEE80211_UHR_PHY_CAP_2XLDPC_RX),
 		},
 	},
 };
@@ -1294,10 +1313,10 @@ static void iwl_flip_hw_address(__le32 mac_addr0, __le32 mac_addr1, u8 *dest)
 static void iwl_set_hw_address_from_csr(struct iwl_trans *trans,
 					struct iwl_nvm_data *data)
 {
-	__le32 mac_addr0 = cpu_to_le32(iwl_read32(trans,
-						  CSR_MAC_ADDR0_STRAP(trans)));
-	__le32 mac_addr1 = cpu_to_le32(iwl_read32(trans,
-						  CSR_MAC_ADDR1_STRAP(trans)));
+	__le32 mac_addr0 = cpu_to_le32(iwl_trans_read32(trans,
+							CSR_MAC_ADDR0_STRAP(trans)));
+	__le32 mac_addr1 = cpu_to_le32(iwl_trans_read32(trans,
+							CSR_MAC_ADDR1_STRAP(trans)));
 
 	iwl_flip_hw_address(mac_addr0, mac_addr1, data->hw_addr);
 	/*
@@ -1307,8 +1326,8 @@ static void iwl_set_hw_address_from_csr(struct iwl_trans *trans,
 	if (is_valid_ether_addr(data->hw_addr))
 		return;
 
-	mac_addr0 = cpu_to_le32(iwl_read32(trans, CSR_MAC_ADDR0_OTP(trans)));
-	mac_addr1 = cpu_to_le32(iwl_read32(trans, CSR_MAC_ADDR1_OTP(trans)));
+	mac_addr0 = cpu_to_le32(iwl_trans_read32(trans, CSR_MAC_ADDR0_OTP(trans)));
+	mac_addr1 = cpu_to_le32(iwl_trans_read32(trans, CSR_MAC_ADDR1_OTP(trans)));
 
 	iwl_flip_hw_address(mac_addr0, mac_addr1, data->hw_addr);
 }
@@ -1349,10 +1368,10 @@ static void iwl_set_hw_address_family_8000(struct iwl_trans *trans,
 
 	if (nvm_hw) {
 		/* read the mac address from WFMP registers */
-		__le32 mac_addr0 = cpu_to_le32(iwl_trans_read_prph(trans,
-						WFMP_MAC_ADDR_0));
-		__le32 mac_addr1 = cpu_to_le32(iwl_trans_read_prph(trans,
-						WFMP_MAC_ADDR_1));
+		__le32 mac_addr0 = cpu_to_le32(iwl_trans_read_prph_no_grab(trans,
+									   WFMP_MAC_ADDR_0));
+		__le32 mac_addr1 = cpu_to_le32(iwl_trans_read_prph_no_grab(trans,
+									   WFMP_MAC_ADDR_1));
 
 		iwl_flip_hw_address(mac_addr0, mac_addr1, data->hw_addr);
 
@@ -1392,7 +1411,7 @@ static int iwl_set_hw_address(struct iwl_trans *trans,
 
 	if (!trans->csme_own)
 		IWL_INFO(trans, "base HW address: %pM, OTP minor version: 0x%x\n",
-			 data->hw_addr, iwl_read_prph(trans, REG_OTP_MINOR));
+			 data->hw_addr, iwl_trans_read_prph(trans, REG_OTP_MINOR));
 
 	return 0;
 }
@@ -1687,6 +1706,13 @@ static struct iwl_reg_capa iwl_get_reg_capa(u32 flags, u8 resp_ver)
 {
 	struct iwl_reg_capa reg_capa = {};
 
+	if (resp_ver >= REG_CAPA_V6_RESP_VER) {
+		if (flags & REG_CAPA_V6_EHT_PUNCTURING_ENABLED)
+			reg_capa.puncturing_status = IWL_PUNCTURING_STATUS_ENABLED;
+		else
+			reg_capa.puncturing_status = IWL_PUNCTURING_STATUS_DISABLED;
+	}
+
 	if (resp_ver >= REG_CAPA_V4_RESP_VER) {
 		reg_capa.allow_40mhz = true;
 		reg_capa.allow_80mhz = flags & REG_CAPA_V5_80MHZ_ALLOWED;
@@ -1713,7 +1739,8 @@ static struct iwl_reg_capa iwl_get_reg_capa(u32 flags, u8 resp_ver)
 struct ieee80211_regdomain *
 iwl_parse_nvm_mcc_info(struct iwl_trans *trans,
 		       int num_of_ch, __le32 *channels, u16 fw_mcc,
-		       u16 geo_info, u32 cap, u8 resp_ver)
+		       u16 geo_info, u32 cap, u8 resp_ver,
+		       enum iwl_puncturing_status *puncturing_status)
 {
 	const struct iwl_rf_cfg *cfg = trans->cfg;
 	struct device *dev = trans->dev;
@@ -1775,6 +1802,9 @@ iwl_parse_nvm_mcc_info(struct iwl_trans *trans,
 
 	/* parse regulatory capability flags */
 	reg_capa = iwl_get_reg_capa(cap, resp_ver);
+
+	if (puncturing_status)
+		*puncturing_status = reg_capa.puncturing_status;
 
 	for (ch_idx = 0; ch_idx < num_of_ch; ch_idx++) {
 		enum nl80211_band band =

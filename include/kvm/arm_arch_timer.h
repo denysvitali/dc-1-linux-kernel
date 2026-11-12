@@ -162,20 +162,28 @@ static inline bool has_cntpoff(void)
 	return (has_vhe() && cpus_have_final_cap(ARM64_HAS_ECV_CNTPOFF));
 }
 
-static inline u64 timer_get_offset(struct arch_timer_context *ctxt)
-{
-	u64 offset = 0;
+#ifdef __KVM_NVHE_HYPERVISOR__
+#define KERN_HYP_VA(x)		kern_hyp_va(x)
+#else
+#define KERN_HYP_VA(x)		x
+#endif
 
-	if (!ctxt)
-		return 0;
-
-	if (ctxt->offset.vm_offset)
-		offset += *ctxt->offset.vm_offset;
-	if (ctxt->offset.vcpu_offset)
-		offset += *ctxt->offset.vcpu_offset;
-
-	return offset;
-}
+#define timer_get_offset(ctxt)						\
+	({								\
+		struct arch_timer_context *__ctxt = (ctxt);		\
+		u64 off = 0;						\
+									\
+		if (__ctxt) {						\
+			struct arch_timer_offset *ato = &__ctxt->offset;\
+									\
+			if (ato->vm_offset)				\
+				off += *KERN_HYP_VA(ato->vm_offset);	\
+			if (ato->vcpu_offset)				\
+				off += *KERN_HYP_VA(ato->vcpu_offset);	\
+		}							\
+									\
+		off;							\
+	})
 
 static inline void timer_set_offset(struct arch_timer_context *ctxt, u64 offset)
 {
@@ -185,6 +193,21 @@ static inline void timer_set_offset(struct arch_timer_context *ctxt, u64 offset)
 	}
 
 	WRITE_ONCE(*ctxt->offset.vm_offset, offset);
+}
+
+/*
+ * CVAL to program when the hardware won't apply the timer's offset, so that
+ * its compare against the raw counter matches the guest's at 'now'. An
+ * expired timer stays expired; one past the wrap never fires.
+ */
+static inline u64 timer_apply_offset(u64 cval, u64 offset, u64 now)
+{
+	u64 hw = cval + offset;
+
+	if (now - offset >= cval)
+		return 0;
+
+	return hw > now ? hw : U64_MAX;
 }
 
 #endif

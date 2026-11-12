@@ -1437,7 +1437,7 @@ static void kbd_keycode(unsigned int keycode, int down, bool hw_raw)
 	struct keyboard_notifier_param param = { .vc = vc, .value = keycode, .down = down };
 	int rc;
 
-	tty = vc->port.tty;
+	tty = tty_port_tty_get(&vc->port);
 
 	if (tty && (!tty->driver_data)) {
 		/* No driver data? Strange. Okay we fix it then. */
@@ -1497,8 +1497,11 @@ static void kbd_keycode(unsigned int keycode, int down, bool hw_raw)
 		 * characters get aren't echoed locally. This makes key repeat
 		 * usable with slow applications and under heavy loads.
 		 */
+		tty_kref_put(tty);
 		return;
 	}
+
+	tty_kref_put(tty);
 
 	param.shift = shift_final = (shift_state | kbd->slockstate) ^ kbd->lockstate;
 	param.ledstate = kbd->ledflagstate;
@@ -1728,8 +1731,8 @@ static int vt_do_kdgkbdiacr(void __user *udp)
 	struct kbdiacrs __user *a = udp;
 	int i, asize;
 
-	struct kbdiacr __free(kfree) *dia = kmalloc_array(MAX_DIACR, sizeof(struct kbdiacr),
-							  GFP_KERNEL);
+	struct kbdiacr __free(kfree) *dia = kmalloc_objs(struct kbdiacr,
+							 MAX_DIACR);
 	if (!dia)
 		return -ENOMEM;
 
@@ -1756,8 +1759,7 @@ static int vt_do_kdgkbdiacruc(void __user *udp)
 	struct kbdiacrsuc __user *a = udp;
 	int asize;
 
-	void __free(kfree) *buf = kmalloc_array(MAX_DIACR, sizeof(struct kbdiacruc),
-						GFP_KERNEL);
+	void __free(kfree) *buf = kmalloc_objs(struct kbdiacruc, MAX_DIACR);
 	if (buf == NULL)
 		return -ENOMEM;
 
@@ -1999,7 +2001,9 @@ static int vt_kdskbent(unsigned char kbdmode, unsigned char idx,
 		return 0;
 #endif
 
-	unsigned short __free(kfree) *new_map = kmalloc(sizeof(plain_map), GFP_KERNEL);
+	unsigned short __free(kfree) *new_map =
+		kmalloc_array(ARRAY_SIZE(plain_map), sizeof(*new_map),
+			      GFP_KERNEL);
 	if (!new_map)
 		return -ENOMEM;
 

@@ -215,7 +215,7 @@ static int davinci_evm_probe(struct platform_device *pdev)
 		mclk = NULL;
 	}
 
-	drvdata = devm_kzalloc(&pdev->dev, sizeof(*drvdata), GFP_KERNEL);
+	drvdata = devm_kzalloc_obj(&pdev->dev, *drvdata);
 	if (!drvdata) {
 		ret = -ENOMEM;
 		goto err_put;
@@ -245,9 +245,8 @@ static int davinci_evm_probe(struct platform_device *pdev)
 
 	snd_soc_card_set_drvdata(&evm_soc_card, drvdata);
 	ret = devm_snd_soc_register_card(&pdev->dev, &evm_soc_card);
-
 	if (ret) {
-		dev_err(&pdev->dev, "snd_soc_register_card failed (%d)\n", ret);
+		dev_err_probe(&pdev->dev, ret, "snd_soc_register_card() failed\n");
 		goto err_put;
 	}
 

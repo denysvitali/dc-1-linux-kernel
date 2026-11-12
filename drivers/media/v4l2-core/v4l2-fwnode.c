@@ -581,8 +581,7 @@ int v4l2_fwnode_endpoint_alloc_parse(struct fwnode_handle *fwnode,
 		unsigned int i;
 
 		vep->link_frequencies =
-			kmalloc_array(rval, sizeof(*vep->link_frequencies),
-				      GFP_KERNEL);
+			kmalloc_objs(*vep->link_frequencies, rval);
 		if (!vep->link_frequencies)
 			return -ENOMEM;
 
@@ -632,6 +631,8 @@ int v4l2_fwnode_parse_link(struct fwnode_handle *fwnode,
 	link->remote_node = fwnode_graph_get_port_parent(fwnode);
 	if (!link->remote_node)
 		goto err_put_remote_endpoint;
+
+	fwnode_handle_put(fwnode);
 
 	return 0;
 

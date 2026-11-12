@@ -9,8 +9,6 @@
 #include "svm_util.h"
 #include "vmx.h"
 
-#define L2_GUEST_STACK_SIZE 64
-
 enum test_type {
 	TEST_FINAL_PAGE_UNMAPPED,	    /* Final data page not present */
 	TEST_PT_PAGE_UNMAPPED,		    /* Page table page not present */
@@ -54,29 +52,28 @@ static void l2_guest_code_ins(void)
 static void l1_vmx_code(struct vmx_pages *vmx, u64 expected_fault_gpa,
 			u64 test_type)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 	u64 exit_qual;
 
 	GUEST_ASSERT(vmx->vmcs_gpa);
-	GUEST_ASSERT(prepare_for_vmx_operation(vmx));
-	GUEST_ASSERT(load_vmcs(vmx));
+	prepare_for_vmx_operation(vmx);
+	load_vmcs(vmx);
 
-	prepare_vmcs(vmx, l2_entry, &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	prepare_vmcs(vmx, l2_entry);
 
-	GUEST_ASSERT(!vmlaunch());
+	vmlaunch();
 
 	/* Verify we got an EPT violation exit */
-	__GUEST_ASSERT(vmreadz(VM_EXIT_REASON) == EXIT_REASON_EPT_VIOLATION,
+	__GUEST_ASSERT(vmread(VM_EXIT_REASON) == EXIT_REASON_EPT_VIOLATION,
 		       "Expected EPT violation (0x%x), got 0x%lx",
 		       EXIT_REASON_EPT_VIOLATION,
-		       vmreadz(VM_EXIT_REASON));
+		       vmread(VM_EXIT_REASON));
 
-	__GUEST_ASSERT(vmreadz(GUEST_PHYSICAL_ADDRESS) == expected_fault_gpa,
+	__GUEST_ASSERT(vmread(GUEST_PHYSICAL_ADDRESS) == expected_fault_gpa,
 		       "Expected guest_physical_address = 0x%lx, got 0x%lx",
 		       expected_fault_gpa,
-		       vmreadz(GUEST_PHYSICAL_ADDRESS));
+		       vmread(GUEST_PHYSICAL_ADDRESS));
 
-	exit_qual = vmreadz(EXIT_QUALIFICATION);
+	exit_qual = vmread(EXIT_QUALIFICATION);
 
 	/*
 	 * Note, EPT page table accesses are always read+write, e.g. so that
@@ -120,12 +117,10 @@ static void l1_vmx_code(struct vmx_pages *vmx, u64 expected_fault_gpa,
 static void l1_svm_code(struct svm_test_data *svm, u64 expected_fault_gpa,
 			 u64 test_type)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 	struct vmcb *vmcb = svm->vmcb;
 	u64 exit_info_1;
 
-	generic_svm_setup(svm, l2_entry,
-			  &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	generic_svm_setup(svm, l2_entry);
 
 	run_guest(vmcb, svm->vmcb_gpa);
 

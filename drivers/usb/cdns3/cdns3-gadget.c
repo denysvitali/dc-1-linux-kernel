@@ -3190,8 +3190,7 @@ static int cdns3_init_eps(struct cdns3_device *priv_dev)
 			continue;
 		}
 
-		priv_ep = devm_kzalloc(priv_dev->dev, sizeof(*priv_ep),
-				       GFP_KERNEL);
+		priv_ep = devm_kzalloc_obj(priv_dev->dev, *priv_ep);
 		if (!priv_ep)
 			goto err;
 
@@ -3268,6 +3267,10 @@ static void cdns3_gadget_exit(struct cdns *cdns)
 
 	usb_del_gadget(&priv_dev->gadget);
 	devm_free_irq(cdns->dev, cdns->dev_irq, priv_dev);
+
+	/* The works can still be queued until the IRQ is freed. */
+	cancel_work_sync(&priv_dev->pending_status_wq);
+	cancel_work_sync(&priv_dev->aligned_buf_wq);
 
 	cdns3_free_all_eps(priv_dev);
 
@@ -3376,7 +3379,7 @@ static int cdns3_gadget_start(struct cdns *cdns)
 
 	/* allocate memory for setup packet buffer */
 	priv_dev->setup_buf = dma_alloc_coherent(priv_dev->sysdev, 8,
-						 &priv_dev->setup_dma, GFP_DMA);
+						 &priv_dev->setup_dma, GFP_KERNEL);
 	if (!priv_dev->setup_buf) {
 		ret = -ENOMEM;
 		goto err2;
@@ -3508,7 +3511,7 @@ int cdns3_gadget_init(struct cdns *cdns)
 {
 	struct cdns_role_driver *rdrv;
 
-	rdrv = devm_kzalloc(cdns->dev, sizeof(*rdrv), GFP_KERNEL);
+	rdrv = devm_kzalloc_obj(cdns->dev, *rdrv);
 	if (!rdrv)
 		return -ENOMEM;
 

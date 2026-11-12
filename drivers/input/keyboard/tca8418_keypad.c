@@ -254,7 +254,8 @@ static int tca8418_configure(struct tca8418_keypad *keypad_data,
 		return error;
 
 	error = tca8418_write_byte(keypad_data, REG_CFG,
-				CFG_INT_CFG | CFG_OVR_FLOW_IEN | CFG_KE_IEN);
+				   CFG_INT_CFG | CFG_OVR_FLOW_IEN |
+					CFG_OVR_FLOW_M | CFG_KE_IEN);
 
 	return error;
 }
@@ -292,7 +293,7 @@ static int tca8418_keypad_probe(struct i2c_client *client)
 	row_shift = get_count_order(cols);
 
 	/* Allocate memory for keypad_data and input device */
-	keypad_data = devm_kzalloc(dev, sizeof(*keypad_data), GFP_KERNEL);
+	keypad_data = devm_kzalloc_obj(dev, *keypad_data);
 	if (!keypad_data)
 		return -ENOMEM;
 

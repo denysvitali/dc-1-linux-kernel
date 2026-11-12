@@ -401,6 +401,57 @@ Res0	3:1
 Field	0	SO
 EndSysreg
 
+SysregFields	SPSR_ELx
+Res0	63:37
+Field	36	UINJ
+Field	35	PACM
+Field	34	EXLOCK
+Res0	33
+Field	32	PM
+Field	31	N
+Field	30	Z
+Field	29	C
+Field	28	V
+Res0	27:26
+Field	25	TCO
+Field	24	DIT
+Field	23	UAO
+Field	22	PAN
+Field	21	SS
+Field	20	IL
+Res0	19:14
+Field	13	ALLINT
+Field	12	SSBS
+Field	11:10	BTYPE
+Field	9	D
+Field	8	A
+Field	7	I
+Field	6	F
+Res0	5
+Field	4	M4
+Enum	3:0	M
+	0b0000	EL0
+	0b0100	EL1t
+	0b0101	EL1h
+	0b1000	EL2t
+	0b1001	EL2h
+	0b1100	EL3t
+	0b1101	EL3h
+EndEnum
+EndSysregFields
+
+Sysreg	SPSR_EL1	3	0	4	0	0
+Fields	SPSR_ELx
+EndSysreg
+
+Sysreg	SPSR_EL2	3	4	4	0	0
+Fields	SPSR_ELx
+EndSysreg
+
+Sysreg	SPSR_EL12	3	5	4	0	0
+Mapping	SPSR_EL1
+EndSysreg
+
 Sysreg ID_PFR0_EL1	3	0	0	1	0
 Res0	63:32
 UnsignedEnum	31:28	RAS
@@ -434,7 +485,7 @@ EndEnum
 UnsignedEnum	7:4	State1
 	0b0000	NI
 	0b0001	THUMB
-	0b0010	THUMB2
+	0b0011	THUMB2
 EndEnum
 UnsignedEnum	3:0	State0
 	0b0000	NI
@@ -469,7 +520,7 @@ UnsignedEnum	15:12	Virtualization
 EndEnum
 UnsignedEnum	11:8	MProgMod
 	0b0000	NI
-	0b0001	IMP
+	0b0010	IMP
 EndEnum
 Enum	7:4	Security
 	0b0000	NI
@@ -1338,10 +1389,7 @@ Res0	63:47
 Field	46	CCU
 Field	45:40	CC_EXP
 Field	39:32	CC_MANT
-Res0	31:18
-Field	17	LASTFAILED
-Field	16	T
-Res0	15:14
+Res0	31:14
 Enum	13:8		TYPE
 	0b000000	DIRECT_UNCOND
 	0b000001	INDIRECT
@@ -1420,8 +1468,7 @@ Field	17	DIRECT
 Field	16	EnI
 Res0	15:8
 Field	7	PAUSED
-Field	6	LASTFAILED
-Res0	5:0
+Res0	6:0
 EndSysreg
 
 Sysreg	BRBTS_EL1	2	1	9	0	2
@@ -2259,6 +2306,7 @@ UnsignedEnum	55:52	BBM
 	0b0000	0
 	0b0001	1
 	0b0010	2
+	0b0011	3
 EndEnum
 UnsignedEnum	51:48	TTL
 	0b0000	NI
@@ -2386,17 +2434,40 @@ EndEnum
 EndSysreg
 
 Sysreg	ID_AA64MMFR4_EL1	3	0	0	7	4
-Res0	63:48
-UnsignedEnum	47:44	SRMASK
+UnsignedEnum	63:60	MTEFGT
 	0b0000	NI
 	0b0001	IMP
 EndEnum
-Res0	43:40
+UnsignedEnum	59:56	SCRX
+	0b0000	NI
+	0b0001	IMP
+EndEnum
+UnsignedEnum	55:52	TEV
+	0b0000	NI
+	0b0001	IMP
+EndEnum
+UnsignedEnum	51:48	TPS
+	0b0000	VAL_0000
+	0b0001	VAL_0001
+	0b0010	VAL_0010
+EndEnum
+UnsignedEnum	47:44	SRMASK
+	0b0000	NI
+	0b0001	IMP
+	0b0010	SRMASK2
+EndEnum
+UnsignedEnum	43:40	TLBID
+	0b0000	NI
+	0b0001	IMP
+EndEnum
 UnsignedEnum	39:36	E3DSE
 	0b0000	NI
 	0b0001	IMP
 EndEnum
-Res0	35:32
+UnsignedEnum	35:32	EAESR
+	0b0000	NI
+	0b0001	IMP
+EndEnum
 UnsignedEnum	31:28	RMEGDI
 	0b0000	NI
 	0b0001	IMP
@@ -2410,6 +2481,7 @@ UnsignedEnum	23:20	NV_frac
 	0b0000	NV_NV2
 	0b0001	NV2_ONLY
 	0b0010	NV2P1
+	0b0011	NV3
 EndEnum
 UnsignedEnum	19:16	FGWTE3
 	0b0000	NI
@@ -2638,11 +2710,7 @@ Field	57	EPAN
 Field	56	EnALS
 Field	55	EnAS0
 Field	54	EnASR
-Field	53	TME
-Field	52	TME0
-Field	51	TMT
-Field	50	TMT0
-Res0	49:47
+Res0	53:47
 Field	46	TWEDEL
 Field	45	TWEDEn
 Field	44	DSSBS
@@ -2960,7 +3028,7 @@ Field	27	NSH
 Field	26	M
 Res0	25
 Field	24	SH
-Field	23	T
+Res0	23
 Field	22	RLK
 Field	21	RLU
 Field	20	RLH
@@ -3736,7 +3804,9 @@ Sysreg	ICC_CR0_EL1	3	1	12	0	1
 Res0	63:39
 Field	38	PID
 Field	37:32	IPPT
-Res0	31:1
+Res0	31:3
+Field	2	LINK_IDLE
+Field	1	LINK
 Field	0	EN
 EndSysreg
 
@@ -4242,6 +4312,9 @@ Field	1	E2TRE
 Field	0	E0HTRE
 EndSysreg
 
+Sysreg	NVHCR_EL2	3	4	1	5	0
+Mapping	HCR_EL2
+EndSysreg
 
 Sysreg HDFGRTR2_EL2	3	4	3	1	0
 Res0	63:25
@@ -4306,7 +4379,7 @@ Field	14	nACTLRALIAS_EL1
 Field	13	nACTLRMASK_EL1
 Field	12	nTCR2ALIAS_EL1
 Field	11	nTCRALIAS_EL1
-Field	10	nSCTLRALIAS2_EL1
+Field	10	nSCTLR2ALIAS_EL1
 Field	9	nSCTLRALIAS_EL1
 Field	8	nCPACRALIAS_EL1
 Field	7	nTCR2MASK_EL1
@@ -4325,7 +4398,7 @@ Field	14	nACTLRALIAS_EL1
 Field	13	nACTLRMASK_EL1
 Field	12	nTCR2ALIAS_EL1
 Field	11	nTCRALIAS_EL1
-Field	10	nSCTLRALIAS2_EL1
+Field	10	nSCTLR2ALIAS_EL1
 Field	9	nSCTLRALIAS_EL1
 Field	8	nCPACRALIAS_EL1
 Field	7	nTCR2MASK_EL1
@@ -4521,7 +4594,14 @@ Fields	ZCR_ELx
 EndSysreg
 
 Sysreg	HCRX_EL2	3	4	1	2	2
-Res0	63:25
+Res0	63:35
+Field	34	NVnTTLBOS
+Field	33	NVnTTLBIS
+Field	32	NVnTTLB
+Res0	31:28
+Field	27	NVTGE
+Field	26	SRMASKEn
+Res0	25
 Field	24	PACMEn
 Field	23	EnFPM
 Field	22	GCSEn
@@ -4555,7 +4635,7 @@ Field	55:52	P13
 Field	51:48	P12
 Field	47:44	P11
 Field	43:40	P10
-Field	39:36	F9
+Field	39:36	P9
 Field	35:32	P8
 Field	31:28	P7
 Field	27:24	P6
@@ -4615,7 +4695,7 @@ Enum	15:14	TG0
 EndEnum
 Enum	13:12	SH0
 	0b00	NONE
-	0b01	OUTER
+	0b10	OUTER
 	0b11	INNER
 EndEnum
 Enum	11:10	ORGN0

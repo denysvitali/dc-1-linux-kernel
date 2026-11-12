@@ -2227,6 +2227,7 @@ static int k230_clk_set_rate_mul(struct clk_hw *hw, unsigned long rate,
 	guard(spinlock)(rate_self->lock);
 
 	mul_reg = readl(rate_self->reg + clk->mul_reg_off);
+	mul_reg &= ~(rate_self->mul_mask << rate_self->mul_shift);
 	mul_reg |= ((mul - 1) & rate_self->mul_mask) << (rate_self->mul_shift);
 	mul_reg |= BIT(rate_self->write_enable_bit);
 	writel(mul_reg, rate_self->reg + clk->mul_reg_off);
@@ -2257,6 +2258,7 @@ static int k230_clk_set_rate_div(struct clk_hw *hw, unsigned long rate,
 	guard(spinlock)(rate_self->lock);
 
 	div_reg = readl(rate_self->reg + clk->div_reg_off);
+	div_reg &= ~(rate_self->div_mask << rate_self->div_shift);
 	div_reg |= ((div - 1) & rate_self->div_mask) << (rate_self->div_shift);
 	div_reg |= BIT(rate_self->write_enable_bit);
 	writel(div_reg, rate_self->reg + clk->div_reg_off);
@@ -2287,11 +2289,13 @@ static int k230_clk_set_rate_mul_div(struct clk_hw *hw, unsigned long rate,
 	guard(spinlock)(rate_self->lock);
 
 	div_reg = readl(rate_self->reg + clk->div_reg_off);
+	div_reg &= ~(rate_self->div_mask << rate_self->div_shift);
 	div_reg |= ((div - 1) & rate_self->div_mask) << (rate_self->div_shift);
 	div_reg |= BIT(rate_self->write_enable_bit);
 	writel(div_reg, rate_self->reg + clk->div_reg_off);
 
 	mul_reg = readl(rate_self->reg + clk->mul_reg_off);
+	mul_reg &= ~(rate_self->mul_mask << rate_self->mul_shift);
 	mul_reg |= ((mul - 1) & rate_self->mul_mask) << (rate_self->mul_shift);
 	mul_reg |= BIT(rate_self->write_enable_bit);
 	writel(mul_reg, rate_self->reg + clk->mul_reg_off);
@@ -2368,7 +2372,7 @@ static int k230_clk_init_plls(struct platform_device *pdev)
 	/* used for all the plls */
 	spinlock_t *lock;
 
-	lock = devm_kzalloc(&pdev->dev, sizeof(*lock), GFP_KERNEL);
+	lock = devm_kzalloc_obj(&pdev->dev, *lock);
 	if (!lock)
 		return -ENOMEM;
 
@@ -2397,7 +2401,7 @@ static int k230_clk_init_clks(struct platform_device *pdev,
 	/* used for all the clocks */
 	spinlock_t *lock;
 
-	lock = devm_kzalloc(&pdev->dev, sizeof(*lock), GFP_KERNEL);
+	lock = devm_kzalloc_obj(&pdev->dev, *lock);
 	if (!lock)
 		return -ENOMEM;
 
@@ -2421,8 +2425,7 @@ static int k230_clk_probe(struct platform_device *pdev)
 	int ret;
 	struct clk_hw_onecell_data *hw_data;
 
-	hw_data = devm_kzalloc(&pdev->dev, struct_size(hw_data, hws, K230_CLK_NUM),
-			       GFP_KERNEL);
+	hw_data = devm_kzalloc_flex(&pdev->dev, *hw_data, hws, K230_CLK_NUM);
 	if (!hw_data)
 		return -ENOMEM;
 

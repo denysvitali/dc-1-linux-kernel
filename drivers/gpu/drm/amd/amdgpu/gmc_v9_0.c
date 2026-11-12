@@ -57,11 +57,13 @@
 #include "umc_v6_0.h"
 #include "umc_v6_7.h"
 #include "umc_v12_0.h"
+#include "ras_umc_v12_0.h"
 #include "hdp_v4_0.h"
 #include "mca_v3_0.h"
 
 #include "ivsrcid/vmc/irqsrcs_vmc_1_0.h"
 
+#include "amdgpu_ip.h"
 #include "amdgpu_ras.h"
 #include "amdgpu_xgmi.h"
 
@@ -1382,7 +1384,7 @@ static void gmc_v9_0_set_umc_funcs(struct amdgpu_device *adev)
 	case IP_VERSION(12, 0, 0):
 	case IP_VERSION(12, 5, 0):
 		adev->umc.max_ras_err_cnt_per_query =
-			UMC_V12_0_TOTAL_CHANNEL_NUM(adev) * UMC_V12_0_BAD_PAGE_NUM_PER_CHANNEL;
+			UMC_V12_0_TOTAL_CHANNEL_NUM * UMC_V12_0_BAD_PAGE_NUM_PER_CHANNEL;
 		adev->umc.channel_inst_num = UMC_V12_0_CHANNEL_INSTANCE_NUM;
 		adev->umc.umc_inst_num = UMC_V12_0_UMC_INSTANCE_NUM;
 		adev->umc.node_inst_num /= UMC_V12_0_UMC_INSTANCE_NUM;
@@ -1638,10 +1640,6 @@ static int gmc_v9_0_late_init(struct amdgpu_ip_block *ip_block)
 		amdgpu_ras_reset_error_count(adev, AMDGPU_RAS_BLOCK__MMHUB);
 		amdgpu_ras_reset_error_count(adev, AMDGPU_RAS_BLOCK__HDP);
 	}
-
-	r = amdgpu_gmc_ras_late_init(adev);
-	if (r)
-		return r;
 
 	return amdgpu_irq_get(adev, &adev->gmc.vm_fault, 0);
 }
@@ -2025,14 +2023,28 @@ static int gmc_v9_0_sw_init(struct amdgpu_ip_block *ip_block)
 	 * The first KFD VMID is 8 for GPUs with graphics, 3 for
 	 * compute-only GPUs. On compute-only GPUs that leaves 2 VMIDs
 	 * for video processing.
+	 *
+	 * If kernel queues are disabled, allow KFD to use all vmids.
 	 */
-	adev->vm_manager.first_kfd_vmid =
-		(amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(9, 4, 1) ||
-		 amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(9, 4, 2) ||
-		 amdgpu_is_multi_aid(adev)) ?
+	if (adev->gfx.disable_kq &&
+	    adev->jpeg.disable_kq &&
+	    adev->vcn.disable_kq &&
+	    adev->sdma.no_user_submission)
+		adev->vm_manager.first_kfd_vmid = 1;
+	else
+		adev->vm_manager.first_kfd_vmid =
+			(amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(9, 4, 1) ||
+			 amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(9, 4, 2) ||
+			 amdgpu_is_multi_aid(adev)) ?
 			3 :
 			8;
 
+	amdgpu_vmid_mgr_set_vmid_mask(adev,
+				      GENMASK(adev->vm_manager.first_kfd_vmid - 1, 1),
+				      false);
+	amdgpu_vmid_mgr_set_vmid_mask(adev,
+				      GENMASK(adev->vm_manager.first_kfd_vmid - 1, 1),
+				      true);
 	amdgpu_vm_manager_init(adev);
 
 	gmc_v9_0_save_registers(adev);
@@ -2054,7 +2066,6 @@ static int gmc_v9_0_sw_fini(struct amdgpu_ip_block *ip_block)
 	if (amdgpu_is_multi_aid(adev))
 		amdgpu_gmc_sysfs_fini(adev);
 
-	amdgpu_gmc_ras_fini(adev);
 	amdgpu_gem_force_release(adev);
 	amdgpu_vm_manager_fini(adev);
 	if (!adev->gmc.real_vram_size) {
@@ -2168,10 +2179,22 @@ static int gmc_v9_0_hw_init(struct amdgpu_ip_block *ip_block)
 	 * (type 2), which flushes both. Due to a race condition with
 	 * concurrent memory accesses using the same TLB cache line, we still
 	 * need a second TLB flush after this.
+	 *
+	 * GC 9.4.3, 9.4.4 and 9.5.0 hit a similar race.
 	 */
-	adev->gmc.flush_tlb_needs_extra_type_2 =
-		amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(9, 4, 0) &&
-		adev->gmc.xgmi.num_physical_nodes;
+	switch (amdgpu_ip_version(adev, GC_HWIP, 0)) {
+	case IP_VERSION(9, 4, 0):
+		adev->gmc.flush_tlb_needs_extra_type_2 =
+			adev->gmc.xgmi.num_physical_nodes;
+		break;
+	case IP_VERSION(9, 4, 3):
+	case IP_VERSION(9, 4, 4):
+	case IP_VERSION(9, 5, 0):
+		adev->gmc.flush_tlb_needs_extra_type_2 = true;
+		break;
+	default:
+		break;
+	}
 
 	/* The sequence of these two function calls matters.*/
 	gmc_v9_0_init_golden_registers(adev);
@@ -2296,21 +2319,9 @@ static int gmc_v9_0_resume(struct amdgpu_ip_block *ip_block)
 	return 0;
 }
 
-static bool gmc_v9_0_is_idle(struct amdgpu_ip_block *ip_block)
-{
-	/* MC is always ready in GMC v9.*/
-	return true;
-}
-
 static int gmc_v9_0_wait_for_idle(struct amdgpu_ip_block *ip_block)
 {
 	/* There is no need to wait for MC idle in GMC v9.*/
-	return 0;
-}
-
-static int gmc_v9_0_soft_reset(struct amdgpu_ip_block *ip_block)
-{
-	/* XXX for emulation.*/
 	return 0;
 }
 
@@ -2351,9 +2362,7 @@ const struct amd_ip_funcs gmc_v9_0_ip_funcs = {
 	.hw_fini = gmc_v9_0_hw_fini,
 	.suspend = gmc_v9_0_suspend,
 	.resume = gmc_v9_0_resume,
-	.is_idle = gmc_v9_0_is_idle,
 	.wait_for_idle = gmc_v9_0_wait_for_idle,
-	.soft_reset = gmc_v9_0_soft_reset,
 	.set_clockgating_state = gmc_v9_0_set_clockgating_state,
 	.set_powergating_state = gmc_v9_0_set_powergating_state,
 	.get_clockgating_state = gmc_v9_0_get_clockgating_state,

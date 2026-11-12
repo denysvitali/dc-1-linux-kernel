@@ -140,7 +140,6 @@ config FORCE_TASKS_TRACE_RCU
 config TASKS_TRACE_RCU
 	bool
 	default n
-	select IRQ_WORK
 
 config TASKS_TRACE_RCU_NO_MB
 	bool "Override RCU Tasks Trace inclusion of read-side memory barriers"
@@ -175,6 +174,12 @@ config RCU_STALL_COMMON
 
 config RCU_NEED_SEGCBLIST
 	def_bool ( TREE_RCU || TREE_SRCU || TASKS_RCU_GENERIC )
+
+# The deferral (and the IRQ_WORK it uses) is only needed where call_rcu() /
+# call_srcu() can be invoked while a callback-list operation is in flight.
+config RCU_DEFER
+	def_bool HAVE_NMI || KPROBES || FUNCTION_TRACER || TRACEPOINTS
+	select IRQ_WORK
 
 config RCU_FANOUT
 	int "Tree-based hierarchical RCU fanout value"

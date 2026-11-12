@@ -8,6 +8,7 @@
 #include <linux/bitops.h>
 #include <linux/bits.h>
 #include <linux/build_bug.h>
+#include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -670,6 +671,16 @@ static int cs42l43_dai_remove(struct snd_soc_dai *dai)
 	return 0;
 }
 
+static const u64 cs42l43_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops cs42l43_asp_ops = {
 	.probe		= cs42l43_dai_probe,
 	.remove		= cs42l43_dai_remove,
@@ -677,6 +688,8 @@ static const struct snd_soc_dai_ops cs42l43_asp_ops = {
 	.hw_params	= cs42l43_asp_hw_params,
 	.set_fmt	= cs42l43_asp_set_fmt,
 	.set_tdm_slot	= cs42l43_asp_set_tdm_slot,
+	.auto_selectable_formats	= &cs42l43_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static int cs42l43_sdw_hw_params(struct snd_pcm_substream *substream,
@@ -1207,14 +1220,12 @@ static void cs42l43_spk_vu_sync(struct cs42l43_codec *priv)
 {
 	struct cs42l43 *cs42l43 = priv->core;
 
-	mutex_lock(&priv->spk_vu_lock);
+	guard(mutex)(&priv->spk_vu_lock);
 
 	regmap_update_bits(cs42l43->regmap, CS42L43_INTP_VOLUME_CTRL1,
 			   CS42L43_AMP1_2_VU_MASK, CS42L43_AMP1_2_VU_MASK);
 	regmap_update_bits(cs42l43->regmap, CS42L43_INTP_VOLUME_CTRL1,
 			   CS42L43_AMP1_2_VU_MASK, 0);
-
-	mutex_unlock(&priv->spk_vu_lock);
 }
 
 static int cs42l43_shutter_get(struct cs42l43_codec *priv, unsigned int shift)
@@ -1601,7 +1612,7 @@ static int cs42l43_pll_ev(struct snd_soc_dapm_widget *w,
 	struct cs42l43 *cs42l43 = priv->core;
 	int ret;
 
-	mutex_lock(&cs42l43->pll_lock);
+	guard(mutex)(&cs42l43->pll_lock);
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
@@ -1625,8 +1636,6 @@ static int cs42l43_pll_ev(struct snd_soc_dapm_widget *w,
 		ret = 0;
 		break;
 	}
-
-	mutex_unlock(&cs42l43->pll_lock);
 
 	return ret;
 }
@@ -2565,13 +2574,10 @@ static int cs42l43_set_sysclk(struct snd_soc_component *component, int clk_id,
 {
 	struct cs42l43_codec *priv = snd_soc_component_get_drvdata(component);
 	struct cs42l43 *cs42l43 = priv->core;
-	int ret;
 
-	mutex_lock(&cs42l43->pll_lock);
-	ret = cs42l43_set_pll(priv, src, freq);
-	mutex_unlock(&cs42l43->pll_lock);
+	guard(mutex)(&cs42l43->pll_lock);
 
-	return ret;
+	return cs42l43_set_pll(priv, src, freq);
 }
 
 static int cs42l43_component_probe(struct snd_soc_component *component)
@@ -2777,7 +2783,7 @@ static int cs42l43_codec_probe(struct platform_device *pdev)
 	unsigned int val;
 	int i, ret;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -2941,8 +2947,8 @@ static const struct dev_pm_ops cs42l43_codec_pm_ops = {
 };
 
 static const struct platform_device_id cs42l43_codec_id_table[] = {
-	{ "cs42l43-codec", },
-	{}
+	{ .name = "cs42l43-codec" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, cs42l43_codec_id_table);
 

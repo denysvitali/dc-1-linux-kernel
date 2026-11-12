@@ -11,8 +11,6 @@
 #include "kselftest.h"
 
 
-#define L2_GUEST_STACK_SIZE 64
-
 static void l2_guest_code(void)
 {
 	vmcall();
@@ -20,11 +18,9 @@ static void l2_guest_code(void)
 
 static void l1_svm_code(struct svm_test_data *svm)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 	uintptr_t save_cr3;
 
-	generic_svm_setup(svm, l2_guest_code,
-			  &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	generic_svm_setup(svm, l2_guest_code);
 
 	/* Try to run L2 with invalid CR3 and make sure it fails */
 	save_cr3 = svm->vmcb->save.cr3;
@@ -42,26 +38,24 @@ static void l1_svm_code(struct svm_test_data *svm)
 
 static void l1_vmx_code(struct vmx_pages *vmx_pages)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 	uintptr_t save_cr3;
 
-	GUEST_ASSERT(prepare_for_vmx_operation(vmx_pages));
-	GUEST_ASSERT(load_vmcs(vmx_pages));
+	prepare_for_vmx_operation(vmx_pages);
+	load_vmcs(vmx_pages);
 
-	prepare_vmcs(vmx_pages, l2_guest_code,
-		     &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	prepare_vmcs(vmx_pages, l2_guest_code);
 
 	/* Try to run L2 with invalid CR3 and make sure it fails */
-	save_cr3 = vmreadz(GUEST_CR3);
+	save_cr3 = vmread(GUEST_CR3);
 	vmwrite(GUEST_CR3, -1ull);
-	GUEST_ASSERT(!vmlaunch());
-	GUEST_ASSERT(vmreadz(VM_EXIT_REASON) ==
+	vmlaunch();
+	GUEST_ASSERT(vmread(VM_EXIT_REASON) ==
 		     (EXIT_REASON_FAILED_VMENTRY | EXIT_REASON_INVALID_STATE));
 
 	/* Now restore CR3 and make sure L2 runs successfully */
 	vmwrite(GUEST_CR3, save_cr3);
-	GUEST_ASSERT(!vmlaunch());
-	GUEST_ASSERT(vmreadz(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
+	vmlaunch();
+	GUEST_ASSERT(vmread(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
 
 	GUEST_DONE();
 }

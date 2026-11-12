@@ -163,7 +163,7 @@ static int lan966x_pci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 	if (ret)
 		return ret;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -183,6 +183,7 @@ static int lan966x_pci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 	return 0;
 
 err_unload_overlay:
+	of_platform_depopulate(dev);
 	lan966x_pci_unload_overlay(data);
 	return ret;
 }

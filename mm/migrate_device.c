@@ -77,6 +77,9 @@ static int migrate_vma_collect_hole(unsigned long start,
  * @folio: the folio to split
  * @fault_page: struct page associated with the fault if any
  *
+ * If @folio is not the folio containing @fault_page, the caller must hold a
+ * reference on @folio. The helper consumes that reference.
+ *
  * Returns 0 on success
  */
 static int migrate_vma_split_folio(struct folio *folio,
@@ -86,10 +89,8 @@ static int migrate_vma_split_folio(struct folio *folio,
 	struct folio *fault_folio = fault_page ? page_folio(fault_page) : NULL;
 	struct folio *new_fault_folio = NULL;
 
-	if (folio != fault_folio) {
-		folio_get(folio);
+	if (folio != fault_folio)
 		folio_lock(folio);
-	}
 
 	ret = split_folio(folio);
 	if (ret) {
@@ -166,11 +167,14 @@ static int migrate_vma_collect_huge_pmd(pmd_t *pmdp, unsigned long start,
 	} else if (!pmd_present(*pmdp)) {
 		const softleaf_t entry = softleaf_from_pmd(*pmdp);
 
-		folio = softleaf_to_folio(entry);
-
 		if (!softleaf_is_device_private(entry) ||
-			!(migrate->flags & MIGRATE_VMA_SELECT_DEVICE_PRIVATE) ||
-			(folio->pgmap->owner != migrate->pgmap_owner)) {
+		    !(migrate->flags & MIGRATE_VMA_SELECT_DEVICE_PRIVATE)) {
+			spin_unlock(ptl);
+			return migrate_vma_collect_skip(start, end, walk);
+		}
+
+		folio = softleaf_to_folio(entry);
+		if (folio->pgmap->owner != migrate->pgmap_owner) {
 			spin_unlock(ptl);
 			return migrate_vma_collect_skip(start, end, walk);
 		}
@@ -307,6 +311,9 @@ again:
 			if (folio_test_large(folio)) {
 				int ret;
 
+				/* migrate_vma_split_folio() consumes this reference */
+				if (folio != fault_folio)
+					folio_get(folio);
 				lazy_mmu_mode_disable();
 				pte_unmap_unlock(ptep, ptl);
 				ret = migrate_vma_split_folio(folio,
@@ -350,6 +357,9 @@ again:
 			if (folio && folio_test_large(folio)) {
 				int ret;
 
+				/* migrate_vma_split_folio() consumes this reference */
+				if (folio != fault_folio)
+					folio_get(folio);
 				lazy_mmu_mode_disable();
 				pte_unmap_unlock(ptep, ptl);
 				ret = migrate_vma_split_folio(folio,
@@ -401,7 +411,8 @@ again:
 			bool anon_exclusive;
 			pte_t swp_pte;
 
-			flush_cache_page(vma, addr, pte_pfn(pte));
+			if (pte_present(pte))
+				flush_cache_page(vma, addr, pte_pfn(pte));
 			anon_exclusive = folio_test_anon(folio) &&
 					  PageAnonExclusive(page);
 			if (anon_exclusive) {
@@ -422,7 +433,7 @@ again:
 			migrate->cpages++;
 
 			/* Set the dirty flag on the folio now the pte is gone. */
-			if (pte_dirty(pte))
+			if (pte_present(pte) && pte_dirty(pte))
 				folio_mark_dirty(folio);
 
 			/* Setup special migration page table entry */
@@ -445,13 +456,13 @@ again:
 			if (pte_present(pte)) {
 				if (pte_soft_dirty(pte))
 					swp_pte = pte_swp_mksoft_dirty(swp_pte);
-				if (pte_uffd_wp(pte))
-					swp_pte = pte_swp_mkuffd_wp(swp_pte);
+				if (pte_uffd(pte))
+					swp_pte = pte_swp_mkuffd(swp_pte);
 			} else {
 				if (pte_swp_soft_dirty(pte))
 					swp_pte = pte_swp_mksoft_dirty(swp_pte);
-				if (pte_swp_uffd_wp(pte))
-					swp_pte = pte_swp_mkuffd_wp(swp_pte);
+				if (pte_swp_uffd(pte))
+					swp_pte = pte_swp_mkuffd(swp_pte);
 			}
 			set_pte_at(mm, addr, ptep, swp_pte);
 
@@ -513,7 +524,7 @@ static void migrate_vma_collect(struct migrate_vma *migrate)
 		migrate->pgmap_owner);
 	mmu_notifier_invalidate_range_start(&range);
 
-	walk_page_range(migrate->vma->vm_mm, migrate->start, migrate->end,
+	walk_page_range_vma(migrate->vma, migrate->start, migrate->end,
 			&migrate_vma_walk_ops, migrate);
 
 	mmu_notifier_invalidate_range_end(&range);
@@ -728,19 +739,21 @@ static void migrate_vma_unmap(struct migrate_vma *migrate)
  */
 int migrate_vma_setup(struct migrate_vma *args)
 {
+	const struct vm_area_struct *vma = args->vma;
 	long nr_pages = (args->end - args->start) >> PAGE_SHIFT;
 
 	args->start &= PAGE_MASK;
 	args->end &= PAGE_MASK;
-	if (!args->vma || is_vm_hugetlb_page(args->vma) ||
-	    (args->vma->vm_flags & VM_SPECIAL) || vma_is_dax(args->vma))
+	if (!vma)
+		return -EINVAL;
+	/* The migrate_vma page walk has no hugetlb support. */
+	if (!vma_is_mm_backed(vma) || vma_is_hugetlb(vma) || vma_is_dax(vma))
 		return -EINVAL;
 	if (nr_pages <= 0)
 		return -EINVAL;
-	if (args->start < args->vma->vm_start ||
-	    args->start >= args->vma->vm_end)
+	if (args->start < vma->vm_start || args->start >= vma->vm_end)
 		return -EINVAL;
-	if (args->end <= args->vma->vm_start || args->end > args->vma->vm_end)
+	if (args->end <= vma->vm_start || args->end > vma->vm_end)
 		return -EINVAL;
 	if (!args->src || !args->dst)
 		return -EINVAL;
@@ -768,7 +781,7 @@ int migrate_vma_setup(struct migrate_vma *args)
 }
 EXPORT_SYMBOL(migrate_vma_setup);
 
-#ifdef CONFIG_ARCH_ENABLE_THP_MIGRATION
+#ifdef CONFIG_ARCH_HAS_PMD_SOFTLEAVES
 /**
  * migrate_vma_insert_huge_pmd_page: Insert a huge folio into @migrate->vma->vm_mm
  * at @addr. folio is already allocated as a part of the migration process with
@@ -835,7 +848,7 @@ static int migrate_vma_insert_huge_pmd_page(struct migrate_vma *migrate,
 		else
 			swp_entry = make_readable_device_private_entry(
 						page_to_pfn(page));
-		entry = swp_entry_to_pmd(swp_entry);
+		entry = softleaf_to_pmd(swp_entry);
 	} else {
 		if (folio_is_zone_device(folio) &&
 		    !folio_is_device_coherent(folio)) {
@@ -871,7 +884,7 @@ static int migrate_vma_insert_huge_pmd_page(struct migrate_vma *migrate,
 
 	if (flush) {
 		pte_free(vma->vm_mm, pgtable);
-		flush_cache_page(vma, addr, addr + HPAGE_PMD_SIZE);
+		flush_cache_range(vma, addr, addr + HPAGE_PMD_SIZE);
 		pmdp_invalidate(vma, addr, pmdp);
 	} else {
 		pgtable_trans_huge_deposit(vma->vm_mm, pmdp, pgtable);
@@ -923,7 +936,7 @@ static int migrate_vma_split_unmapped_folio(struct migrate_vma *migrate,
 		migrate->src[i+idx] = migrate_pfn(pfn + i) | flags;
 	return ret;
 }
-#else /* !CONFIG_ARCH_ENABLE_THP_MIGRATION */
+#else /* !CONFIG_ARCH_HAS_PMD_SOFTLEAVES */
 static int migrate_vma_insert_huge_pmd_page(struct migrate_vma *migrate,
 					 unsigned long addr,
 					 struct page *page,
@@ -944,7 +957,7 @@ static int migrate_vma_split_unmapped_folio(struct migrate_vma *migrate,
 static unsigned long migrate_vma_nr_pages(unsigned long *src)
 {
 	unsigned long nr = 1;
-#ifdef CONFIG_ARCH_ENABLE_THP_MIGRATION
+#ifdef CONFIG_ARCH_HAS_PMD_SOFTLEAVES
 	if (*src & MIGRATE_PFN_COMPOUND)
 		nr = HPAGE_PMD_NR;
 #else
@@ -1182,6 +1195,13 @@ static void __migrate_device_pages(unsigned long *src_pfns,
 							 MIGRATE_PFN_COMPOUND);
 					goto next;
 				}
+
+				/*
+				 * reset nr so that only first after-split folio
+				 * is processed below
+				 */
+				VM_WARN_ON_ONCE(folio_test_large(folio));
+				nr = 1;
 			} else if ((src_pfns[i] & MIGRATE_PFN_MIGRATE) &&
 				(dst_pfns[i] & MIGRATE_PFN_COMPOUND) &&
 				!(src_pfns[i] & MIGRATE_PFN_COMPOUND)) {
@@ -1220,6 +1240,12 @@ static void __migrate_device_pages(unsigned long *src_pfns,
 		for (j = 0; j < nr && i + j < npages; j++) {
 			folio = page_folio(migrate_pfn_to_page(src_pfns[i+j]));
 			newfolio = page_folio(migrate_pfn_to_page(dst_pfns[i+j]));
+
+			/*
+			 * folio_free_swap() removed the folio from the swap
+			 * cache. Refresh the saved mapping before migration.
+			 */
+			mapping = folio_mapping(folio);
 
 			r = folio_migrate_mapping(mapping, newfolio, folio, extra_cnt);
 			if (r)
@@ -1374,9 +1400,9 @@ static unsigned long migrate_device_pfn_lock(unsigned long pfn)
  * @start: starting pfn in the range to migrate.
  * @npages: number of pages to migrate.
  *
- * migrate_vma_setup() is similar in concept to migrate_vma_setup() except that
- * instead of looking up pages based on virtual address mappings a range of
- * device pfns that should be migrated to system memory is used instead.
+ * migrate_device_range() is similar in concept to migrate_vma_setup(), except
+ * that instead of looking up pages based on virtual address mappings, a range
+ * of device pfns that should be migrated to system memory is used.
  *
  * This is useful when a driver needs to free device memory but doesn't know the
  * virtual mappings of every page that may be in device memory. For example this
@@ -1399,6 +1425,15 @@ int migrate_device_range(unsigned long *src_pfns, unsigned long start,
 
 		src_pfns[i] = migrate_device_pfn_lock(pfn);
 		nr = folio_nr_pages(folio);
+		if (nr > npages - i) {
+			if (src_pfns[i] & MIGRATE_PFN_MIGRATE) {
+				folio_unlock(folio);
+				folio_put(folio);
+			}
+			memset(&src_pfns[i], 0,
+			       (npages - i) * sizeof(*src_pfns));
+			break;
+		}
 		if (nr > 1) {
 			src_pfns[i] |= MIGRATE_PFN_COMPOUND;
 			for (j = 1; j < nr; j++)
@@ -1433,6 +1468,15 @@ int migrate_device_pfns(unsigned long *src_pfns, unsigned long npages)
 
 		src_pfns[i] = migrate_device_pfn_lock(src_pfns[i]);
 		nr = folio_nr_pages(folio);
+		if (nr > npages - i) {
+			if (src_pfns[i] & MIGRATE_PFN_MIGRATE) {
+				folio_unlock(folio);
+				folio_put(folio);
+			}
+			memset(&src_pfns[i], 0,
+			       (npages - i) * sizeof(*src_pfns));
+			break;
+		}
 		if (nr > 1) {
 			src_pfns[i] |= MIGRATE_PFN_COMPOUND;
 			for (j = 1; j < nr; j++)

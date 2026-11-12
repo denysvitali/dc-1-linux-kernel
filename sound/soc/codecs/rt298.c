@@ -78,8 +78,10 @@ static const struct reg_default rt298_reg[] = {
 	{ 0x0023a000, 0x0000007f },
 	{ 0x00270500, 0x00000400 },
 	{ 0x00370500, 0x00000400 },
+	{ 0x00830000, 0x000000c3 },
 	{ 0x00870500, 0x00000400 },
 	{ 0x00920000, 0x00000031 },
+	{ 0x00930000, 0x000000c3 },
 	{ 0x00935000, 0x000000c3 },
 	{ 0x00936000, 0x000000c3 },
 	{ 0x00970500, 0x00000400 },
@@ -89,16 +91,18 @@ static const struct reg_default rt298_reg[] = {
 	{ 0x00c37000, 0x00000000 },
 	{ 0x00c37100, 0x00000080 },
 	{ 0x01270500, 0x00000400 },
+	{ 0x01270700, 0x00000000 },
 	{ 0x01370500, 0x00000400 },
 	{ 0x01371f00, 0x411111f0 },
 	{ 0x01439000, 0x00000080 },
 	{ 0x0143a000, 0x00000080 },
-	{ 0x01470700, 0x00000000 },
-	{ 0x01470500, 0x00000400 },
-	{ 0x01470c00, 0x00000000 },
 	{ 0x01470100, 0x00000000 },
+	{ 0x01470500, 0x00000400 },
+	{ 0x01470700, 0x00000000 },
+	{ 0x01470c00, 0x00000000 },
 	{ 0x01837000, 0x00000000 },
 	{ 0x01870500, 0x00000400 },
+	{ 0x01870700, 0x00000020 },
 	{ 0x02050000, 0x00000000 },
 	{ 0x02139000, 0x00000080 },
 	{ 0x0213a000, 0x00000080 },
@@ -107,10 +111,6 @@ static const struct reg_default rt298_reg[] = {
 	{ 0x02170700, 0x00000000 },
 	{ 0x02270100, 0x00000000 },
 	{ 0x02370100, 0x00000000 },
-	{ 0x01870700, 0x00000020 },
-	{ 0x00830000, 0x000000c3 },
-	{ 0x00930000, 0x000000c3 },
-	{ 0x01270700, 0x00000000 },
 };
 
 static bool rt298_volatile_register(struct device *dev, unsigned int reg)
@@ -1056,11 +1056,19 @@ static int rt298_resume(struct snd_soc_component *component)
 #define RT298_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE | \
 			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S8)
 
+static const u64 rt298_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B;
+
 static const struct snd_soc_dai_ops rt298_aif_dai_ops = {
 	.hw_params = rt298_hw_params,
 	.set_fmt = rt298_set_dai_fmt,
 	.set_sysclk = rt298_set_dai_sysclk,
 	.set_bclk_ratio = rt298_set_bclk_ratio,
+	.auto_selectable_formats = &rt298_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static struct snd_soc_dai_driver rt298_dai[] = {
@@ -1185,8 +1193,7 @@ static int rt298_i2c_probe(struct i2c_client *i2c)
 	const struct acpi_device_id *acpiid;
 	int i, ret;
 
-	rt298 = devm_kzalloc(&i2c->dev,	sizeof(*rt298),
-				GFP_KERNEL);
+	rt298 = devm_kzalloc_obj(&i2c->dev, *rt298);
 	if (NULL == rt298)
 		return -ENOMEM;
 

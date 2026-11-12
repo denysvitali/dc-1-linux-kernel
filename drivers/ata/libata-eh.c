@@ -106,6 +106,12 @@ static const unsigned int ata_eh_flush_timeouts[] = {
 	UINT_MAX,
 };
 
+static const unsigned int ata_eh_standby_timeouts[] = {
+	15000,	/* Some drives may be slow to standby */
+	/* but don't hold up a suspend too long waiting for them */
+	UINT_MAX,
+};
+
 static const unsigned int ata_eh_other_timeouts[] = {
 	 5000,	/* same rationale as identify timeout */
 	10000,	/* ditto */
@@ -147,6 +153,8 @@ ata_eh_cmd_timeout_table[ATA_EH_CMD_TIMEOUT_TABLE_SIZE] = {
 	  .timeouts = ata_eh_other_timeouts, },
 	{ .commands = CMDS(ATA_CMD_FLUSH, ATA_CMD_FLUSH_EXT),
 	  .timeouts = ata_eh_flush_timeouts },
+	{ .commands = CMDS(ATA_CMD_STANDBYNOW1),
+	  .timeouts = ata_eh_standby_timeouts },
 	{ .commands = CMDS(ATA_CMD_VERIFY),
 	  .timeouts = ata_eh_reset_timeouts },
 };
@@ -565,9 +573,9 @@ void ata_scsi_error(struct Scsi_Host *host)
 	int nr_timedout;
 	LIST_HEAD(eh_work_q);
 
-	spin_lock_irqsave(host->host_lock, flags);
+	spin_lock_irqsave(&host->host_lock, flags);
 	list_splice_init(&host->eh_cmd_q, &eh_work_q);
-	spin_unlock_irqrestore(host->host_lock, flags);
+	spin_unlock_irqrestore(&host->host_lock, flags);
 
 	/*
 	 * First check what errors we got with ata_scsi_cmd_error_handler().
@@ -650,29 +658,12 @@ int ata_scsi_cmd_error_handler(struct Scsi_Host *host, struct ata_port *ap,
 		set_host_byte(scmd, DID_OK);
 
 		ata_qc_for_each_raw(ap, qc, i) {
-			if (qc->scsicmd != scmd)
-				continue;
-			if ((qc->flags & ATA_QCFLAG_ACTIVE) ||
-			    qc == qc->dev->link->deferred_qc)
+			if (qc->scsicmd == scmd &&
+			    qc->flags & ATA_QCFLAG_ACTIVE)
 				break;
 		}
 
-		if (i < ATA_MAX_QUEUE && qc == qc->dev->link->deferred_qc) {
-			/*
-			 * This is a deferred command that timed out while
-			 * waiting for the command queue to drain. Since the qc
-			 * is not active yet (deferred_qc is still set, so the
-			 * deferred qc work has not issued the command yet),
-			 * simply signal the timeout by finishing the SCSI
-			 * command and clear the deferred qc to prevent the
-			 * deferred qc work from issuing this qc.
-			 */
-			WARN_ON_ONCE(qc->flags & ATA_QCFLAG_ACTIVE);
-			qc->dev->link->deferred_qc = NULL;
-			cancel_work(&qc->dev->link->deferred_qc_work);
-			set_host_byte(scmd, DID_TIME_OUT);
-			scsi_eh_finish_cmd(scmd, &ap->eh_done_q);
-		} else if (i < ATA_MAX_QUEUE) {
+		if (i < ATA_MAX_QUEUE) {
 			/* the scmd has an associated qc */
 			if (!(qc->flags & ATA_QCFLAG_EH)) {
 				/* which hasn't failed yet, timeout */
@@ -948,10 +939,10 @@ static void ata_eh_set_pending(struct ata_port *ap, bool fastdrain)
 	ap->pflags |= ATA_PFLAG_EH_PENDING;
 
 	/*
-	 * If we have a deferred qc, requeue it so that it is retried once EH
-	 * completes.
+	 * If we have deferred QCs, requeue them so that the SCSI EH task can
+	 * run.
 	 */
-	ata_scsi_requeue_deferred_qc(ap);
+	ata_scsi_requeue_deferred_qc(ap, NULL);
 
 	if (!fastdrain)
 		return;
@@ -1230,9 +1221,10 @@ static void __ata_eh_qc_complete(struct ata_queued_cmd *qc)
  *	Indicate to the mid and upper layers that an ATA command has
  *	completed.  To be used from EH.
  */
-void ata_eh_qc_complete(struct ata_queued_cmd *qc)
+static void ata_eh_qc_complete(struct ata_queued_cmd *qc)
 {
 	struct scsi_cmnd *scmd = qc->scsicmd;
+
 	scmd->retries = scmd->allowed;
 	__ata_eh_qc_complete(qc);
 }
@@ -1248,9 +1240,10 @@ void ata_eh_qc_complete(struct ata_queued_cmd *qc)
  *	scmd->allowed is incremented for commands which get retried
  *	due to unrelated failures (qc->err_mask is zero).
  */
-void ata_eh_qc_retry(struct ata_queued_cmd *qc)
+static void ata_eh_qc_retry(struct ata_queued_cmd *qc)
 {
 	struct scsi_cmnd *scmd = qc->scsicmd;
+
 	if (!qc->err_mask)
 		scmd->allowed++;
 	__ata_eh_qc_complete(qc);
@@ -1523,11 +1516,13 @@ static bool ata_eh_request_sense(struct ata_queued_cmd *qc)
 	err_mask = ata_exec_internal(dev, &tf, NULL, DMA_NONE, NULL, 0, 0);
 	/* Ignore err_mask; ATA_ERR might be set */
 	if (tf.status & ATA_SENSE) {
-		if (ata_scsi_sense_is_valid(tf.lbah, tf.lbam, tf.lbal)) {
+		u16 sense_code = scsi_sense_code(tf.lbam, tf.lbal);
+
+		if (ata_scsi_sense_is_valid(tf.lbah, sense_code)) {
 			/* Set sense without also setting scsicmd->result */
-			scsi_build_sense_buffer(dev->flags & ATA_DFLAG_D_SENSE,
-						cmd->sense_buffer, tf.lbah,
-						tf.lbam, tf.lbal);
+			scsi_set_sense_buffer(dev->flags & ATA_DFLAG_D_SENSE,
+					      cmd->sense_buffer, tf.lbah,
+					      sense_code);
 			qc->flags |= ATA_QCFLAG_SENSE_VALID;
 			return true;
 		}
@@ -2101,7 +2096,8 @@ out:
 			continue;
 
 		/* This success command had sense data, but we failed to get. */
-		ata_scsi_set_sense(dev, qc->scsicmd, ABORTED_COMMAND, 0, 0);
+		ata_scsi_set_sense(dev, qc->scsicmd, ABORTED_COMMAND,
+				   NO_ADDITIONAL_SENSE_INFORMATION);
 		qc->flags |= ATA_QCFLAG_SENSE_VALID;
 	}
 	ata_eh_done(link, dev, ATA_EH_GET_SUCCESS_SENSE);
@@ -4084,8 +4080,20 @@ void ata_eh_finish(struct ata_port *ap)
 				ata_eh_qc_complete(qc);
 			}
 		} else {
-			if (qc->flags & ATA_QCFLAG_SENSE_VALID ||
-			    qc->flags & ATA_QCFLAG_EH_SUCCESS_CMD) {
+			if (qc->flags & ATA_QCFLAG_SENSE_VALID &&
+			    qc->flags & ATA_QCFLAG_RETRY) {
+				/*
+				 * The sense data asks for a retry, see
+				 * ata_eh_analyze_tf(). ata_eh_link_autopsy()
+				 * cleared qc->err_mask, so ata_eh_qc_retry()
+				 * would increment scmd->allowed. Leave
+				 * scmd->allowed alone, so that upper layer
+				 * only retries the command if it has not
+				 * already been retried too many times.
+				 */
+				__ata_eh_qc_complete(qc);
+			} else if (qc->flags & ATA_QCFLAG_SENSE_VALID ||
+				   qc->flags & ATA_QCFLAG_EH_SUCCESS_CMD) {
 				ata_eh_qc_complete(qc);
 			} else {
 				/* feed zero TF to sense generation */

@@ -39,6 +39,7 @@
 #include <net/netns/mctp.h>
 #include <net/netns/vsock.h>
 #include <net/net_trackers.h>
+#include <net/neighbour_tables.h>
 #include <linux/ns_common.h>
 #include <linux/idr.h>
 #include <linux/skbuff.h>
@@ -47,6 +48,7 @@
 
 struct user_namespace;
 struct proc_dir_entry;
+struct neigh_table;
 struct net_device;
 struct sock;
 struct ctl_table_header;
@@ -69,6 +71,7 @@ struct net {
 	spinlock_t		rules_mod_lock;
 
 	unsigned int		dev_base_seq;	/* protected by rtnl_mutex */
+	atomic_t		dev_mc_genid;	/* dev->mc membership changes */
 	u32			ifindex;
 
 	spinlock_t		nsid_lock;
@@ -102,6 +105,8 @@ struct net {
 	struct list_head 	dev_base_head;
 	struct proc_dir_entry 	*proc_net;
 	struct proc_dir_entry 	*proc_net_stat;
+
+	struct neigh_table	*neigh_tables[NEIGH_NR_TABLES];
 
 #ifdef CONFIG_SYSCTL
 	struct ctl_table_set	sysctls;
@@ -197,6 +202,9 @@ struct net {
 #ifdef CONFIG_DEBUG_NET_SMALL_RTNL
 	/* Move to a better place when the config guard is removed. */
 	struct mutex		rtnl_mutex;
+	struct work_struct	rtnl_work;
+	struct list_head	dev_unreg_head;
+	spinlock_t		dev_unreg_lock;
 #endif
 #if IS_ENABLED(CONFIG_VSOCKETS)
 	struct netns_vsock	vsock;
@@ -522,12 +530,13 @@ struct ctl_table;
 #ifdef CONFIG_SYSCTL
 int net_sysctl_init(void);
 struct ctl_table_header *register_net_sysctl_sz(struct net *net, const char *path,
-					     struct ctl_table *table, size_t table_size);
+						const struct ctl_table *table,
+						size_t table_size);
 void unregister_net_sysctl_table(struct ctl_table_header *header);
 #else
 static inline int net_sysctl_init(void) { return 0; }
 static inline struct ctl_table_header *register_net_sysctl_sz(struct net *net,
-	const char *path, struct ctl_table *table, size_t table_size)
+	const char *path, const struct ctl_table *table, size_t table_size)
 {
 	return NULL;
 }

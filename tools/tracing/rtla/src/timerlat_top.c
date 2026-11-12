@@ -456,6 +456,7 @@ timerlat_print_stats(struct osnoise_tool *top)
 
 	trace_seq_do_printf(trace->seq);
 	trace_seq_reset(trace->seq);
+	osnoise_report_invalid_events(top);
 	osnoise_report_missed_events(top);
 }
 
@@ -536,7 +537,7 @@ timerlat_top_bpf_main_loop(struct osnoise_tool *tool)
 		if (!params->quiet)
 			timerlat_print_stats(tool);
 
-		if (wait_retval != 0) {
+		if (wait_retval > 0) {
 			/* Stopping requested by tracer */
 			retval = common_threshold_handler(tool);
 			if (retval)

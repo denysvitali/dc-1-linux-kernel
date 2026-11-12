@@ -131,7 +131,6 @@ enum {
 	BTRFS_ROOT_ORPHAN_ITEM_INSERTED,
 	BTRFS_ROOT_DEFRAG_RUNNING,
 	BTRFS_ROOT_FORCE_COW,
-	BTRFS_ROOT_MULTI_LOG_TASKS,
 	BTRFS_ROOT_DIRTY,
 	BTRFS_ROOT_DELETING,
 
@@ -161,7 +160,7 @@ enum {
  */
 struct btrfs_qgroup_swapped_blocks {
 	spinlock_t lock;
-	/* RM_EMPTY_ROOT() of above blocks[] */
+	/* True if any of the rbtrees in the blocks array below is not empty. */
 	bool swapped;
 	struct rb_root blocks[BTRFS_MAX_LEVEL];
 };
@@ -196,9 +195,7 @@ struct btrfs_root {
 	struct list_head log_ctxs[2];
 	/* Used only for log trees of subvolumes, not for the log root tree */
 	atomic_t log_writers;
-	atomic_t log_commit[2];
-	/* Used only for log trees of subvolumes, not for the log root tree */
-	atomic_t log_batch;
+	bool log_commit[2];
 	/*
 	 * Protected by the 'log_mutex' lock but can be read without holding
 	 * that lock to avoid unnecessary lock contention, in which case it
@@ -216,7 +213,6 @@ struct btrfs_root {
 	 * to access this field.
 	 */
 	int last_log_commit;
-	pid_t log_start_pid;
 
 	u64 last_trans;
 

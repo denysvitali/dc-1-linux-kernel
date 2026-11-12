@@ -26,6 +26,7 @@
 #include <linux/kthread.h>
 #include <linux/pci.h>
 #include <linux/uaccess.h>
+#include <linux/security.h>
 #include <linux/pm_runtime.h>
 
 #include "amdgpu.h"
@@ -35,6 +36,7 @@
 #include "amdgpu_rap.h"
 #include "amdgpu_securedisplay.h"
 #include "amdgpu_fw_attestation.h"
+#include "amdgpu_sdma.h"
 #include "amdgpu_umr.h"
 
 #include "amdgpu_reset.h"
@@ -42,6 +44,11 @@
 #include "amdgpu_userq.h"
 
 #if defined(CONFIG_DEBUG_FS)
+
+/* Encode milliwatts in the raw Q24.8 sensor report format used by UMR. */
+#define AMDGPU_DEBUGFS_PWR_MW_TO_Q24_8(power_mw) \
+	DIV_ROUND_CLOSEST_ULL((u64)(power_mw) * BIT(8), \
+			      MILLIWATT_PER_WATT)
 
 /**
  * amdgpu_debugfs_process_reg_op - Handle MMIO register reads/writes
@@ -115,6 +122,20 @@ static int  amdgpu_debugfs_process_reg_op(bool read, struct file *f,
 
 	*pos &= (1UL << 22) - 1;
 
+	if (size > PAGE_SIZE)
+		return -EINVAL;
+
+	/*
+	 * Access the user buffer only while none of the locks below are held:
+	 * a fault takes mmap_lock, and grbm_idx_mutex and srbm_mutex nest
+	 * inside it.
+	 */
+	u32 *data __free(kfree) = kmalloc(size, GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+	if (!read && copy_from_user(data, buf, size))
+		return -EFAULT;
+
 	r = pm_runtime_get_sync(adev_to_drm(adev)->dev);
 	if (r < 0) {
 		pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);
@@ -146,28 +167,16 @@ static int  amdgpu_debugfs_process_reg_op(bool read, struct file *f,
 		mutex_lock(&adev->pm.mutex);
 
 	while (size) {
-		uint32_t value;
-
-		if (read) {
-			value = RREG32(*pos >> 2);
-			r = put_user(value, (uint32_t *)buf);
-		} else {
-			r = get_user(value, (uint32_t *)buf);
-			if (!r)
-				amdgpu_mm_wreg_mmio_rlc(adev, *pos >> 2, value, 0);
-		}
-		if (r) {
-			result = r;
-			goto end;
-		}
+		if (read)
+			data[result >> 2] = RREG32(*pos >> 2);
+		else
+			amdgpu_mm_wreg_mmio_rlc(adev, *pos >> 2, data[result >> 2], 0);
 
 		result += 4;
-		buf += 4;
 		*pos += 4;
 		size -= 4;
 	}
 
-end:
 	if (use_bank) {
 		amdgpu_gfx_select_se_sh(adev, 0xffffffff, 0xffffffff, 0xffffffff, 0);
 		mutex_unlock(&adev->grbm_idx_mutex);
@@ -182,6 +191,10 @@ end:
 	pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);
 
 	amdgpu_virt_disable_access_debugfs(adev);
+
+	if (read && copy_to_user(buf, data, result))
+		return -EFAULT;
+
 	return result;
 }
 
@@ -232,10 +245,23 @@ static ssize_t amdgpu_debugfs_regs2_op(struct file *f, char __user *buf, u32 off
 	struct amdgpu_device *adev = rd->adev;
 	ssize_t result = 0;
 	int r;
-	uint32_t value;
 
 	if (size & 0x3 || offset & 0x3)
 		return -EINVAL;
+
+	if (size > PAGE_SIZE)
+		return -EINVAL;
+
+	/*
+	 * Access the user buffer only while none of the locks below are held:
+	 * a fault takes mmap_lock, and grbm_idx_mutex and srbm_mutex nest
+	 * inside it.
+	 */
+	u32 *data __free(kfree) = kmalloc(size, GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+	if (write_en && copy_from_user(data, buf, size))
+		return -EFAULT;
 
 	r = pm_runtime_get_sync(adev_to_drm(adev)->dev);
 	if (r < 0) {
@@ -275,24 +301,16 @@ static ssize_t amdgpu_debugfs_regs2_op(struct file *f, char __user *buf, u32 off
 		mutex_lock(&adev->pm.mutex);
 
 	while (size) {
-		if (!write_en) {
-			value = RREG32(offset >> 2);
-			r = put_user(value, (uint32_t *)buf);
-		} else {
-			r = get_user(value, (uint32_t *)buf);
-			if (!r)
-				amdgpu_mm_wreg_mmio_rlc(adev, offset >> 2, value, rd->id.xcc_id);
-		}
-		if (r) {
-			result = r;
-			goto end;
-		}
+		if (!write_en)
+			data[result >> 2] = RREG32(offset >> 2);
+		else
+			amdgpu_mm_wreg_mmio_rlc(adev, offset >> 2, data[result >> 2],
+						rd->id.xcc_id);
 		offset += 4;
 		size -= 4;
 		result += 4;
-		buf += 4;
 	}
-end:
+
 	if (rd->id.use_grbm) {
 		amdgpu_gfx_select_se_sh(adev, 0xffffffff, 0xffffffff, 0xffffffff, rd->id.xcc_id);
 		mutex_unlock(&adev->grbm_idx_mutex);
@@ -311,6 +329,10 @@ end:
 	pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);
 
 	amdgpu_virt_disable_access_debugfs(adev);
+
+	if (!write_en && copy_to_user(buf, data, result))
+		return -EFAULT;
+
 	return result;
 }
 
@@ -414,7 +436,7 @@ static ssize_t amdgpu_debugfs_gprwave_read(struct file *f, char __user *buf, siz
 		return r;
 	}
 
-	data = kcalloc(1024, sizeof(*data), GFP_KERNEL);
+	data = kzalloc_objs(*data, 1024);
 	if (!data) {
 		pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);
 		amdgpu_virt_disable_access_debugfs(adev);
@@ -980,7 +1002,7 @@ static ssize_t amdgpu_debugfs_gca_config_read(struct file *f, char __user *buf,
 	if (size & 0x3 || *pos & 0x3)
 		return -EINVAL;
 
-	config = kmalloc_array(256, sizeof(*config), GFP_KERNEL);
+	config = kmalloc_objs(*config, 256);
 	if (!config)
 		return -ENOMEM;
 
@@ -1103,6 +1125,10 @@ static ssize_t amdgpu_debugfs_sensor_read(struct file *f, char __user *buf,
 		amdgpu_virt_disable_access_debugfs(adev);
 		return r;
 	}
+
+	if (idx == AMDGPU_PP_SENSOR_GPU_AVG_POWER ||
+	    idx == AMDGPU_PP_SENSOR_GPU_INPUT_POWER)
+		values[0] = AMDGPU_DEBUGFS_PWR_MW_TO_Q24_8(values[0]);
 
 	if (size > valuesize) {
 		amdgpu_virt_disable_access_debugfs(adev);
@@ -1241,7 +1267,6 @@ static ssize_t amdgpu_debugfs_gpr_read(struct file *f, char __user *buf,
 {
 	struct amdgpu_device *adev = f->f_inode->i_private;
 	int r;
-	ssize_t result = 0;
 	uint32_t offset, se, sh, cu, wave, simd, thread, bank, *data;
 
 	if (size > 4096 || size & 3 || *pos & 3)
@@ -1257,7 +1282,7 @@ static ssize_t amdgpu_debugfs_gpr_read(struct file *f, char __user *buf,
 	thread = (*pos & GENMASK_ULL(59, 52)) >> 52;
 	bank = (*pos & GENMASK_ULL(61, 60)) >> 60;
 
-	data = kcalloc(1024, sizeof(*data), GFP_KERNEL);
+	data = kzalloc_objs(*data, 1024);
 	if (!data)
 		return -ENOMEM;
 
@@ -1285,25 +1310,11 @@ static ssize_t amdgpu_debugfs_gpr_read(struct file *f, char __user *buf,
 	mutex_unlock(&adev->grbm_idx_mutex);
 
 	pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);
-
-	while (size) {
-		uint32_t value;
-
-		value = data[result >> 2];
-		r = put_user(value, (uint32_t *)buf);
-		if (r) {
-			amdgpu_virt_disable_access_debugfs(adev);
-			goto err;
-		}
-
-		result += 4;
-		buf += 4;
-		size -= 4;
-	}
-
-	kfree(data);
 	amdgpu_virt_disable_access_debugfs(adev);
-	return result;
+
+	r = copy_to_user(buf, data, size) ? -EFAULT : size;
+	kfree(data);
+	return r;
 
 err:
 	pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);
@@ -1319,8 +1330,8 @@ err:
  * @size: Number of bytes to read
  * @pos:  Offset to seek to
  *
- * Read the last residency value logged. It doesn't auto update, one needs to
- * stop logging before getting the current value.
+ * Read a live GFXOFF residency sample from firmware. One needs to start logging
+ * before getting the current value.
  */
 static ssize_t amdgpu_debugfs_gfxoff_residency_read(struct file *f, char __user *buf,
 						    size_t size, loff_t *pos)
@@ -1739,6 +1750,12 @@ int amdgpu_debugfs_regs_init(struct amdgpu_device *adev)
 	struct dentry *ent, *root = minor->debugfs_root;
 	unsigned int i;
 
+	if (security_locked_down(LOCKDOWN_PCI_ACCESS)) {
+		drm_info(adev_to_drm(adev),
+			 "amdgpu: HW debugfs nodes disabled (kernel lockdown)\n");
+		return 0;
+	}
+
 	for (i = 0; i < ARRAY_SIZE(debugfs_regs); i++) {
 		ent = debugfs_create_file(debugfs_regs_names[i],
 					  S_IFREG | 0400, root,
@@ -1764,8 +1781,10 @@ static int amdgpu_debugfs_test_ib_show(struct seq_file *m, void *unused)
 
 	/* Avoid accidently unparking the sched thread during GPU reset */
 	r = down_write_killable(&adev->reset_domain->sem);
-	if (r)
+	if (r) {
+		pm_runtime_put_autosuspend(dev->dev);
 		return r;
+	}
 
 	/* hold on the scheduler */
 	for (i = 0; i < AMDGPU_MAX_RINGS; i++) {
@@ -2019,7 +2038,7 @@ static int amdgpu_debugfs_ib_preempt(void *data, u64 val)
 		return -EBUSY;
 
 	length = ring->fence_drv.num_fences_mask + 1;
-	fences = kcalloc(length, sizeof(void *), GFP_KERNEL);
+	fences = kzalloc_objs(*fences, length);
 	if (!fences)
 		return -ENOMEM;
 
@@ -2159,7 +2178,7 @@ int amdgpu_debugfs_init(struct amdgpu_device *adev)
 	amdgpu_debugfs_firmware_init(adev);
 	amdgpu_ta_if_debugfs_init(adev);
 
-	amdgpu_debugfs_mes_event_log_init(adev);
+	amdgpu_debugfs_mes_init(adev);
 
 #if defined(CONFIG_DRM_AMD_DC)
 	if (adev->dc_enabled)
@@ -2170,6 +2189,8 @@ int amdgpu_debugfs_init(struct amdgpu_device *adev)
 		struct amdgpu_ring *ring = adev->rings[i];
 
 		if (!ring)
+			continue;
+		if (ring == &adev->cper.ring_buf && !adev->cper.enabled)
 			continue;
 
 		amdgpu_debugfs_ring_init(adev, ring);
@@ -2210,6 +2231,20 @@ int amdgpu_debugfs_init(struct amdgpu_device *adev)
 			    &amdgpu_debugfs_vm_info_fops);
 	debugfs_create_file("amdgpu_benchmark", 0200, root, adev,
 			    &amdgpu_benchmark_fops);
+
+	/* Debug-only: bitmap of incoming UALink protocol messages to drop.
+	 * Each bit position corresponds to an enum AMDGPU_UALINK_PROTOCOL_MESSAGES
+	 * value. Setting a bit causes exactly one matching incoming packet to be
+	 * dropped, after which the bit auto-clears and traffic resumes. Used to
+	 * exercise the connection reset paths.
+	 *
+	 * Examples (drop one NPA-REQ):
+	 *   echo 0x8  > /sys/kernel/debug/dri/0/amdgpu_ualink_drop_msg_bitmap
+	 * (drop one NPA-RSP):
+	 *   echo 0x10 > /sys/kernel/debug/dri/0/amdgpu_ualink_drop_msg_bitmap
+	 */
+	debugfs_create_ulong("amdgpu_ualink_drop_msg_bitmap", 0600, root,
+			     &adev->ualink.drop_msg_bitmap);
 
 	adev->debugfs_vbios_blob.data = adev->bios;
 	adev->debugfs_vbios_blob.size = adev->bios_size;

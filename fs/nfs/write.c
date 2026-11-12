@@ -717,7 +717,6 @@ static void nfs_inode_add_request(struct nfs_page *req)
 	nfs_lock_request(req);
 	spin_lock(&mapping->i_private_lock);
 	set_bit(PG_MAPPED, &req->wb_flags);
-	folio_set_private(folio);
 	folio->private = req;
 	spin_unlock(&mapping->i_private_lock);
 	atomic_long_inc(&nfsi->nrequests);
@@ -739,17 +738,17 @@ static void nfs_inode_remove_request(struct nfs_page *req)
 	nfs_page_group_lock(req);
 	if (nfs_page_group_sync_on_bit_locked(req, PG_REMOVE)) {
 		struct folio *folio = nfs_page_to_folio(req->wb_head);
-		struct address_space *mapping = folio->mapping;
 
-		spin_lock(&mapping->i_private_lock);
 		if (likely(folio)) {
-			folio->private = NULL;
-			folio_clear_private(folio);
-			clear_bit(PG_MAPPED, &req->wb_head->wb_flags);
-		}
-		spin_unlock(&mapping->i_private_lock);
+			struct address_space *mapping = folio->mapping;
 
-		folio_end_dropbehind(folio);
+			spin_lock(&mapping->i_private_lock);
+			folio->private = NULL;
+			clear_bit(PG_MAPPED, &req->wb_head->wb_flags);
+			spin_unlock(&mapping->i_private_lock);
+
+			folio_end_dropbehind(folio);
+		}
 	}
 	nfs_page_group_unlock(req);
 
@@ -1088,7 +1087,7 @@ static struct nfs_page *nfs_setup_write_request(struct nfs_open_context *ctx,
 	req = nfs_try_to_update_request(folio, offset, bytes);
 	if (req != NULL)
 		goto out;
-	req = nfs_page_create_from_folio(ctx, folio, offset, bytes);
+	req = nfs_page_create_from_folio(ctx, folio, false, offset, bytes);
 	if (IS_ERR(req))
 		goto out;
 	nfs_inode_add_request(req);
@@ -1664,7 +1663,7 @@ int nfs_initiate_commit(struct rpc_clnt *clnt, struct nfs_commit_data *data,
 	dprintk("NFS: initiated commit call\n");
 
 	if (localio)
-		return nfs_local_commit(localio, data, call_ops, how);
+		return nfs_local_commit(localio, data, call_ops);
 
 	task = rpc_run_task(&task_setup_data);
 	if (IS_ERR(task))

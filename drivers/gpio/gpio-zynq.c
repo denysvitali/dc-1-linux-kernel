@@ -798,15 +798,7 @@ static int zynq_gpio_runtime_resume(struct device *dev)
 
 static int zynq_gpio_request(struct gpio_chip *chip, unsigned int offset)
 {
-	int ret;
-
-	ret = pm_runtime_get_sync(chip->parent);
-
-	/*
-	 * If the device is already active pm_runtime_get() will return 1 on
-	 * success, but gpio_request still needs to return 0.
-	 */
-	return ret < 0 ? ret : 0;
+	return pm_runtime_resume_and_get(chip->parent);
 }
 
 static void zynq_gpio_free(struct gpio_chip *chip, unsigned int offset)
@@ -916,7 +908,7 @@ static int zynq_gpio_probe(struct platform_device *pdev)
 	struct gpio_chip *chip;
 	struct gpio_irq_chip *girq;
 
-	gpio = devm_kzalloc(&pdev->dev, sizeof(*gpio), GFP_KERNEL);
+	gpio = devm_kzalloc_obj(&pdev->dev, *gpio);
 	if (!gpio)
 		return -ENOMEM;
 
@@ -976,9 +968,7 @@ static int zynq_gpio_probe(struct platform_device *pdev)
 	gpio_irq_chip_set_chip(girq, &zynq_gpio_edge_irqchip);
 	girq->parent_handler = zynq_gpio_irqhandler;
 	girq->num_parents = 1;
-	girq->parents = devm_kcalloc(&pdev->dev, 1,
-				     sizeof(*girq->parents),
-				     GFP_KERNEL);
+	girq->parents = devm_kzalloc_objs(&pdev->dev, *girq->parents, 1);
 	if (!girq->parents) {
 		ret = -ENOMEM;
 		goto err_pm_put;

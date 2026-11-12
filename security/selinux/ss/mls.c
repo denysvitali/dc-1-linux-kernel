@@ -160,9 +160,6 @@ bool mls_level_isvalid(const struct policydb *p, const struct mls_level *l)
 {
 	const char *name;
 	const struct level_datum *levdatum;
-	struct ebitmap_node *node;
-	u32 bit;
-	int rc;
 
 	if (!l->sens || l->sens > p->p_levels.nprim)
 		return false;
@@ -176,21 +173,14 @@ bool mls_level_isvalid(const struct policydb *p, const struct mls_level *l)
 		return false;
 
 	/*
-	 * Validate that all bits set in l->cat are also be set in
-	 * levdatum->level->cat and no bit in l->cat is larger than
-	 * p->p_cats.nprim.
+	 * l is valid iff every bit in l->cat is set in levdatum->level.cat
+	 * and no bit in l->cat is larger than p->p_cats.nprim.
+	 * policydb_index() has already verified that every bit set in
+	 * levdatum->level.cat names a defined category, so containment is
+	 * sufficient here.
 	 */
-	rc = ebitmap_contains(&levdatum->level.cat, &l->cat,
-			      p->p_cats.nprim);
-	if (!rc)
-		return false;
-
-	ebitmap_for_each_positive_bit(&levdatum->level.cat, node, bit) {
-		if (!sym_name(p, SYM_CATS, bit))
-			return false;
-	}
-
-	return true;
+	return ebitmap_contains(&levdatum->level.cat, &l->cat,
+				p->p_cats.nprim);
 }
 
 bool mls_range_isvalid(const struct policydb *p, const struct mls_range *r)
@@ -408,44 +398,6 @@ int mls_range_set(struct context *context, struct mls_range *range)
 	}
 
 	return rc;
-}
-
-int mls_setup_user_range(struct policydb *p, struct context *fromcon,
-			 struct user_datum *user, struct context *usercon)
-{
-	if (p->mls_enabled) {
-		struct mls_level *fromcon_sen = &(fromcon->range.level[0]);
-		struct mls_level *fromcon_clr = &(fromcon->range.level[1]);
-		struct mls_level *user_low = &(user->range.level[0]);
-		struct mls_level *user_clr = &(user->range.level[1]);
-		struct mls_level *user_def = &(user->dfltlevel);
-		struct mls_level *usercon_sen = &(usercon->range.level[0]);
-		struct mls_level *usercon_clr = &(usercon->range.level[1]);
-
-		/* Honor the user's default level if we can */
-		if (mls_level_between(user_def, fromcon_sen, fromcon_clr))
-			*usercon_sen = *user_def;
-		else if (mls_level_between(fromcon_sen, user_def, user_clr))
-			*usercon_sen = *fromcon_sen;
-		else if (mls_level_between(fromcon_clr, user_low, user_def))
-			*usercon_sen = *user_low;
-		else
-			return -EINVAL;
-
-		/* Lower the clearance of available contexts
-		   if the clearance of "fromcon" is lower than
-		   that of the user's default clearance (but
-		   only if the "fromcon" clearance dominates
-		   the user's computed sensitivity level) */
-		if (mls_level_dom(user_clr, fromcon_clr))
-			*usercon_clr = *fromcon_clr;
-		else if (mls_level_dom(fromcon_clr, user_clr))
-			*usercon_clr = *user_clr;
-		else
-			return -EINVAL;
-	}
-
-	return 0;
 }
 
 /*

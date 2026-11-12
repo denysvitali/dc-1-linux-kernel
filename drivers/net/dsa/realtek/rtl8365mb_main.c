@@ -40,7 +40,8 @@
  * driver has only been tested with a fixed-link, but in principle it should not
  * matter.
  *
- * NOTE: Currently, only the RGMII interface is implemented in this driver.
+ * NOTE: Currently, only the RGMII, SGMII and HSGMII interfaces are implemented
+ * in this driver.
  *
  * The interrupt line is asserted on link UP/DOWN events. The driver creates a
  * custom irqchip to handle this interrupt and demultiplex the events by reading
@@ -94,11 +95,14 @@
 #include <linux/bitops.h>
 #include <linux/interrupt.h>
 #include <linux/irqdomain.h>
+#include <linux/mii.h>
 #include <linux/mutex.h>
 #include <linux/of_irq.h>
 #include <linux/regmap.h>
 #include <linux/if_bridge.h>
 #include <linux/if_vlan.h>
+#include <linux/mdio.h>
+#include <linux/phylink.h>
 
 #include "realtek.h"
 #include "realtek-smi.h"
@@ -128,31 +132,32 @@
 #define   RTL8365MB_MAGIC_VALUE		0x0249
 
 /* Chip reset register */
-#define RTL8365MB_CHIP_RESET_REG	0x1322
-#define RTL8365MB_CHIP_RESET_SW_MASK	0x0002
-#define RTL8365MB_CHIP_RESET_HW_MASK	0x0001
+#define RTL8365MB_CHIP_RESET_REG		0x1322
+#define RTL8365MB_CHIP_RESET_DW8051_MASK	BIT(4)
+#define RTL8365MB_CHIP_RESET_SW_MASK		BIT(1)
+#define RTL8365MB_CHIP_RESET_HW_MASK		BIT(0)
 
 /* Interrupt polarity register */
 #define RTL8365MB_INTR_POLARITY_REG	0x1100
-#define   RTL8365MB_INTR_POLARITY_MASK	0x0001
+#define   RTL8365MB_INTR_POLARITY_MASK	BIT(0)
 #define   RTL8365MB_INTR_POLARITY_HIGH	0
 #define   RTL8365MB_INTR_POLARITY_LOW	1
 
 /* Interrupt control/status register - enable/check specific interrupt types */
 #define RTL8365MB_INTR_CTRL_REG			0x1101
-#define RTL8365MB_INTR_STATUS_REG		0x1102
-#define   RTL8365MB_INTR_SLIENT_START_2_MASK	0x1000
-#define   RTL8365MB_INTR_SLIENT_START_MASK	0x0800
-#define   RTL8365MB_INTR_ACL_ACTION_MASK	0x0200
-#define   RTL8365MB_INTR_CABLE_DIAG_FIN_MASK	0x0100
-#define   RTL8365MB_INTR_INTERRUPT_8051_MASK	0x0080
-#define   RTL8365MB_INTR_LOOP_DETECTION_MASK	0x0040
-#define   RTL8365MB_INTR_GREEN_TIMER_MASK	0x0020
-#define   RTL8365MB_INTR_SPECIAL_CONGEST_MASK	0x0010
-#define   RTL8365MB_INTR_SPEED_CHANGE_MASK	0x0008
-#define   RTL8365MB_INTR_LEARN_OVER_MASK	0x0004
-#define   RTL8365MB_INTR_METER_EXCEEDED_MASK	0x0002
-#define   RTL8365MB_INTR_LINK_CHANGE_MASK	0x0001
+#define   RTL8365MB_INTR_STATUS_REG		0x1102
+#define   RTL8365MB_INTR_SLIENT_START_2_MASK	BIT(12)
+#define   RTL8365MB_INTR_SLIENT_START_MASK	BIT(11)
+#define   RTL8365MB_INTR_ACL_ACTION_MASK	BIT(9)
+#define   RTL8365MB_INTR_CABLE_DIAG_FIN_MASK	BIT(8)
+#define   RTL8365MB_INTR_INTERRUPT_8051_MASK	BIT(7)
+#define   RTL8365MB_INTR_LOOP_DETECTION_MASK	BIT(6)
+#define   RTL8365MB_INTR_GREEN_TIMER_MASK	BIT(5)
+#define   RTL8365MB_INTR_SPECIAL_CONGEST_MASK	BIT(4)
+#define   RTL8365MB_INTR_SPEED_CHANGE_MASK	BIT(3)
+#define   RTL8365MB_INTR_LEARN_OVER_MASK	BIT(2)
+#define   RTL8365MB_INTR_METER_EXCEEDED_MASK	BIT(1)
+#define   RTL8365MB_INTR_LINK_CHANGE_MASK	BIT(0)
 #define   RTL8365MB_INTR_ALL_MASK                      \
 		(RTL8365MB_INTR_SLIENT_START_2_MASK |  \
 		 RTL8365MB_INTR_SLIENT_START_MASK |    \
@@ -167,20 +172,22 @@
 		 RTL8365MB_INTR_METER_EXCEEDED_MASK |  \
 		 RTL8365MB_INTR_LINK_CHANGE_MASK)
 
+#define RTL8365MB_PORT_MASK			GENMASK(10, 0)
+
 /* Per-port interrupt type status registers */
 #define RTL8365MB_PORT_LINKDOWN_IND_REG		0x1106
-#define   RTL8365MB_PORT_LINKDOWN_IND_MASK	0x07FF
+#define   RTL8365MB_PORT_LINKDOWN_IND_MASK	RTL8365MB_PORT_MASK
 
 #define RTL8365MB_PORT_LINKUP_IND_REG		0x1107
-#define   RTL8365MB_PORT_LINKUP_IND_MASK	0x07FF
+#define   RTL8365MB_PORT_LINKUP_IND_MASK	RTL8365MB_PORT_MASK
 
 /* PHY indirect access registers */
 #define RTL8365MB_INDIRECT_ACCESS_CTRL_REG			0x1F00
-#define   RTL8365MB_INDIRECT_ACCESS_CTRL_RW_MASK		0x0002
-#define   RTL8365MB_INDIRECT_ACCESS_CTRL_RW_READ		0
-#define   RTL8365MB_INDIRECT_ACCESS_CTRL_RW_WRITE		1
-#define   RTL8365MB_INDIRECT_ACCESS_CTRL_CMD_MASK		0x0001
-#define   RTL8365MB_INDIRECT_ACCESS_CTRL_CMD_VALUE		1
+#define   RTL8365MB_INDIRECT_ACCESS_CTRL_RW_MASK		BIT(1)
+#define     RTL8365MB_INDIRECT_ACCESS_CTRL_RW_READ		0
+#define     RTL8365MB_INDIRECT_ACCESS_CTRL_RW_WRITE		1
+#define   RTL8365MB_INDIRECT_ACCESS_CTRL_CMD_MASK		BIT(0)
+#define     RTL8365MB_INDIRECT_ACCESS_CTRL_CMD_VALUE		1
 #define RTL8365MB_INDIRECT_ACCESS_STATUS_REG			0x1F01
 #define RTL8365MB_INDIRECT_ACCESS_ADDRESS_REG			0x1F02
 #define   RTL8365MB_INDIRECT_ACCESS_ADDRESS_OCPADR_5_1_MASK	GENMASK(4, 0)
@@ -192,11 +199,23 @@
 
 /* PHY OCP address prefix register */
 #define RTL8365MB_GPHY_OCP_MSB_0_REG			0x1D15
-#define   RTL8365MB_GPHY_OCP_MSB_0_CFG_CPU_OCPADR_MASK	0x0FC0
-#define RTL8365MB_PHY_OCP_ADDR_PREFIX_MASK		0xFC00
+#define   RTL8365MB_GPHY_OCP_MSB_0_CFG_CPU_OCPADR_MASK	GENMASK(11, 6)
+#define RTL8365MB_PHY_OCP_ADDR_PREFIX_MASK		GENMASK(15, 10)
+
+/* The full 16-bit OCP address is split across two registers: bits [15:10] are
+ * the prefix (RTL8365MB_PHY_OCP_ADDR_PREFIX_MASK above), and bits [9:1] go into
+ * the ADDRESS register as two fields, [5:1] and [9:6]. Bit 0 is always 0 - PHY
+ * OCP registers are 2-byte aligned.
+ */
+#define RTL8365MB_PHY_OCP_ADDR_5_1_MASK			GENMASK(5, 1)
+#define RTL8365MB_PHY_OCP_ADDR_9_6_MASK			GENMASK(9, 6)
 
 /* The PHY OCP addresses of PHY registers 0~31 start here */
 #define RTL8365MB_PHY_OCP_ADDR_PHYREG_BASE		0xA400
+
+#define RTL8365MB_PHY_OCP_ADDR_EEE_ABLE			0xA5C4
+#define RTL8365MB_PHY_OCP_ADDR_EEE_ADV			0xA5D0
+#define RTL8365MB_PHY_OCP_ADDR_EEE_LPABLE		0xA5D2
 
 /* External interface port mode values - used in DIGITAL_INTERFACE_SELECT */
 #define RTL8365MB_EXT_PORT_MODE_DISABLE		0
@@ -235,8 +254,90 @@
 		 (_extint) == 1 ? RTL8365MB_EXT_RGMXF_REG1 : \
 		 (_extint) == 2 ? RTL8365MB_EXT_RGMXF_REG2 : \
 		 0x0)
-#define   RTL8365MB_EXT_RGMXF_RXDELAY_MASK	0x0007
-#define   RTL8365MB_EXT_RGMXF_TXDELAY_MASK	0x0008
+#define   RTL8365MB_EXT_RGMXF_RXDELAY_MASK	GENMASK(2, 0)
+#define   RTL8365MB_EXT_RGMXF_TXDELAY_MASK	BIT(3)
+
+/* External interface line rate bypass register - one bit per external
+ * interface, indexed by the external port number with port 5 (the first
+ * external port) as the base. Other RTL8367 families index this register
+ * differently (e.g. the RTL8367R uses (id + 1) % 2), so this mapping only
+ * holds for the RTL8367C-style parts this driver supports.
+ */
+#define RTL8365MB_BYPASS_LINE_RATE_REG		0x03F7
+#define RTL8365MB_BYPASS_LINE_RATE_MASK(_port)	BIT((_port) - 5)
+
+/* Port 6 ingress and egress rate limiter registers. Each limit is a 19-bit
+ * value in units of 8 Kbps, split across a 16-bit LSB register (CTRL0) and a
+ * 3-bit MSB field (CTRL1). The chip resets them to 0x1FFFF; see
+ * rtl8365mb_sds_raise_rate_limits().
+ */
+#define RTL8365MB_INGRESSBW_PORT6_RATE_CTRL0_REG	0x00CF
+#define RTL8365MB_INGRESSBW_PORT6_RATE_CTRL1_REG	0x00D0
+#define   RTL8365MB_INGRESSBW_PORT6_RATE_CTRL1_MASK	GENMASK(2, 0)
+#define RTL8365MB_PORT6_EGRESSBW_CTRL0_REG		0x0398
+#define RTL8365MB_PORT6_EGRESSBW_CTRL1_REG		0x0399
+#define   RTL8365MB_PORT6_EGRESSBW_CTRL1_MASK		GENMASK(2, 0)
+
+/* SerDes indirect access registers */
+#define RTL8365MB_SDS_INDACS_CMD_REG		0x6600
+#define   RTL8365MB_SDS_INDACS_CMD_BUSY_MASK	BIT(8)
+#define   RTL8365MB_SDS_INDACS_CMD_RUN_MASK	BIT(7)
+#define   RTL8365MB_SDS_INDACS_CMD_WR_MASK	BIT(6)
+#define RTL8365MB_SDS_INDACS_ADR_REG		0x6601
+#define RTL8365MB_SDS_INDACS_DATA_REG		0x6602
+
+/* SerDes miscellaneous configuration register */
+#define RTL8365MB_SDS_MISC_REG				0x1D11
+#define   RTL8365MB_SDS_MISC_SGMII_RXFC_MASK		BIT(14)
+#define   RTL8365MB_SDS_MISC_SGMII_TXFC_MASK		BIT(13)
+#define   RTL8365MB_SDS_MISC_MAC8_SEL_HSGMII_MASK	BIT(11)
+#define   RTL8365MB_SDS_MISC_SGMII_FDUP_MASK		BIT(10)
+#define   RTL8365MB_SDS_MISC_SGMII_LINK_MASK		BIT(9)
+#define   RTL8365MB_SDS_MISC_SGMII_SPD_MASK		GENMASK(8, 7)
+#define   RTL8365MB_SDS_MISC_MAC8_SEL_SGMII_MASK	BIT(6)
+
+/* SerDes internal registers, accessed via the SDS_INDACS registers. The BMCR
+ * data path reset holds BMCR_ANENABLE | BMCR_ISOLATE while toggling the
+ * vendor-specific low bits from phase 1 to phase 2, which triggers a data path
+ * reset and PLL resync.
+ */
+#define RTL8365MB_SDS_REG_BMCR			0x0000
+#define   RTL8365MB_SDS_BMCR_DPRST_PHASE1	(BMCR_ANENABLE | BMCR_ISOLATE | 0x1)
+#define   RTL8365MB_SDS_BMCR_DPRST_PHASE2	(BMCR_ANENABLE | BMCR_ISOLATE | 0x3)
+#define RTL8365MB_SDS_REG_NWAY			0x0002
+#define   RTL8365MB_SDS_NWAY_EN_MASK		BIT(9)
+#define   RTL8365MB_SDS_NWAY_RESTART_MASK	BIT(8)
+#define RTL8365MB_SDS_REG_RESET			0x0003
+#define   RTL8365MB_SDS_RESET_DEASSERT		0x7106
+#define RTL8365MB_SDS_REG_LINK_STATUS		0x003d
+#define   RTL8365MB_SDS_LINK_STATUS_LINK_MASK	BIT(4)
+
+/* The embedded SerDes can only be muxed to external interface 1 (MAC8),
+ * which is port 6.
+ */
+#define RTL8365MB_SDS_EXT_INTERFACE_ID		1
+#define RTL8365MB_SDS_EXT_INTERFACE_PORT	6
+
+/* Line rate bypass bit for the SerDes external interface */
+#define RTL8365MB_SDS_BYPASS_LINE_RATE_MASK \
+	RTL8365MB_BYPASS_LINE_RATE_MASK(RTL8365MB_SDS_EXT_INTERFACE_PORT)
+
+/* SerDes tuning parameter variant selector. The vendor driver picks between
+ * two sets of SerDes tuning parameters based on this chip option. Reading it
+ * requires first arming the read by writing a magic key to the arm register,
+ * then disarming it afterwards.
+ */
+#define RTL8365MB_SDS_OPTION_ARM_REG		0x13C0
+#define   RTL8365MB_SDS_OPTION_ARM_KEY		0x0249
+#define RTL8365MB_SDS_OPTION_REG		0x13C1
+
+/* Embedded DW8051 microcontroller control registers. The microcontroller
+ * can run firmware to manage the SerDes link, but this driver keeps it in
+ * reset and disabled: phylink already performs the link management that
+ * the firmware would otherwise do.
+ */
+#define RTL8365MB_MISC_CFG0_REG			0x130C
+#define   RTL8365MB_MISC_CFG0_DW8051_EN_MASK	BIT(5)
 
 /* External interface port speed values - used in DIGITAL_INTERFACE_FORCE */
 #define RTL8365MB_PORT_SPEED_10M	0
@@ -252,31 +353,31 @@
 		 (_extint) == 1 ? RTL8365MB_DIGITAL_INTERFACE_FORCE_REG1 : \
 		 (_extint) == 2 ? RTL8365MB_DIGITAL_INTERFACE_FORCE_REG2 : \
 		 0x0)
-#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_EN_MASK		0x1000
-#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_NWAY_MASK		0x0080
-#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_TXPAUSE_MASK	0x0040
-#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_RXPAUSE_MASK	0x0020
-#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_LINK_MASK		0x0010
-#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_DUPLEX_MASK		0x0004
-#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_SPEED_MASK		0x0003
+#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_EN_MASK		BIT(12)
+#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_NWAY_MASK		BIT(7)
+#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_TXPAUSE_MASK	BIT(6)
+#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_RXPAUSE_MASK	BIT(5)
+#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_LINK_MASK		BIT(4)
+#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_DUPLEX_MASK		BIT(2)
+#define   RTL8365MB_DIGITAL_INTERFACE_FORCE_SPEED_MASK		GENMASK(1, 0)
 
 /* CPU port mask register - controls which ports are treated as CPU ports */
 #define RTL8365MB_CPU_PORT_MASK_REG	0x1219
-#define   RTL8365MB_CPU_PORT_MASK_MASK	0x07FF
+#define   RTL8365MB_CPU_PORT_MASK_MASK	RTL8365MB_PORT_MASK
 
 /* CPU control register */
 #define RTL8365MB_CPU_CTRL_REG			0x121A
-#define   RTL8365MB_CPU_CTRL_TRAP_PORT_EXT_MASK	0x0400
-#define   RTL8365MB_CPU_CTRL_TAG_FORMAT_MASK	0x0200
-#define   RTL8365MB_CPU_CTRL_RXBYTECOUNT_MASK	0x0080
-#define   RTL8365MB_CPU_CTRL_TAG_POSITION_MASK	0x0040
-#define   RTL8365MB_CPU_CTRL_TRAP_PORT_MASK	0x0038
-#define   RTL8365MB_CPU_CTRL_INSERTMODE_MASK	0x0006
-#define   RTL8365MB_CPU_CTRL_EN_MASK		0x0001
+#define   RTL8365MB_CPU_CTRL_TRAP_PORT_EXT_MASK	BIT(10)
+#define   RTL8365MB_CPU_CTRL_TAG_FORMAT_MASK	BIT(9)
+#define   RTL8365MB_CPU_CTRL_RXBYTECOUNT_MASK	BIT(7)
+#define   RTL8365MB_CPU_CTRL_TAG_POSITION_MASK	BIT(6)
+#define   RTL8365MB_CPU_CTRL_TRAP_PORT_MASK	GENMASK(5, 3)
+#define   RTL8365MB_CPU_CTRL_INSERTMODE_MASK	GENMASK(2, 1)
+#define   RTL8365MB_CPU_CTRL_EN_MASK		BIT(0)
 
 /* Maximum packet length register */
 #define RTL8365MB_CFG0_MAX_LEN_REG	0x088C
-#define   RTL8365MB_CFG0_MAX_LEN_MASK	0x3FFF
+#define   RTL8365MB_CFG0_MAX_LEN_MASK	GENMASK(13, 0)
 #define RTL8365MB_CFG0_MAX_LEN_MAX	0x3FFF
 
 /* Port learning limit registers */
@@ -288,7 +389,7 @@
 #define RTL8365MB_PORT_ISOLATION_REG_BASE		0x08A2
 #define RTL8365MB_PORT_ISOLATION_REG(_physport) \
 		(RTL8365MB_PORT_ISOLATION_REG_BASE + (_physport))
-#define   RTL8365MB_PORT_ISOLATION_MASK			0x07FF
+#define   RTL8365MB_PORT_ISOLATION_MASK			RTL8365MB_PORT_MASK
 
 /* Extended filter ID registers - used to key forwarding database with IVL */
 #define RTL8365MB_EFID_MASK			GENMASK(2, 0)
@@ -308,16 +409,16 @@
 		(0x3 << RTL8365MB_MSTI_CTRL_PORT_STATE_OFFSET((_physport)))
 
 /* Unknown unicast DA flooding port mask */
-#define RTL8365MB_UNKNOWN_UNICAST_FLOODING_PMASK_REG		0x0890
-#define   RTL8365MB_UNKNOWN_UNICAST_FLOODING_PMASK_MASK		0x07FF
+#define RTL8365MB_UNKNOWN_UNICAST_FLOODING_PMASK_REG	0x0890
+#define   RTL8365MB_UNKNOWN_UNICAST_FLOODING_PMASK_MASK	RTL8365MB_PORT_MASK
 
 /* Unknown multicast DA flooding port mask */
-#define RTL8365MB_UNKNOWN_MULTICAST_FLOODING_PMASK_REG		0x0891
-#define   RTL8365MB_UNKNOWN_MULTICAST_FLOODING_PMASK_MASK	0x07FF
+#define RTL8365MB_UNKNOWN_MULTICAST_FLOODING_PMASK_REG	  0x0891
+#define   RTL8365MB_UNKNOWN_MULTICAST_FLOODING_PMASK_MASK RTL8365MB_PORT_MASK
 
 /* Broadcast flooding port mask */
-#define RTL8365MB_UNKNOWN_BROADCAST_FLOODING_PMASK_REG		0x0892
-#define   RTL8365MB_UNKNOWN_BROADCAST_FLOODING_PMASK_MASK	0x07FF
+#define RTL8365MB_UNKNOWN_BROADCAST_FLOODING_PMASK_REG	  0x0892
+#define   RTL8365MB_UNKNOWN_BROADCAST_FLOODING_PMASK_MASK RTL8365MB_PORT_MASK
 
 #define RTL8365MB_SUPPORTED_BRIDGE_FLAGS \
 	    (BR_LEARNING | BR_FLOOD | BR_MCAST_FLOOD | BR_BCAST_FLOOD)
@@ -326,19 +427,19 @@
 #define RTL8365MB_PORT_MISC_CFG_REG_BASE			0x000E
 #define RTL8365MB_PORT_MISC_CFG_REG(_p) \
 		(RTL8365MB_PORT_MISC_CFG_REG_BASE + ((_p) << 5))
-#define   RTL8365MB_PORT_MISC_CFG_SMALL_TAG_IPG_MASK		0x8000
-#define   RTL8365MB_PORT_MISC_CFG_TX_ITFSP_MODE_MASK		0x4000
-#define   RTL8365MB_PORT_MISC_CFG_FLOWCTRL_INDEP_MASK		0x2000
-#define   RTL8365MB_PORT_MISC_CFG_DOT1Q_REMARK_ENABLE_MASK	0x1000
-#define   RTL8365MB_PORT_MISC_CFG_INGRESSBW_FLOWCTRL_MASK	0x0800
-#define   RTL8365MB_PORT_MISC_CFG_INGRESSBW_IFG_MASK		0x0400
-#define   RTL8365MB_PORT_MISC_CFG_RX_SPC_MASK			0x0200
-#define   RTL8365MB_PORT_MISC_CFG_CRC_SKIP_MASK			0x0100
-#define   RTL8365MB_PORT_MISC_CFG_PKTGEN_TX_FIRST_MASK		0x0080
-#define   RTL8365MB_PORT_MISC_CFG_MAC_LOOPBACK_MASK		0x0040
+#define   RTL8365MB_PORT_MISC_CFG_SMALL_TAG_IPG_MASK		BIT(15)
+#define   RTL8365MB_PORT_MISC_CFG_TX_ITFSP_MODE_MASK		BIT(14)
+#define   RTL8365MB_PORT_MISC_CFG_FLOWCTRL_INDEP_MASK		BIT(13)
+#define   RTL8365MB_PORT_MISC_CFG_DOT1Q_REMARK_ENABLE_MASK	BIT(12)
+#define   RTL8365MB_PORT_MISC_CFG_INGRESSBW_FLOWCTRL_MASK	BIT(11)
+#define   RTL8365MB_PORT_MISC_CFG_INGRESSBW_IFG_MASK		BIT(10)
+#define   RTL8365MB_PORT_MISC_CFG_RX_SPC_MASK			BIT(9)
+#define   RTL8365MB_PORT_MISC_CFG_CRC_SKIP_MASK			BIT(8)
+#define   RTL8365MB_PORT_MISC_CFG_PKTGEN_TX_FIRST_MASK		BIT(7)
+#define   RTL8365MB_PORT_MISC_CFG_MAC_LOOPBACK_MASK		BIT(6)
 /* See &rtl8365mb_vlan_egress_mode */
-#define   RTL8365MB_PORT_MISC_CFG_VLAN_EGRESS_MODE_MASK		0x0030
-#define   RTL8365MB_PORT_MISC_CFG_CONGESTION_SUSTAIN_TIME_MASK	0x000F
+#define   RTL8365MB_PORT_MISC_CFG_VLAN_EGRESS_MODE_MASK		GENMASK(5, 4)
+#define   RTL8365MB_PORT_MISC_CFG_CONGESTION_SUSTAIN_TIME_MASK	GENMASK(3, 0)
 
 /**
  * enum rtl8365mb_vlan_egress_mode - port VLAN egress mode
@@ -360,7 +461,7 @@ enum rtl8365mb_vlan_egress_mode {
 
 /* VLAN control register */
 #define RTL8365MB_VLAN_CTRL_REG			0x07A8
-#define   RTL8365MB_VLAN_CTRL_EN_MASK		0x0001
+#define   RTL8365MB_VLAN_CTRL_EN_MASK		BIT(0)
 
 /* VLAN ingress filter register */
 #define RTL8365MB_VLAN_INGRESS_REG				0x07A9
@@ -384,8 +485,8 @@ enum rtl8365mb_vlan_egress_mode {
 		(((RTL8365MB_MIB_ADDRESS_PORT_OFFSET) * (_p) + (_x)) >> 2)
 
 #define RTL8365MB_MIB_CTRL0_REG			0x1005
-#define   RTL8365MB_MIB_CTRL0_RESET_MASK	0x0002
-#define   RTL8365MB_MIB_CTRL0_BUSY_MASK		0x0001
+#define   RTL8365MB_MIB_CTRL0_RESET_MASK	BIT(1)
+#define   RTL8365MB_MIB_CTRL0_BUSY_MASK		BIT(0)
 
 /* The DSA callback .get_stats64 runs in atomic context, so we are not allowed
  * to block. On the other hand, accessing MIB counters absolutely requires us to
@@ -549,6 +650,30 @@ static const struct rtl8365mb_jam_tbl_entry rtl8365mb_init_jam_common[] = {
 	{ 0x03Fa, 0x0007 }, { 0x08C8, 0x00C0 }, { 0x0A30, 0x020E },
 	{ 0x0800, 0x0000 }, { 0x0802, 0x0000 }, { 0x09DA, 0x0013 },
 	{ 0x1D32, 0x0002 },
+};
+
+/* SGMII SerDes tuning parameters, lifted from the vendor driver sources. The
+ * vendor driver keeps two variants of this table and selects between them
+ * based on the chip option register; these are the values for a non-zero
+ * option, which is what RTL8367S parts seen so far report. See
+ * rtl8365mb_sds_probe_option().
+ */
+static const struct rtl8365mb_jam_tbl_entry rtl8365mb_sds_jam_sgmii[] = {
+	{ 0x0480, 0x04D7 }, { 0x0481, 0xF994 }, { 0x0482, 0x2420 },
+	{ 0x0483, 0x6960 }, { 0x0484, 0x9728 }, { 0x0423, 0x9D85 },
+	{ 0x0424, 0xD810 }, { 0x002E, 0x83F2 },
+};
+
+/* HSGMII SerDes tuning parameters, lifted from the vendor driver sources. As
+ * with the SGMII table, the vendor driver keeps several variants and selects
+ * one based on the chip option register; these are the values for a non-zero
+ * option, which is what RTL8367S parts seen so far report. See
+ * rtl8365mb_sds_probe_option().
+ */
+static const struct rtl8365mb_jam_tbl_entry rtl8365mb_sds_jam_hsgmii[] = {
+	{ 0x0500, 0x82F0 }, { 0x0501, 0xF195 }, { 0x0502, 0x31A2 },
+	{ 0x0503, 0x7960 }, { 0x0504, 0x9728 }, { 0x0423, 0x9D85 },
+	{ 0x0424, 0xD810 }, { 0x0001, 0x0F80 }, { 0x002E, 0x83F2 },
 };
 
 enum rtl8365mb_phy_interface_mode {
@@ -730,6 +855,9 @@ struct rtl8365mb_port {
  * @cpu: CPU tagging and CPU port configuration for this chip
  * @mib_lock: prevent concurrent reads of MIB counters
  * @ports: per-port data
+ * @pcs: PCS for the SerDes external interface
+ * @sds_supported: SerDes tuning parameters match the chip option, so the
+ *                 SerDes interface modes can be advertised
  *
  * Private data for this driver.
  */
@@ -740,7 +868,11 @@ struct rtl8365mb {
 	struct rtl8365mb_cpu cpu;
 	struct mutex mib_lock;
 	struct rtl8365mb_port ports[RTL8365MB_MAX_NUM_PORTS];
+	struct phylink_pcs pcs;
+	bool sds_supported;
 };
+
+#define pcs_to_rtl8365mb(_pcs) container_of((_pcs), struct rtl8365mb, pcs)
 
 static int rtl8365mb_phy_poll_busy(struct realtek_priv *priv)
 {
@@ -754,6 +886,8 @@ static int rtl8365mb_phy_poll_busy(struct realtek_priv *priv)
 static int rtl8365mb_phy_ocp_prepare(struct realtek_priv *priv, int phy,
 				     u32 ocp_addr)
 {
+	u16 ocp_addr_lo = FIELD_GET(RTL8365MB_PHY_OCP_ADDR_5_1_MASK, ocp_addr);
+	u16 ocp_addr_hi = FIELD_GET(RTL8365MB_PHY_OCP_ADDR_9_6_MASK, ocp_addr);
 	u32 val;
 	int ret;
 
@@ -770,9 +904,9 @@ static int rtl8365mb_phy_ocp_prepare(struct realtek_priv *priv, int phy,
 	val = RTL8365MB_PHY_BASE;
 	val |= FIELD_PREP(RTL8365MB_INDIRECT_ACCESS_ADDRESS_PHYNUM_MASK, phy);
 	val |= FIELD_PREP(RTL8365MB_INDIRECT_ACCESS_ADDRESS_OCPADR_5_1_MASK,
-			  ocp_addr >> 1);
+			  ocp_addr_lo);
 	val |= FIELD_PREP(RTL8365MB_INDIRECT_ACCESS_ADDRESS_OCPADR_9_6_MASK,
-			  ocp_addr >> 6);
+			  ocp_addr_hi);
 	ret = regmap_write(priv->map_nolock,
 			   RTL8365MB_INDIRECT_ACCESS_ADDRESS_REG, val);
 	if (ret)
@@ -923,6 +1057,66 @@ static int rtl8365mb_phy_write(struct realtek_priv *priv, int phy, int regnum,
 	return 0;
 }
 
+static int rtl8365mb_phy_read_c45(struct realtek_priv *priv, int phy, int devad,
+				  int regnum)
+{
+	u32 ocp_addr;
+	u16 val;
+	int ret;
+
+	if (phy > RTL8365MB_PHYADDRMAX)
+		return -EINVAL;
+
+	if (devad == MDIO_MMD_PCS && regnum == MDIO_PCS_EEE_ABLE)
+		ocp_addr = RTL8365MB_PHY_OCP_ADDR_EEE_ABLE;
+	else if (devad == MDIO_MMD_AN && regnum == MDIO_AN_EEE_ADV)
+		ocp_addr = RTL8365MB_PHY_OCP_ADDR_EEE_ADV;
+	else if (devad == MDIO_MMD_AN && regnum == MDIO_AN_EEE_LPABLE)
+		ocp_addr = RTL8365MB_PHY_OCP_ADDR_EEE_LPABLE;
+	else
+		/* Only the EEE registers are mapped; others read as 0, as the
+		 * hardware does, so the generic MMD code is not tripped up by
+		 * an error.
+		 */
+		return 0;
+
+	ret = rtl8365mb_phy_ocp_read(priv, phy, ocp_addr, &val);
+	if (ret) {
+		dev_err(priv->dev,
+			"failed to read PHY%d OCP %04x, ret %d\n", phy, ocp_addr,
+			ret);
+		return ret;
+	}
+
+	return val;
+}
+
+static int rtl8365mb_phy_write_c45(struct realtek_priv *priv, int phy,
+				   int devad, int regnum, u16 val)
+{
+	int ret;
+
+	if (phy > RTL8365MB_PHYADDRMAX)
+		return -EINVAL;
+
+	/* Only the EEE advertisement register is writable; writes to other
+	 * registers are ignored, as the hardware does.
+	 */
+	if (devad != MDIO_MMD_AN || regnum != MDIO_AN_EEE_ADV)
+		return 0;
+
+	ret = rtl8365mb_phy_ocp_write(priv, phy, RTL8365MB_PHY_OCP_ADDR_EEE_ADV,
+				      val);
+	if (ret) {
+		dev_err(priv->dev,
+			"failed to write PHY%d OCP %04x, ret %d\n", phy,
+			RTL8365MB_PHY_OCP_ADDR_EEE_ADV, ret);
+		return ret;
+	}
+
+	return 0;
+}
+
 static const struct rtl8365mb_extint *
 rtl8365mb_get_port_extint(struct realtek_priv *priv, int port)
 {
@@ -1042,6 +1236,391 @@ static int rtl8365mb_ext_config_rgmii(struct realtek_priv *priv, int port,
 	return 0;
 }
 
+static int rtl8365mb_sds_write(struct realtek_priv *priv, u16 addr, u16 data)
+{
+	int ret;
+
+	ret = regmap_write(priv->map, RTL8365MB_SDS_INDACS_DATA_REG, data);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(priv->map, RTL8365MB_SDS_INDACS_ADR_REG, addr);
+	if (ret)
+		return ret;
+
+	/* The SerDes indirect access engine completes the command within the
+	 * register write transaction, so there is no need to wait or poll for
+	 * completion before the next access, matching the vendor driver.
+	 */
+	return regmap_write(priv->map, RTL8365MB_SDS_INDACS_CMD_REG,
+			    RTL8365MB_SDS_INDACS_CMD_RUN_MASK |
+			    RTL8365MB_SDS_INDACS_CMD_WR_MASK);
+}
+
+static int rtl8365mb_sds_read(struct realtek_priv *priv, u16 addr, u16 *data)
+{
+	u32 val;
+	int ret;
+
+	ret = regmap_write(priv->map, RTL8365MB_SDS_INDACS_ADR_REG, addr);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(priv->map, RTL8365MB_SDS_INDACS_CMD_REG,
+			   RTL8365MB_SDS_INDACS_CMD_RUN_MASK);
+	if (ret)
+		return ret;
+
+	/* Wait for the indirect read to complete: the engine clears the BUSY
+	 * bit once the data register holds the result.
+	 */
+	ret = regmap_read_poll_timeout(priv->map, RTL8365MB_SDS_INDACS_CMD_REG,
+				       val,
+				       !(val & RTL8365MB_SDS_INDACS_CMD_BUSY_MASK),
+				       10, 1000);
+	if (ret)
+		return ret;
+
+	ret = regmap_read(priv->map, RTL8365MB_SDS_INDACS_DATA_REG, &val);
+	if (ret)
+		return ret;
+
+	*data = val;
+
+	return 0;
+}
+
+/* The vendor driver selects between two sets of SerDes tuning parameters based
+ * on the chip option register. Only the variant for a non-zero option has been
+ * tested on real hardware - the RTL8367S parts seen so far all report 1. The
+ * variant for option 0 uses different tuning values that cannot be verified,
+ * so probe the option once at setup and only advertise the SerDes interface
+ * modes when the tuning parameters are known to match, so that an unsupported
+ * variant fails at phylink validation time rather than when configuring the
+ * link.
+ */
+static int rtl8365mb_sds_probe_option(struct realtek_priv *priv)
+{
+	struct rtl8365mb *mb = priv->chip_data;
+	const struct rtl8365mb_extint *extint;
+	u32 option;
+	int ret;
+	int i;
+
+	/* Nothing to probe if no external interface is wired to the SerDes */
+	for (i = 0; i < RTL8365MB_MAX_NUM_EXTINTS; i++) {
+		extint = &mb->chip_info->extints[i];
+
+		if (extint->supported_interfaces &
+		    (RTL8365MB_PHY_INTERFACE_MODE_SGMII |
+		     RTL8365MB_PHY_INTERFACE_MODE_HSGMII))
+			break;
+	}
+	if (i == RTL8365MB_MAX_NUM_EXTINTS)
+		return 0;
+
+	ret = regmap_write(priv->map, RTL8365MB_SDS_OPTION_ARM_REG,
+			   RTL8365MB_SDS_OPTION_ARM_KEY);
+	if (ret)
+		return ret;
+
+	ret = regmap_read(priv->map, RTL8365MB_SDS_OPTION_REG, &option);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(priv->map, RTL8365MB_SDS_OPTION_ARM_REG, 0);
+	if (ret)
+		return ret;
+
+	if (option == 0) {
+		dev_warn(priv->dev,
+			 "unsupported SerDes tuning variant (chip option 0), disabling SerDes interface modes\n");
+		return 0;
+	}
+
+	mb->sds_supported = true;
+
+	return 0;
+}
+
+/* The vendor driver raises the port 6 ingress and egress rate limiters to
+ * their maximum in its switch init, unconditionally for the whole chip
+ * family. The chip reset in rtl8365mb_setup() puts them back to their reset
+ * default of 0x1FFFF, a ~1.048 Gbps limit which caps the aggregate
+ * throughput of an HSGMII CPU port at roughly 1 Gbps. The vendor
+ * documentation describes the reset default as disabling the limiter, but
+ * the cap has been observed on hardware. Raise them likewise, to 0x7FFFF
+ * (~4.19 Gbps, above the HSGMII line rate). The related HSGMII scheduler
+ * line rate register (LINE_RATE_HSG_H, 0x03FA) is already set to its
+ * maximum by the common init jam table.
+ */
+static int rtl8365mb_sds_raise_rate_limits(struct realtek_priv *priv)
+{
+	int ret;
+
+	ret = regmap_write(priv->map, RTL8365MB_INGRESSBW_PORT6_RATE_CTRL0_REG,
+			   0xFFFF);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(priv->map,
+				 RTL8365MB_INGRESSBW_PORT6_RATE_CTRL1_REG,
+				 RTL8365MB_INGRESSBW_PORT6_RATE_CTRL1_MASK,
+				 RTL8365MB_INGRESSBW_PORT6_RATE_CTRL1_MASK);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(priv->map, RTL8365MB_PORT6_EGRESSBW_CTRL0_REG,
+			   0xFFFF);
+	if (ret)
+		return ret;
+
+	return regmap_update_bits(priv->map, RTL8365MB_PORT6_EGRESSBW_CTRL1_REG,
+				  RTL8365MB_PORT6_EGRESSBW_CTRL1_MASK,
+				  RTL8365MB_PORT6_EGRESSBW_CTRL1_MASK);
+}
+
+static int rtl8365mb_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
+				phy_interface_t interface,
+				const unsigned long *advertising,
+				bool permit_pause_to_mac)
+{
+	const struct rtl8365mb_jam_tbl_entry *sds_jam;
+	const int id = RTL8365MB_SDS_EXT_INTERFACE_ID;
+	struct rtl8365mb *mb = pcs_to_rtl8365mb(pcs);
+	struct realtek_priv *priv;
+	size_t sds_jam_size;
+	u32 mode;
+	u16 val;
+	int ret;
+	int i;
+
+	priv = mb->priv;
+
+	if (interface == PHY_INTERFACE_MODE_2500BASEX) {
+		sds_jam = rtl8365mb_sds_jam_hsgmii;
+		sds_jam_size = ARRAY_SIZE(rtl8365mb_sds_jam_hsgmii);
+		mode = RTL8365MB_EXT_PORT_MODE_HSGMII;
+	} else {
+		sds_jam = rtl8365mb_sds_jam_sgmii;
+		sds_jam_size = ARRAY_SIZE(rtl8365mb_sds_jam_sgmii);
+		mode = RTL8365MB_EXT_PORT_MODE_SGMII;
+	}
+
+	/* Hold the embedded DW8051 microcontroller in reset and keep it
+	 * disabled. The vendor driver loads firmware into it to manage the
+	 * SerDes link, but the firmware only duplicates work that phylink
+	 * already does: it polls the port status and forces the external
+	 * interface configuration in the very registers this driver manages.
+	 * Letting it run would race with phylink.
+	 */
+	ret = regmap_update_bits(priv->map, RTL8365MB_CHIP_RESET_REG,
+				 RTL8365MB_CHIP_RESET_DW8051_MASK,
+				 RTL8365MB_CHIP_RESET_DW8051_MASK);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(priv->map, RTL8365MB_MISC_CFG0_REG,
+				 RTL8365MB_MISC_CFG0_DW8051_EN_MASK, 0);
+	if (ret)
+		return ret;
+
+	/* The vendor driver clears the line rate bypass for all interface
+	 * modes except TMII.
+	 */
+	ret = regmap_update_bits(priv->map, RTL8365MB_BYPASS_LINE_RATE_REG,
+				 RTL8365MB_SDS_BYPASS_LINE_RATE_MASK, 0);
+	if (ret)
+		return ret;
+
+	/* Tune the SerDes with vendor-prescribed parameters */
+	for (i = 0; i < sds_jam_size; i++) {
+		ret = rtl8365mb_sds_write(priv, sds_jam[i].reg,
+					  sds_jam[i].val);
+		if (ret)
+			return ret;
+	}
+
+	/* Mux the SerDes to MAC8 in the requested mode */
+	ret = regmap_update_bits(priv->map, RTL8365MB_SDS_MISC_REG,
+				 RTL8365MB_SDS_MISC_MAC8_SEL_SGMII_MASK |
+					 RTL8365MB_SDS_MISC_MAC8_SEL_HSGMII_MASK,
+				 mode == RTL8365MB_EXT_PORT_MODE_SGMII ?
+					 RTL8365MB_SDS_MISC_MAC8_SEL_SGMII_MASK :
+					 RTL8365MB_SDS_MISC_MAC8_SEL_HSGMII_MASK);
+	if (ret)
+		return ret;
+
+	val = mode << RTL8365MB_DIGITAL_INTERFACE_SELECT_MODE_OFFSET(id);
+	ret = regmap_update_bits(priv->map,
+				 RTL8365MB_DIGITAL_INTERFACE_SELECT_REG(id),
+				 RTL8365MB_DIGITAL_INTERFACE_SELECT_MODE_MASK(id),
+				 val);
+	if (ret)
+		return ret;
+
+	/* Take the SerDes out of reset. The vendor driver does this only
+	 * after the SerDes mux and the interface mode are configured.
+	 */
+	ret = rtl8365mb_sds_write(priv, RTL8365MB_SDS_REG_RESET,
+				  RTL8365MB_SDS_RESET_DEASSERT);
+	if (ret)
+		return ret;
+
+	/* Reset the SerDes data path and resync its PLL, mirroring what the
+	 * vendor firmware does right after deasserting the SerDes reset.
+	 * This flushes the FIFOs and ensures a clean state for the link,
+	 * preventing silent drops and CRC errors.
+	 */
+	ret = rtl8365mb_sds_write(priv, RTL8365MB_SDS_REG_BMCR,
+				  RTL8365MB_SDS_BMCR_DPRST_PHASE1);
+	if (ret)
+		return ret;
+
+	ret = rtl8365mb_sds_write(priv, RTL8365MB_SDS_REG_BMCR,
+				  RTL8365MB_SDS_BMCR_DPRST_PHASE2);
+	if (ret)
+		return ret;
+
+	/* Keep SGMII in-band autonegotiation disabled: the link parameters are
+	 * forced from rtl8365mb_pcs_link_up() instead.
+	 */
+	ret = rtl8365mb_sds_read(priv, RTL8365MB_SDS_REG_NWAY, &val);
+	if (ret)
+		return ret;
+
+	val &= ~RTL8365MB_SDS_NWAY_EN_MASK;
+	val |= RTL8365MB_SDS_NWAY_RESTART_MASK;
+
+	return rtl8365mb_sds_write(priv, RTL8365MB_SDS_REG_NWAY, val);
+}
+
+static bool rtl8365mb_interface_is_serdes(phy_interface_t interface)
+{
+	return interface == PHY_INTERFACE_MODE_SGMII ||
+	       interface == PHY_INTERFACE_MODE_2500BASEX;
+}
+
+static unsigned int rtl8365mb_pcs_inband_caps(struct phylink_pcs *pcs,
+					      phy_interface_t interface)
+{
+	/* In-band autonegotiation is not implemented; the link is always
+	 * forced. Report that to phylink so that it never selects an
+	 * in-band-enabled negotiation mode for this PCS.
+	 */
+	return LINK_INBAND_DISABLE;
+}
+
+static void rtl8365mb_pcs_get_state(struct phylink_pcs *pcs,
+				    unsigned int neg_mode,
+				    struct phylink_link_state *state)
+{
+	struct rtl8365mb *mb = pcs_to_rtl8365mb(pcs);
+	struct realtek_priv *priv = mb->priv;
+	u16 status;
+	u32 val;
+	int ret;
+
+	/* In-band autonegotiation is not implemented, so the link parameters are
+	 * forced from rtl8365mb_pcs_link_up(). The real link state must still be
+	 * read from the SerDes itself: the embedded DW8051 microcontroller that
+	 * the vendor firmware uses to poll the SerDes is kept disabled (see
+	 * rtl8365mb_pcs_config()), so the link status register can be read
+	 * directly through the SDS_INDACS window without racing the auto-poll.
+	 */
+	ret = rtl8365mb_sds_read(priv, RTL8365MB_SDS_REG_LINK_STATUS, &status);
+	if (ret) {
+		state->link = false;
+		return;
+	}
+
+	state->link = !!(status & RTL8365MB_SDS_LINK_STATUS_LINK_MASK);
+	state->an_complete = state->link;
+	if (!state->link)
+		return;
+
+	/* The speed and duplex are forced; read them back from the values
+	 * programmed into the SerDes MISC register.
+	 */
+	ret = regmap_read(priv->map, RTL8365MB_SDS_MISC_REG, &val);
+	if (ret) {
+		state->link = false;
+		return;
+	}
+
+	state->duplex = (val & RTL8365MB_SDS_MISC_SGMII_FDUP_MASK) ?
+				DUPLEX_FULL : DUPLEX_HALF;
+
+	switch (FIELD_GET(RTL8365MB_SDS_MISC_SGMII_SPD_MASK, val)) {
+	case RTL8365MB_PORT_SPEED_1000M:
+		state->speed =
+			state->interface == PHY_INTERFACE_MODE_2500BASEX ?
+				SPEED_2500 : SPEED_1000;
+		break;
+	case RTL8365MB_PORT_SPEED_100M:
+		state->speed = SPEED_100;
+		break;
+	case RTL8365MB_PORT_SPEED_10M:
+		state->speed = SPEED_10;
+		break;
+	}
+}
+
+static void rtl8365mb_pcs_link_up(struct phylink_pcs *pcs,
+				  unsigned int neg_mode,
+				  phy_interface_t interface, int speed,
+				  int duplex)
+{
+	struct rtl8365mb *mb = pcs_to_rtl8365mb(pcs);
+	struct realtek_priv *priv = mb->priv;
+	u32 mask = RTL8365MB_SDS_MISC_SGMII_FDUP_MASK |
+		   RTL8365MB_SDS_MISC_SGMII_LINK_MASK |
+		   RTL8365MB_SDS_MISC_SGMII_SPD_MASK;
+	u32 val = RTL8365MB_SDS_MISC_SGMII_LINK_MASK;
+	u32 r_speed;
+	int ret;
+
+	/* The speed field has no value for 2.5 Gbps: the rate is determined by
+	 * the HSGMII SerDes configuration, and the vendor driver programs the
+	 * 1 Gbps value here.
+	 */
+	if (speed == SPEED_2500 || speed == SPEED_1000) {
+		r_speed = RTL8365MB_PORT_SPEED_1000M;
+	} else if (speed == SPEED_100) {
+		r_speed = RTL8365MB_PORT_SPEED_100M;
+	} else if (speed == SPEED_10) {
+		r_speed = RTL8365MB_PORT_SPEED_10M;
+	} else {
+		dev_err(priv->dev, "unsupported SerDes speed %s\n",
+			phy_speed_to_str(speed));
+		return;
+	}
+
+	val |= FIELD_PREP(RTL8365MB_SDS_MISC_SGMII_SPD_MASK, r_speed);
+
+	if (duplex == DUPLEX_FULL)
+		val |= RTL8365MB_SDS_MISC_SGMII_FDUP_MASK;
+
+	/* pcs_link_up() carries no pause information, so the SerDes flow
+	 * control bits are programmed together with the MAC external interface
+	 * force from rtl8365mb_phylink_mac_link_up(), where the resolved pause
+	 * modes are known.
+	 */
+	ret = regmap_update_bits(priv->map, RTL8365MB_SDS_MISC_REG, mask, val);
+	if (ret) {
+		dev_err(priv->dev, "failed to force SerDes link: %pe\n",
+			ERR_PTR(ret));
+		return;
+	}
+}
+
+static const struct phylink_pcs_ops rtl8365mb_pcs_ops = {
+	.pcs_inband_caps = rtl8365mb_pcs_inband_caps,
+	.pcs_config = rtl8365mb_pcs_config,
+	.pcs_get_state = rtl8365mb_pcs_get_state,
+	.pcs_link_up = rtl8365mb_pcs_link_up,
+};
+
 static int rtl8365mb_ext_config_forcemode(struct realtek_priv *priv, int port,
 					  bool link, int speed, int duplex,
 					  bool tx_pause, bool rx_pause)
@@ -1065,7 +1644,11 @@ static int rtl8365mb_ext_config_forcemode(struct realtek_priv *priv, int port,
 		r_rx_pause = rx_pause ? 1 : 0;
 		r_tx_pause = tx_pause ? 1 : 0;
 
-		if (speed == SPEED_1000) {
+		/* The speed field has no value for 2.5 Gbps: the rate is
+		 * determined by the HSGMII SerDes configuration, and the
+		 * vendor driver programs the 1 Gbps value here.
+		 */
+		if (speed == SPEED_2500 || speed == SPEED_1000) {
 			r_speed = RTL8365MB_PORT_SPEED_1000M;
 		} else if (speed == SPEED_100) {
 			r_speed = RTL8365MB_PORT_SPEED_100M;
@@ -1118,6 +1701,8 @@ static void rtl8365mb_phylink_get_caps(struct dsa_switch *ds, int port,
 {
 	const struct rtl8365mb_extint *extint =
 		rtl8365mb_get_port_extint(ds->priv, port);
+	struct realtek_priv *priv = ds->priv;
+	struct rtl8365mb *mb = priv->chip_data;
 
 	config->mac_capabilities = MAC_SYM_PAUSE | MAC_ASYM_PAUSE |
 				   MAC_10 | MAC_100 | MAC_1000FD;
@@ -1131,6 +1716,14 @@ static void rtl8365mb_phylink_get_caps(struct dsa_switch *ds, int port,
 		 */
 		__set_bit(PHY_INTERFACE_MODE_GMII,
 			  config->supported_interfaces);
+
+		/* Integrated PHYs support EEE at 100M/1G; the hardware manages
+		 * LPI on its own, so just advertise LPI awareness to phylink.
+		 */
+		memcpy(config->lpi_interfaces, config->supported_interfaces,
+		       sizeof(config->lpi_interfaces));
+		config->lpi_capabilities = MAC_100FD | MAC_1000FD;
+		config->eee_enabled_default = true;
 		return;
 	}
 
@@ -1141,6 +1734,32 @@ static void rtl8365mb_phylink_get_caps(struct dsa_switch *ds, int port,
 
 	if (extint->supported_interfaces & RTL8365MB_PHY_INTERFACE_MODE_RGMII)
 		phy_interface_set_rgmii(config->supported_interfaces);
+
+	if (extint->supported_interfaces & RTL8365MB_PHY_INTERFACE_MODE_SGMII &&
+	    mb->sds_supported)
+		__set_bit(PHY_INTERFACE_MODE_SGMII,
+			  config->supported_interfaces);
+
+	if (extint->supported_interfaces & RTL8365MB_PHY_INTERFACE_MODE_HSGMII &&
+	    mb->sds_supported) {
+		__set_bit(PHY_INTERFACE_MODE_2500BASEX,
+			  config->supported_interfaces);
+		config->mac_capabilities |= MAC_2500FD;
+	}
+}
+
+static struct phylink_pcs *
+rtl8365mb_phylink_mac_select_pcs(struct phylink_config *config,
+				 phy_interface_t interface)
+{
+	struct dsa_port *dp = dsa_phylink_to_port(config);
+	struct realtek_priv *priv = dp->ds->priv;
+	struct rtl8365mb *mb = priv->chip_data;
+
+	if (rtl8365mb_interface_is_serdes(interface))
+		return &mb->pcs;
+
+	return NULL;
 }
 
 static void rtl8365mb_phylink_mac_config(struct phylink_config *config,
@@ -1168,6 +1787,12 @@ static void rtl8365mb_phylink_mac_config(struct phylink_config *config,
 		return;
 	}
 
+	/* SGMII and 2500base-x are handled by the SerDes PCS, configured
+	 * through the phylink_pcs ops, so nothing to do here for them.
+	 */
+	if (rtl8365mb_interface_is_serdes(state->interface))
+		return;
+
 	/* TODO: Implement MII and RMII modes, which the RTL8365MB-VC also
 	 * supports
 	 */
@@ -1188,7 +1813,13 @@ static void rtl8365mb_phylink_mac_link_down(struct phylink_config *config,
 	p = &mb->ports[port];
 	cancel_delayed_work_sync(&p->mib_work);
 
-	if (phy_interface_mode_is_rgmii(interface)) {
+	/* phylink has no pcs_link_down callback, so on the SerDes path only the
+	 * MAC external interface force is reset here. Clearing the MAC force is
+	 * enough to bring the link down; the SerDes keeps presenting its last
+	 * forced state until the next pcs_link_up() reprograms it.
+	 */
+	if (phy_interface_mode_is_rgmii(interface) ||
+	    rtl8365mb_interface_is_serdes(interface)) {
 		ret = rtl8365mb_ext_config_forcemode(priv, port, false, 0, 0,
 						     false, false);
 		if (ret)
@@ -1218,14 +1849,51 @@ static void rtl8365mb_phylink_mac_link_up(struct phylink_config *config,
 	p = &mb->ports[port];
 	schedule_delayed_work(&p->mib_work, 0);
 
-	if (phy_interface_mode_is_rgmii(interface)) {
+	/* The SerDes forced link state is programmed by the PCS in
+	 * rtl8365mb_pcs_link_up(); here only the MAC external interface force
+	 * is configured, for both RGMII and SerDes.
+	 */
+	if (phy_interface_mode_is_rgmii(interface) ||
+	    rtl8365mb_interface_is_serdes(interface)) {
 		ret = rtl8365mb_ext_config_forcemode(priv, port, true, speed,
 						     duplex, tx_pause,
 						     rx_pause);
-		if (ret)
+		if (ret) {
 			dev_err(priv->dev,
 				"failed to force mode on port %d: %pe\n", port,
 				ERR_PTR(ret));
+			return;
+		}
+
+		/* The SerDes has its own pause enables; program them from
+		 * the resolved pause modes, as the vendor driver does when
+		 * forcing the link on a SerDes external interface. These
+		 * bits, not the MAC force pause bits, gate pause on the
+		 * SerDes external interface: flow control testing shows
+		 * that pause frames are only emitted with the SerDes TXFC
+		 * bit set, while the MAC force pause bits alone have no
+		 * effect on this port. This is done here rather than in
+		 * rtl8365mb_pcs_link_up() because pcs_link_up() carries no
+		 * pause information.
+		 */
+		if (rtl8365mb_interface_is_serdes(interface)) {
+			u32 val = 0;
+
+			if (tx_pause)
+				val |= RTL8365MB_SDS_MISC_SGMII_TXFC_MASK;
+			if (rx_pause)
+				val |= RTL8365MB_SDS_MISC_SGMII_RXFC_MASK;
+
+			ret = regmap_update_bits(priv->map,
+						 RTL8365MB_SDS_MISC_REG,
+						 RTL8365MB_SDS_MISC_SGMII_TXFC_MASK |
+							 RTL8365MB_SDS_MISC_SGMII_RXFC_MASK,
+						 val);
+			if (ret)
+				dev_err(priv->dev,
+					"failed to force SerDes pause modes on port %d: %pe\n",
+					port, ERR_PTR(ret));
+		}
 
 		return;
 	}
@@ -1988,16 +2656,19 @@ static void rtl8365mb_get_stats64(struct dsa_switch *ds, int port,
 	spin_unlock(&p->stats_lock);
 }
 
-static void rtl8365mb_stats_setup(struct realtek_priv *priv)
+static int rtl8365mb_stats_setup(struct realtek_priv *priv)
 {
 	struct rtl8365mb *mb = priv->chip_data;
 	struct dsa_switch *ds = &priv->ds;
 	struct dsa_port *dp;
+	int ret;
 
 	/* Per-chip global mutex to protect MIB counter access, since doing
 	 * so requires accessing a series of registers in a particular order.
 	 */
-	mutex_init(&mb->mib_lock);
+	ret = devm_mutex_init(priv->dev, &mb->mib_lock);
+	if (ret)
+		return ret;
 
 	dsa_switch_for_each_available_port(dp, ds) {
 		struct rtl8365mb_port *p = &mb->ports[dp->index];
@@ -2010,6 +2681,8 @@ static void rtl8365mb_stats_setup(struct realtek_priv *priv)
 		 */
 		INIT_DELAYED_WORK(&p->mib_work, rtl8365mb_stats_poll);
 	}
+
+	return 0;
 }
 
 static void rtl8365mb_stats_teardown(struct realtek_priv *priv)
@@ -2419,9 +3092,24 @@ static int rtl8365mb_setup(struct dsa_switch *ds)
 	mb = priv->chip_data;
 	cpu = &mb->cpu;
 
+	mb->pcs.ops = &rtl8365mb_pcs_ops;
+
+	/* The SerDes has no link interrupt wired up, so phylink must poll the
+	 * PCS for link changes when it tracks the link through pcs_get_state()
+	 * (in-band mode with autonegotiation disabled).
+	 */
+	mb->pcs.poll = true;
+
 	ret = rtl8365mb_reset_chip(priv);
 	if (ret) {
 		dev_err(priv->dev, "failed to reset chip: %pe\n",
+			ERR_PTR(ret));
+		goto out_error;
+	}
+
+	ret = rtl8365mb_sds_probe_option(priv);
+	if (ret) {
+		dev_err(priv->dev, "failed to probe SerDes chip option: %pe\n",
 			ERR_PTR(ret));
 		goto out_error;
 	}
@@ -2432,6 +3120,16 @@ static int rtl8365mb_setup(struct dsa_switch *ds)
 		dev_err(priv->dev, "failed to initialize switch: %pe\n",
 			ERR_PTR(ret));
 		goto out_error;
+	}
+
+	if (mb->sds_supported) {
+		ret = rtl8365mb_sds_raise_rate_limits(priv);
+		if (ret) {
+			dev_err(priv->dev,
+				"failed to raise port rate limits: %pe\n",
+				ERR_PTR(ret));
+			goto out_error;
+		}
 	}
 
 	/* Set up cascading IRQs */
@@ -2567,7 +3265,12 @@ static int rtl8365mb_setup(struct dsa_switch *ds)
 	}
 
 	/* Start statistics counter polling */
-	rtl8365mb_stats_setup(priv);
+	ret = rtl8365mb_stats_setup(priv);
+	if (ret) {
+		dev_err(priv->dev, "failed to setup stats: %pe\n",
+			ERR_PTR(ret));
+		goto out_teardown_irq;
+	}
 
 	return 0;
 
@@ -2657,17 +3360,66 @@ static int rtl8365mb_detect(struct realtek_priv *priv)
 	return 0;
 }
 
+static int rtl8365mb_phylink_mac_enable_tx_lpi(struct phylink_config *config,
+					       u32 timer, bool tx_clock_stop)
+{
+	/* The hardware manages LPI itself; there is no MAC-level LPI control.
+	 * This callback only signals LPI awareness to phylink.
+	 */
+	return 0;
+}
+
+static void rtl8365mb_phylink_mac_disable_tx_lpi(struct phylink_config *config)
+{
+}
+
 static const struct phylink_mac_ops rtl8365mb_phylink_mac_ops = {
+	.mac_select_pcs = rtl8365mb_phylink_mac_select_pcs,
 	.mac_config = rtl8365mb_phylink_mac_config,
 	.mac_link_down = rtl8365mb_phylink_mac_link_down,
 	.mac_link_up = rtl8365mb_phylink_mac_link_up,
+	.mac_enable_tx_lpi = rtl8365mb_phylink_mac_enable_tx_lpi,
+	.mac_disable_tx_lpi = rtl8365mb_phylink_mac_disable_tx_lpi,
 };
+
+static bool rtl8365mb_support_eee(struct dsa_switch *ds, int port)
+{
+	/* Only integrated-PHY ports support EEE, not the external RGMII ports. */
+	return !rtl8365mb_get_port_extint(ds->priv, port);
+}
+
+static int rtl8365mb_set_mac_eee(struct dsa_switch *ds, int port,
+				 struct ethtool_keee *e)
+{
+	struct realtek_priv *priv = ds->priv;
+
+	/* The only LPI timing control (tx_lpi_timer) is a single global
+	 * per-speed register shared by all ports, so it cannot be set from this
+	 * per-port callback; leave it at its reset default. Per-port EEE is
+	 * driven through the PHY advertisement. Reject the per-port TX LPI knobs
+	 * rather than silently ignoring them.
+	 */
+	if (!e->tx_lpi_enabled) {
+		dev_err(priv->dev, "disabling EEE TX LPI is not supported\n");
+		return -EOPNOTSUPP;
+	}
+
+	if (e->tx_lpi_timer) {
+		dev_err(priv->dev,
+			"setting the EEE TX LPI timer is not supported\n");
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
 
 static const struct dsa_switch_ops rtl8365mb_switch_ops = {
 	.get_tag_protocol = rtl8365mb_get_tag_protocol,
 	.change_tag_protocol = rtl8365mb_change_tag_protocol,
 	.setup = rtl8365mb_setup,
 	.teardown = rtl8365mb_teardown,
+	.support_eee = rtl8365mb_support_eee,
+	.set_mac_eee = rtl8365mb_set_mac_eee,
 	.phylink_get_caps = rtl8365mb_phylink_get_caps,
 	.port_bridge_join = rtl83xx_port_bridge_join,
 	.port_bridge_leave = rtl83xx_port_bridge_leave,
@@ -2713,6 +3465,12 @@ static const struct realtek_ops rtl8365mb_ops = {
 	.l2_flush = rtl8365mb_l2_flush,
 	.phy_read = rtl8365mb_phy_read,
 	.phy_write = rtl8365mb_phy_write,
+	.phy_read_c45 = rtl8365mb_phy_read_c45,
+	.phy_write_c45 = rtl8365mb_phy_write_c45,
+};
+
+static const char *const rtl8365mb_supplies[] = {
+	"avddh", "avddl", "dvddio", "dvddio1", "dvddl", "pllvddl",
 };
 
 const struct realtek_variant rtl8365mb_variant = {
@@ -2723,11 +3481,13 @@ const struct realtek_variant rtl8365mb_variant = {
 	.cmd_read = 0xb9,
 	.cmd_write = 0xb8,
 	.chip_data_sz = sizeof(struct rtl8365mb),
+	.supplies = rtl8365mb_supplies,
+	.num_supplies = ARRAY_SIZE(rtl8365mb_supplies),
 };
 
 static const struct of_device_id rtl8365mb_of_match[] = {
 	{ .compatible = "realtek,rtl8365mb", .data = &rtl8365mb_variant, },
-	{ /* sentinel */ },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, rtl8365mb_of_match);
 

@@ -12,14 +12,13 @@
 #include <linux/of_graph.h>
 #include <linux/regmap.h>
 
+#include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_of.h>
-#include <drm/drm_panel.h>
 
 struct ws_bridge {
 	struct drm_bridge bridge;
-	struct drm_bridge *next_bridge;
 	struct backlight_device *backlight;
 	struct device *dev;
 	struct regmap *reg_map;
@@ -88,11 +87,12 @@ static int ws_bridge_bridge_attach(struct drm_bridge *bridge,
 {
 	struct ws_bridge *ws = bridge_to_ws_bridge(bridge);
 
-	return drm_bridge_attach(encoder, ws->next_bridge,
+	return drm_bridge_attach(encoder, ws->bridge.next_bridge,
 				 &ws->bridge, flags);
 }
 
-static void ws_bridge_bridge_enable(struct drm_bridge *bridge)
+static void ws_bridge_bridge_enable(struct drm_bridge *bridge,
+				    struct drm_atomic_commit *commit)
 {
 	struct ws_bridge *ws = bridge_to_ws_bridge(bridge);
 
@@ -100,7 +100,8 @@ static void ws_bridge_bridge_enable(struct drm_bridge *bridge)
 	backlight_enable(ws->backlight);
 }
 
-static void ws_bridge_bridge_disable(struct drm_bridge *bridge)
+static void ws_bridge_bridge_disable(struct drm_bridge *bridge,
+				     struct drm_atomic_commit *commit)
 {
 	struct ws_bridge *ws = bridge_to_ws_bridge(bridge);
 
@@ -109,8 +110,11 @@ static void ws_bridge_bridge_disable(struct drm_bridge *bridge)
 }
 
 static const struct drm_bridge_funcs ws_bridge_bridge_funcs = {
-	.enable = ws_bridge_bridge_enable,
-	.disable = ws_bridge_bridge_disable,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
+	.atomic_enable = ws_bridge_bridge_enable,
+	.atomic_disable = ws_bridge_bridge_disable,
 	.attach = ws_bridge_bridge_attach,
 };
 
@@ -144,7 +148,6 @@ static struct backlight_device *ws_bridge_create_backlight(struct ws_bridge *ws)
 static int ws_bridge_probe(struct i2c_client *i2c)
 {
 	struct device *dev = &i2c->dev;
-	struct drm_panel *panel;
 	struct ws_bridge *ws;
 	int ret;
 
@@ -158,13 +161,10 @@ static int ws_bridge_probe(struct i2c_client *i2c)
 	if (IS_ERR(ws->reg_map))
 		return dev_err_probe(dev, PTR_ERR(ws->reg_map), "Failed to allocate regmap\n");
 
-	ret = drm_of_find_panel_or_bridge(dev->of_node, 1, -1, &panel, NULL);
-	if (ret)
-		return dev_err_probe(dev, ret, "Failed to find remote panel\n");
-
-	ws->next_bridge = devm_drm_panel_bridge_add(dev, panel);
-	if (IS_ERR(ws->next_bridge))
-		return PTR_ERR(ws->next_bridge);
+	ws->bridge.next_bridge = of_drm_get_bridge_by_endpoint(dev->of_node, 1, -1);
+	if (IS_ERR(ws->bridge.next_bridge))
+		return dev_err_probe(dev, PTR_ERR(ws->bridge.next_bridge),
+				     "Failed to find remote bridge\n");
 
 	ws->backlight = ws_bridge_create_backlight(ws);
 	if (IS_ERR(ws->backlight)) {

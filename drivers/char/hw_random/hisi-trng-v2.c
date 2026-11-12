@@ -58,7 +58,7 @@ static int hisi_trng_probe(struct platform_device *pdev)
 	struct hisi_trng *trng;
 	int ret;
 
-	trng = devm_kzalloc(&pdev->dev, sizeof(*trng), GFP_KERNEL);
+	trng = devm_kzalloc_obj(&pdev->dev, *trng);
 	if (!trng)
 		return -ENOMEM;
 
@@ -77,7 +77,7 @@ static int hisi_trng_probe(struct platform_device *pdev)
 }
 
 static const struct acpi_device_id hisi_trng_acpi_match[] = {
-	{ "HISI02B3", 0 },
+	{ .id = "HISI02B3" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, hisi_trng_acpi_match);

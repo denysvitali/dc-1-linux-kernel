@@ -5,6 +5,7 @@
 can be compiled for the Linux kernel."""
 
 import logging
+import sys
 
 from argparse import Namespace
 from lark import logger
@@ -21,11 +22,11 @@ from generators.union import XdrUnionGenerator
 
 from xdr_ast import transform_parse_tree, _RpcProgram, Specification
 from xdr_ast import _XdrAst, _XdrEnum, _XdrPassthru, _XdrPointer
-from xdr_ast import _XdrStruct, _XdrTypedef, _XdrUnion
+from xdr_ast import _XdrStruct, _XdrTypedef, _XdrUnion, XdrSemanticError
 
 from xdr_parse import xdr_parser, set_xdr_annotate, set_xdr_enum_validation
 from xdr_parse import make_error_handler, XdrParseError
-from xdr_parse import handle_transform_error
+from xdr_parse import handle_transform_error, handle_semantic_error
 
 logger.setLevel(logging.INFO)
 
@@ -123,12 +124,19 @@ def subcmd(args: Namespace) -> int:
         except VisitError as e:
             handle_transform_error(e, source, args.filename)
             return 1
-        match args.peer:
-            case "server":
-                generate_server_source(args.filename, ast, args.language)
-            case "client":
-                generate_client_source(args.filename, ast, args.language)
-            case _:
-                print("Code generation for", args.peer, "is not yet supported")
+        except XdrSemanticError as e:
+            handle_semantic_error(e, source, args.filename)
+            return 1
+        try:
+            match args.peer:
+                case "server":
+                    generate_server_source(args.filename, ast, args.language)
+                case "client":
+                    generate_client_source(args.filename, ast, args.language)
+                case _:
+                    print("Code generation for", args.peer, "is not yet supported")
+        except NotImplementedError as e:
+            sys.stderr.write(f"{args.filename}: {e}\n")
+            return 1
 
     return 0

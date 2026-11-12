@@ -311,7 +311,7 @@ static int amdgpu_atomfirmware_get_uma_carveout_info_v2_3(struct amdgpu_device *
 
 	if (nr_uma_options > MAX_UMA_OPTION_ENTRIES) {
 		drm_dbg(adev_to_drm(adev),
-			"Number of UMA options exceeds max table size. Options will not be parsed");
+			"Number of UMA options exceeds max table size. Options will not be parsed\n");
 		return -EINVAL;
 	}
 
@@ -917,8 +917,6 @@ int amdgpu_atomfirmware_get_clock_info(struct amdgpu_device *adev)
 				   (crev != 6)) {
 				spll->reference_freq = le32_to_cpu(gfx_info->v22.rlc_gpu_timer_refclk);
 				ret = 0;
-			} else {
-				BUG();
 			}
 		}
 	}

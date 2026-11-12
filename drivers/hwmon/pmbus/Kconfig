@@ -52,8 +52,8 @@ config SENSORS_ADM1275
 	help
 	  If you say yes here you get hardware monitoring support for Analog
 	  Devices ADM1075, ADM1272, ADM1273, ADM1275, ADM1276, ADM1278, ADM1281,
-	  ADM1293, ADM1294 and SQ24905C Hot-Swap Controller and
-	  Digital Power Monitors.
+	  ADM1293, ADM1294, ROHM BD12780, ROHM BD12790, and SQ24905C
+	  Hot-Swap Controller and Digital Power Monitors.
 
 	  This driver can also be built as a module. If so, the module will
 	  be called adm1275.
@@ -393,11 +393,30 @@ config SENSORS_MAX20751
 	  This driver can also be built as a module. If so, the module will
 	  be called max20751.
 
-config SENSORS_MAX20830
-	tristate "Analog Devices MAX20830"
+config SENSORS_MAX20826
+	tristate "Analog Devices MAX20826 and similar devices"
 	help
 	  If you say yes here you get hardware monitoring support for Analog
-	  Devices MAX20830.
+	  Devices MAX20826 and similar devices.
+
+	  This driver can also be built as a module. If so, the module will
+	  be called max20826.
+
+config SENSORS_MAX20826_REGULATOR
+	bool "Regulator support for Analog Devices MAX20826 and similar devices"
+	depends on SENSORS_MAX20826 && REGULATOR
+	help
+	  If you say yes here you get regulator support for Analog Devices
+	  MAX20826 and similar sensors.
+
+	  This enables the MAX20826 to be used as a regulator device,
+	  providing voltage control through the regulator framework.
+
+config SENSORS_MAX20830
+	tristate "Analog Devices MAX20830 and compatibles"
+	help
+	  If you say yes here you get hardware monitoring support for Analog
+	  Devices MAX20830, MAX20830C, and MAX20840C.
 
 	  This driver can also be built as a module. If so, the module will
 	  be called max20830.
@@ -434,8 +453,9 @@ config SENSORS_MAX34440
 	tristate "Maxim MAX34440 and compatibles"
 	help
 	  If you say yes here you get hardware monitoring support for Maxim
-	  MAX34440, MAX34441, MAX34446, MAX34451, MAX34460, and MAX34461.
-	  Other compatible are ADPM12160, and ADPM12200.
+	  MAX34440, MAX34441, MAX34446, MAX34451, MAX34452, MAX34460, and
+	  MAX34461. Other compatible devices are ADPM12160, ADPM12200,
+	  ADPM12250, and ADPM12300.
 
 	  This driver can also be built as a module. If so, the module will
 	  be called max34440.
@@ -607,6 +627,15 @@ config SENSORS_MPQ7932
 	  This driver can also be built as a module. If so, the module will
 	  be called mpq7932.
 
+config SENSORS_MPQ82D00
+	tristate "MPS MPQ82D00"
+	help
+	  If you say yes here you get hardware monitoring functionality support
+	  for power management IC MPS MPQ82D00.
+
+	  This driver can also be built as a module. If so, the module will
+	  be called mpq82d00.
+
 config SENSORS_MPQ8785
 	tristate "MPS MPQ8785"
 	help
@@ -615,6 +644,37 @@ config SENSORS_MPQ8785
 
 	  This driver can also be built as a module. If so, the module will
 	  be called mpq8785.
+
+config SENSORS_MPQ8646
+	tristate "MPS MPQ8646"
+	depends on REGULATOR || !REGULATOR
+	depends on NVMEM || !NVMEM
+	help
+	  If you say yes here you get hardware monitoring support for the
+	  Monolithic Power Systems MPQ8646.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called mpq8646.
+
+config SENSORS_MPQ8646_DEBUG_UNSAFE
+	bool "MPQ8646 unsafe write/provisioning debugfs (DANGEROUS)"
+	depends on SENSORS_MPQ8646 && DEBUG_FS
+	default n
+	help
+	  Expose additional WRITE-able debugfs files in the client's
+	  pmbus debugfs directory,
+	  /sys/kernel/debug/i2c/i2c-<bus>/<bus>-<addr>/
+
+	  These are provisioning and bring-up aids. On many designs the
+	  MPQ8646 powers the SoC core rail, so a wrong write can brown out
+	  or permanently mis-provision the board.
+
+	  WARNING: Wrong register writes can and likely will physically
+	  damage or destroy the chip and/or the board.
+
+	  It shall never be set in a production, shipping, or default configuration.
+
+	  If unsure, say N.
 
 config SENSORS_PIM4328
 	tristate "Flex PIM4328 and compatibles"
@@ -677,6 +737,25 @@ config SENSORS_STEF48H28
 	  This driver can also be built as a module. If so, the module will
 	  be called stef48h28.
 
+config SENSORS_SQ24860
+	tristate "Silergy SQ24860"
+	help
+	  If you say yes here you get hardware monitoring support for Silergy
+	  SQ24860 eFuse.
+
+	  This driver can also be built as a module. If so, the module will
+	  be called sq24860.
+
+config SENSORS_SQ24860_REGULATOR
+	bool "Regulator support for SQ24860"
+	depends on SENSORS_SQ24860 && REGULATOR
+	default SENSORS_SQ24860
+	help
+	  If you say yes here you get regulator support for Silergy SQ24860.
+	  The regulator is registered through the PMBus regulator framework and
+	  can be used to control the output exposed by the device.
+	  This option is only useful if regulator framework support is needed.
+
 config SENSORS_STPDDC60
 	tristate "ST STPDDC60"
 	help
@@ -702,6 +781,15 @@ config SENSORS_TDA38640_REGULATOR
 	help
 	  If you say yes here you get regulator support for Infineon
 	  TDA38640 as regulator.
+
+config SENSORS_TDA38740
+	tristate "Infineon TDA38725/TDA38740"
+	help
+	  If you say yes here you get hardware monitoring support for Infineon
+	  TDA38725 and TDA38740.
+
+	  This driver can also be built as a module. If so, the module will
+	  be called tda38740.
 
 config SENSORS_TPS25990
 	tristate "TI TPS25990"
@@ -730,10 +818,11 @@ config SENSORS_TPS40422
 	  be called tps40422.
 
 config SENSORS_TPS53679
-	tristate "TI TPS53647, TPS53667, TPS53676, TPS53679, TPS53681, TPS53688"
+	tristate "TI TPS536xx family"
 	help
 	  If you say yes here you get hardware monitoring support for TI
-	  TPS53647, TPS53667, TPS53676, TPS53679, TPS53681, and TPS53688.
+	  TPS53622, TPS53647, TPS53659, TPS53667, TPS53676, TPS53679, TPS53681,
+	  TPS53685, TPS53688, and TPS536C7.
 
 	  This driver can also be built as a module. If so, the module will
 	  be called tps53679.
@@ -767,6 +856,15 @@ config SENSORS_UCD9200
 	  This driver can also be built as a module. If so, the module will
 	  be called ucd9200.
 
+config SENSORS_VT7505
+	tristate "Analog Devices MAX16545, MAX16550 and Volterra VT7505"
+	help
+	  If you say yes here you get hardware monitoring support for Analog
+	  Devices MAX16545, MAX16550 and Volterra VT7505 PMBus controllers.
+
+	  This driver can also be built as a module. If so, the module will
+	  be called vt7505.
+
 config SENSORS_XDP710
 	tristate "Infineon XDP710 family"
 	help
@@ -798,10 +896,20 @@ config SENSORS_XDPE1A2G7B
 	tristate "Infineon XDPE1A2G7B"
 	help
 	  If you say yes here you get hardware monitoring support for Infineon
-	  XDPE1A2G5B and XDPE1A2G7B.
+	  XDPE1A2G5B,XDPE1A2G7B and XDPE1A2G7C.
 
 	  This driver can also be built as a module. If so, the module will
 	  be called xdpe1a2g7b.
+
+config SENSORS_XDPE1A2G7B_REGULATOR
+	bool "Regulator support for XDPE1A2G7B and compatibles"
+	depends on SENSORS_XDPE1A2G7B && REGULATOR
+	help
+	  If you say yes here you get regulator support for Infineon
+	  XDPE1A2G5B,XDPE1A2G7B and XDPE1A2G7C multi-phase digital controllers.
+
+	  This enables the controllers to be used as regulator devices,
+	  providing voltage control through the regulator framework.
 
 config SENSORS_XDPE122
 	tristate "Infineon XDPE122 family"

@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <string.h>
+#include <assert.h>
 #include <errno.h>
 #include <signal.h>
 #include <inttypes.h>
@@ -161,7 +166,7 @@ struct perf_session *__perf_session__new(struct perf_data *data,
 	session->active_decomp = &session->decomp_data;
 	INIT_LIST_HEAD(&session->auxtrace_index);
 	perf_env__init(&session->header.env);
-	if (machines__init(&session->machines))
+	if (machines__init(&session->machines, session))
 		goto out_delete;
 
 	ordered_events__init(&session->ordered_events,
@@ -205,7 +210,7 @@ struct perf_session *__perf_session__new(struct perf_data *data,
 		session->machines.host.env = host_env;
 	}
 	if (session->evlist)
-		session->evlist->session = session;
+		evlist__set_session(session->evlist, session);
 
 	session->machines.host.single_address_space =
 		perf_env__single_address_space(session->machines.host.env);
@@ -265,7 +270,7 @@ void perf_session__delete(struct perf_session *session)
 	machines__exit(&session->machines);
 	if (session->data) {
 		if (perf_data__is_read(session->data))
-			evlist__delete(session->evlist);
+			evlist__put(session->evlist);
 		perf_data__close(session->data);
 	}
 #ifdef HAVE_LIBTRACEEVENT
@@ -629,6 +634,23 @@ do { 						\
 	bswap_field_32(aux_watermark);
 	bswap_field_16(sample_max_stack);
 	bswap_field_32(aux_sample_size);
+	/*
+	 * aux_action aliases bitfields (e.g. aux_start_paused) in a union.
+	 * Bitfields and plain u32 fields follow different endian rules, so
+	 * both views cannot be swapped correctly at the same time.
+	 * Leave aux_action unswapped until the ABI is represented in a
+	 * byte-order-safe form.
+	 */
+	bswap_field_64(sig_data);
+	bswap_field_64(config3);
+	bswap_field_64(config4);
+	bswap_field_16(sample_simd_regs_enabled);
+	bswap_field_16(sample_simd_pred_reg_qwords);
+	bswap_field_16(sample_simd_vec_reg_qwords);
+	bswap_field_32(sample_simd_pred_reg_intr);
+	bswap_field_32(sample_simd_pred_reg_user);
+	bswap_field_64(sample_simd_vec_reg_intr);
+	bswap_field_64(sample_simd_vec_reg_user);
 
 	/*
 	 * After read_format are bitfields. Check read_format because
@@ -1416,15 +1438,96 @@ static void branch_stack__printf(struct perf_sample *sample,
 	}
 }
 
-static void regs_dump__printf(u64 mask, u64 *regs, uint16_t e_machine, uint32_t e_flags)
+static void regs_dump__printf(u64 mask, struct regs_dump *regs,
+			      uint16_t e_machine, uint32_t e_flags)
 {
 	unsigned rid, i = 0;
 
 	for_each_set_bit(rid, (unsigned long *) &mask, sizeof(mask) * 8) {
-		u64 val = regs[i++];
+		u64 val = regs->regs[i++];
 
 		printf(".... %-5s 0x%016" PRIx64 "\n",
-		       perf_reg_name(rid, e_machine, e_flags), val);
+		       perf_reg_name(rid, e_machine, e_flags, regs->abi), val);
+	}
+}
+
+static void simd_regs_dump__printf(uint16_t e_machine, struct regs_dump *regs, bool intr)
+{
+	const char *name = "unknown";
+	const char *simd_header;
+	u32 i, j, idx, pred_base;
+	uint16_t qwords;
+	int reg_c;
+
+	if (!(regs->abi & PERF_SAMPLE_REGS_ABI_SIMD))
+		return;
+
+	if (!regs->nr_vectors && !regs->nr_pred)
+		return;
+
+	simd_header = "... SIMD ABI nr_vectors %" PRIu64 " vector_qwords %" PRIu64 \
+		      " nr_pred %" PRIu64 "  pred_qwords %" PRIu64 "\n";
+	printf(simd_header, regs->nr_vectors, regs->vector_qwords,
+	       regs->nr_pred, regs->pred_qwords);
+
+	for (reg_c = 0; reg_c < 64; reg_c++) {
+		if (!regs->nr_vectors)
+			break;
+		if (intr) {
+			perf_intr_simd_reg_class_bitmap_qwords(e_machine, reg_c,
+							       &qwords, /*pred=*/false);
+		} else {
+			perf_user_simd_reg_class_bitmap_qwords(e_machine, reg_c,
+							       &qwords, /*pred=*/false);
+		}
+		if (regs->vector_qwords == qwords) {
+			name = perf_simd_reg_class_name(e_machine, reg_c, /*pred=*/false);
+			break;
+		}
+	}
+
+	for (i = 0; i < regs->nr_vectors; i++) {
+		for (j = 0; j < regs->vector_qwords; j++) {
+			idx = i * regs->vector_qwords + j;
+			if (regs->vector_qwords > 1) {
+				printf(".... %3s[%d][%d] 0x%016" PRIx64 "\n",
+				       name, i, j, regs->simd_data[idx]);
+			} else {
+				printf(".... %3s[%d] 0x%016" PRIx64 "\n",
+				       name, i, regs->simd_data[idx]);
+			}
+		}
+	}
+
+	name = "unknown";
+	for (reg_c = 0; reg_c < 64; reg_c++) {
+		if (!regs->nr_pred)
+			break;
+		if (intr) {
+			perf_intr_simd_reg_class_bitmap_qwords(e_machine, reg_c,
+							       &qwords, /*pred=*/true);
+		} else {
+			perf_user_simd_reg_class_bitmap_qwords(e_machine, reg_c,
+							       &qwords, /*pred=*/true);
+		}
+		if (regs->pred_qwords == qwords) {
+			name = perf_simd_reg_class_name(e_machine, reg_c, /*pred=*/true);
+			break;
+		}
+	}
+
+	pred_base = regs->nr_vectors * regs->vector_qwords;
+	for (i = 0; i < regs->nr_pred; i++) {
+		for (j = 0; j < regs->pred_qwords; j++) {
+			idx = pred_base + i * regs->pred_qwords + j;
+			if (regs->pred_qwords > 1) {
+				printf(".... %3s[%d][%d] 0x%016" PRIx64 "\n",
+				       name, i, j, regs->simd_data[idx]);
+			} else {
+				printf(".... %3s[%d] 0x%016" PRIx64 "\n",
+				       name, i, regs->simd_data[idx]);
+			}
+		}
 	}
 }
 
@@ -1432,11 +1535,13 @@ static const char *regs_abi[] = {
 	[PERF_SAMPLE_REGS_ABI_NONE] = "none",
 	[PERF_SAMPLE_REGS_ABI_32] = "32-bit",
 	[PERF_SAMPLE_REGS_ABI_64] = "64-bit",
+	[PERF_SAMPLE_REGS_ABI_SIMD | PERF_SAMPLE_REGS_ABI_32] = "32-bit SIMD",
+	[PERF_SAMPLE_REGS_ABI_SIMD | PERF_SAMPLE_REGS_ABI_64] = "64-bit SIMD",
 };
 
 static inline const char *regs_dump_abi(struct regs_dump *d)
 {
-	if (d->abi > PERF_SAMPLE_REGS_ABI_64)
+	if (d->abi >= ARRAY_SIZE(regs_abi) || !regs_abi[d->abi])
 		return "unknown";
 
 	return regs_abi[d->abi];
@@ -1452,7 +1557,7 @@ static void regs__printf(const char *type, struct regs_dump *regs,
 	       mask,
 	       regs_dump_abi(regs));
 
-	regs_dump__printf(mask, regs->regs, e_machine, e_flags);
+	regs_dump__printf(mask, regs, e_machine, e_flags);
 }
 
 static void regs_user__printf(struct perf_sample *sample, uint16_t e_machine, uint32_t e_flags)
@@ -1466,6 +1571,7 @@ static void regs_user__printf(struct perf_sample *sample, uint16_t e_machine, ui
 
 	if (user_regs->regs)
 		regs__printf("user", user_regs, e_machine, e_flags);
+	simd_regs_dump__printf(e_machine, user_regs, /*intr=*/false);
 }
 
 static void regs_intr__printf(struct perf_sample *sample, uint16_t e_machine, uint32_t e_flags)
@@ -1479,6 +1585,7 @@ static void regs_intr__printf(struct perf_sample *sample, uint16_t e_machine, ui
 
 	if (intr_regs->regs)
 		regs__printf("intr", intr_regs, e_machine, e_flags);
+	simd_regs_dump__printf(e_machine, intr_regs, /*intr=*/true);
 }
 
 static void stack_user__printf(struct stack_dump *dump)
@@ -1549,8 +1656,8 @@ static void dump_event(struct evlist *evlist, union perf_event *event,
 	       file_offset, file_path, event->header.size, event->header.type);
 
 	trace_event(event);
-	if (event->header.type == PERF_RECORD_SAMPLE && evlist->trace_event_sample_raw)
-		evlist->trace_event_sample_raw(evlist, event, sample);
+	if (event->header.type == PERF_RECORD_SAMPLE && evlist__trace_event_sample_raw(evlist))
+		evlist__trace_event_sample_raw(evlist)(evlist, event, sample);
 
 	if (sample)
 		evlist__print_tstamp(evlist, event, sample);
@@ -1751,7 +1858,7 @@ static int deliver_sample_value(struct evlist *evlist,
 	}
 
 	if (!storage || sid->evsel == NULL) {
-		++evlist->stats.nr_unknown_id;
+		++evlist__stats(evlist)->nr_unknown_id;
 		return 0;
 	}
 
@@ -1845,13 +1952,17 @@ static int evlist__deliver_deferred_callchain(struct evlist *evlist,
 		struct evsel *saved_evsel = sample->evsel;
 
 		sample->evsel = evlist__id2evsel(evlist, sample->id);
+		if (sample->evsel)
+			sample->evsel = evsel__get(sample->evsel);
 		ret = tool->callchain_deferred(tool, event, sample, machine);
+		evsel__put(sample->evsel);
 		sample->evsel = saved_evsel;
 		return ret;
 	}
 
-	list_for_each_entry_safe(de, tmp, &evlist->deferred_samples, list) {
+	list_for_each_entry_safe(de, tmp, evlist__deferred_samples(evlist), list) {
 		struct perf_sample orig_sample;
+		struct evsel *new_evsel;
 
 		perf_sample__init(&orig_sample, /*all=*/false);
 		ret = evlist__parse_sample(evlist, de->event, &orig_sample);
@@ -1872,7 +1983,11 @@ static int evlist__deliver_deferred_callchain(struct evlist *evlist,
 		else
 			orig_sample.deferred_callchain = false;
 
-		orig_sample.evsel = evlist__id2evsel(evlist, orig_sample.id);
+		new_evsel = evlist__id2evsel(evlist, orig_sample.id);
+		if (new_evsel != orig_sample.evsel) {
+			evsel__put(orig_sample.evsel);
+			orig_sample.evsel = evsel__get(new_evsel);
+		}
 		ret = evlist__deliver_sample(evlist, tool, de->event,
 					     &orig_sample, machine);
 
@@ -1899,8 +2014,17 @@ static int session__flush_deferred_samples(struct perf_session *session,
 	struct deferred_event *de, *tmp;
 	int ret = 0;
 
-	list_for_each_entry_safe(de, tmp, &evlist->deferred_samples, list) {
+	list_for_each_entry_safe(de, tmp, evlist__deferred_samples(evlist), list) {
 		struct perf_sample sample;
+		struct evsel *new_evsel;
+
+		if (session_done()) {
+			/* Processing was stopped early, discard the sample. */
+			list_del(&de->list);
+			free(de->event);
+			free(de);
+			continue;
+		}
 
 		perf_sample__init(&sample, /*all=*/false);
 		ret = evlist__parse_sample(evlist, de->event, &sample);
@@ -1911,7 +2035,11 @@ static int session__flush_deferred_samples(struct perf_session *session,
 		}
 		sample.file_offset = de->file_offset;
 
-		sample.evsel = evlist__id2evsel(evlist, sample.id);
+		new_evsel = evlist__id2evsel(evlist, sample.id);
+		if (new_evsel != sample.evsel) {
+			evsel__put(sample.evsel);
+			sample.evsel = evsel__get(new_evsel);
+		}
 		ret = evlist__deliver_sample(evlist, tool, de->event,
 					     &sample, machine);
 
@@ -1957,21 +2085,23 @@ static int machines__deliver_event(struct machines *machines,
 
 	dump_event(evlist, event, file_offset, sample, file_path);
 
-	if (!sample->evsel)
+	if (!sample->evsel) {
 		sample->evsel = evlist__id2evsel(evlist, sample->id);
+		if (sample->evsel)
+			sample->evsel = evsel__get(sample->evsel);
+	}
 	else
 		assert(sample->evsel == evlist__id2evsel(evlist, sample->id));
-
 	machine = machines__find_for_cpumode(machines, event, sample);
 
 	switch (event->header.type) {
 	case PERF_RECORD_SAMPLE:
 		if (sample->evsel == NULL) {
-			++evlist->stats.nr_unknown_id;
+			++evlist__stats(evlist)->nr_unknown_id;
 			return 0;
 		}
 		if (machine == NULL) {
-			++evlist->stats.nr_unprocessable_samples;
+			++evlist__stats(evlist)->nr_unprocessable_samples;
 			dump_sample(machine, event, sample);
 			return 0;
 		}
@@ -1990,7 +2120,7 @@ static int machines__deliver_event(struct machines *machines,
 			}
 			memcpy(de->event, event, sz);
 			de->file_offset = sample->file_offset;
-			list_add_tail(&de->list, &evlist->deferred_samples);
+			list_add_tail(&de->list, evlist__deferred_samples(evlist));
 			return 0;
 		}
 		return evlist__deliver_sample(evlist, tool, event, sample, machine);
@@ -2002,7 +2132,7 @@ static int machines__deliver_event(struct machines *machines,
 		return tool->mmap(tool, event, sample, machine);
 	case PERF_RECORD_MMAP2:
 		if (event->header.misc & PERF_RECORD_MISC_PROC_MAP_PARSE_TIMEOUT)
-			++evlist->stats.nr_proc_map_timeout;
+			++evlist__stats(evlist)->nr_proc_map_timeout;
 		if (!perf_event__check_nul(event->mmap2.filename,
 					   (void *)event + event->header.size,
 					   "MMAP2", file_offset))
@@ -2047,13 +2177,13 @@ static int machines__deliver_event(struct machines *machines,
 		return tool->exit(tool, event, sample, machine);
 	case PERF_RECORD_LOST:
 		if (tool->lost == perf_event__process_lost)
-			evlist->stats.total_lost += event->lost.lost;
+			evlist__stats(evlist)->total_lost += event->lost.lost;
 		return tool->lost(tool, event, sample, machine);
 	case PERF_RECORD_LOST_SAMPLES:
 		if (event->header.misc & PERF_RECORD_MISC_LOST_SAMPLES_BPF)
-			evlist->stats.total_dropped_samples += event->lost_samples.lost;
+			evlist__stats(evlist)->total_dropped_samples += event->lost_samples.lost;
 		else if (tool->lost_samples == perf_event__process_lost_samples)
-			evlist->stats.total_lost_samples += event->lost_samples.lost;
+			evlist__stats(evlist)->total_lost_samples += event->lost_samples.lost;
 		return tool->lost_samples(tool, event, sample, machine);
 	case PERF_RECORD_READ:
 		dump_read(sample->evsel, event);
@@ -2065,11 +2195,11 @@ static int machines__deliver_event(struct machines *machines,
 	case PERF_RECORD_AUX:
 		if (tool->aux == perf_event__process_aux) {
 			if (event->aux.flags & PERF_AUX_FLAG_TRUNCATED)
-				evlist->stats.total_aux_lost += 1;
+				evlist__stats(evlist)->total_aux_lost += 1;
 			if (event->aux.flags & PERF_AUX_FLAG_PARTIAL)
-				evlist->stats.total_aux_partial += 1;
+				evlist__stats(evlist)->total_aux_partial += 1;
 			if (event->aux.flags & PERF_AUX_FLAG_COLLISION)
-				evlist->stats.total_aux_collision += 1;
+				evlist__stats(evlist)->total_aux_collision += 1;
 		}
 		return tool->aux(tool, event, sample, machine);
 	case PERF_RECORD_ITRACE_START:
@@ -2105,7 +2235,7 @@ static int machines__deliver_event(struct machines *machines,
 		return evlist__deliver_deferred_callchain(evlist, tool, event,
 							  sample, machine);
 	default:
-		++evlist->stats.nr_unknown_events;
+		++evlist__stats(evlist)->nr_unknown_events;
 		return -1;
 	}
 }
@@ -2517,7 +2647,7 @@ int perf_session__deliver_synth_event(struct perf_session *session,
 	struct evlist *evlist = session->evlist;
 	const struct perf_tool *tool = session->tool;
 
-	events_stats__inc(&evlist->stats, event->header.type);
+	events_stats__inc(evlist__stats(evlist), event->header.type);
 
 	if (event->header.type >= PERF_RECORD_USER_TYPE_START)
 		return perf_session__process_user_event(session, event, 0, NULL);
@@ -2658,7 +2788,7 @@ static const u32 perf_event__min_size[PERF_RECORD_HEADER_MAX] = {
  * Caller must ensure event->header.type < PERF_RECORD_HEADER_MAX.
  * If min is non-NULL, stores the required minimum on failure.
  */
-static bool perf_event__too_small(const union perf_event *event, u32 *min)
+bool perf_event__too_small(const union perf_event *event, u32 *min)
 {
 	u32 min_sz = perf_event__min_size[event->header.type];
 
@@ -2927,7 +3057,7 @@ static s64 perf_session__process_event(struct perf_session *session,
 		return 0;
 	}
 
-	events_stats__inc(&evlist->stats, event->header.type);
+	events_stats__inc(evlist__stats(evlist), event->header.type);
 
 	if (event->header.type >= PERF_RECORD_USER_TYPE_START)
 		return perf_session__process_user_event(session, event, file_offset, file_path);
@@ -2988,7 +3118,7 @@ perf_session__warn_order(const struct perf_session *session)
 
 static void perf_session__warn_about_errors(const struct perf_session *session)
 {
-	const struct events_stats *stats = &session->evlist->stats;
+	const struct events_stats *stats = evlist__stats(session->evlist);
 
 	if (session->tool->lost == perf_event__process_lost &&
 	    stats->nr_events[PERF_RECORD_LOST] != 0) {
@@ -3131,8 +3261,12 @@ static int __perf_session__process_pipe_events(struct perf_session *session)
 	cur_size = sizeof(union perf_event);
 
 	buf = malloc(cur_size);
-	if (!buf)
-		return -errno;
+	if (!buf) {
+		err = -errno;
+		if (update_prog)
+			ui_progress__finish();
+		return err;
+	}
 	ordered_events__set_copy_on_queue(oe, true);
 more:
 	event = buf;
@@ -3631,8 +3765,10 @@ static int __perf_session__process_dir_events(struct perf_session *session)
 	}
 
 	rd = calloc(nr_readers, sizeof(struct reader));
-	if (!rd)
+	if (!rd) {
+		ui_progress__finish();
 		return -ENOMEM;
+	}
 
 	rd[0] = (struct reader) {
 		.fd		 = perf_data__fd(session->data),
@@ -3821,7 +3957,7 @@ size_t perf_session__fprintf_nr_events(struct perf_session *session, FILE *fp)
 
 	ret = fprintf(fp, "\nAggregated stats:%s\n", msg);
 
-	ret += events_stats__fprintf(&session->evlist->stats, fp);
+	ret += events_stats__fprintf(evlist__stats(session->evlist), fp);
 	return ret;
 }
 

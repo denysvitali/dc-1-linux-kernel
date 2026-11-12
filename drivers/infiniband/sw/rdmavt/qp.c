@@ -263,7 +263,7 @@ static inline bool wss_exceeds_threshold(struct rvt_wss *wss)
 static void get_map_page(struct rvt_qpn_table *qpt,
 			 struct rvt_qpn_map *map)
 {
-	unsigned long page = get_zeroed_page(GFP_KERNEL);
+	void *page = kzalloc(PAGE_SIZE, GFP_KERNEL);
 
 	/*
 	 * Free the page if someone raced with us installing it.
@@ -271,9 +271,9 @@ static void get_map_page(struct rvt_qpn_table *qpt,
 
 	spin_lock(&qpt->lock);
 	if (map->page)
-		free_page(page);
+		kfree(page);
 	else
-		map->page = (void *)page;
+		map->page = page;
 	spin_unlock(&qpt->lock);
 }
 
@@ -343,7 +343,7 @@ static void free_qpn_table(struct rvt_qpn_table *qpt)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(qpt->map); i++)
-		free_page((unsigned long)qpt->map[i].page);
+		kfree(qpt->map[i].page);
 }
 
 /**
@@ -814,7 +814,7 @@ bail:
  *
  * This function is called from both rvt_create_qp() and
  * rvt_reset_qp().   The difference is that the reset
- * patch the necessary locks to protect against concurent
+ * patch the necessary locks to protect against concurrent
  * access.
  */
 static void rvt_init_qp(struct rvt_dev_info *rdi, struct rvt_qp *qp,
@@ -1173,7 +1173,7 @@ int rvt_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *init_attr,
 		if (rdi->driver_f.qp_priv_init) {
 			ret = rdi->driver_f.qp_priv_init(rdi, qp, init_attr);
 			if (ret)
-				goto bail_rq_wq;
+				goto bail_qpn;
 		}
 		break;
 

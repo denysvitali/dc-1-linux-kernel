@@ -204,6 +204,27 @@ config GPIO_ATH79
 	  Select this option to enable GPIO driver for
 	  Atheros AR71XX/AR724X/AR913X SoC devices.
 
+config GPIO_AXIADO_SGPIO
+	tristate "Axiado AX3005 SGPIO support"
+	depends on ARCH_AXIADO || COMPILE_TEST
+	select GPIOLIB_IRQCHIP
+	select GPIO_REGMAP
+	select REGMAP_MMIO
+	help
+	  Enable support for the Axiado AX3005 Serial GPIO (SGPIO)
+	  controller.
+
+	  The SGPIO controller provides a serialized interface for
+	  controlling multiple GPIO signals over a limited number of
+	  physical lines. Each signal is exposed as one input and one
+	  output line, and input lines can raise interrupts.
+
+	  This driver integrates with the Linux GPIO subsystem and
+	  exposes the controller as a standard GPIO provider.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called gpio-axiado-sgpio.
+
 config GPIO_RASPBERRYPI_EXP
 	tristate "Raspberry Pi 3 GPIO Expander"
 	default RASPBERRYPI_FIRMWARE
@@ -593,6 +614,13 @@ config GPIO_POLARFIRE_SOC
 	help
 	  Say yes here to support the GPIO controllers on Microchip FPGAs.
 
+config GPIO_PPC44X
+	tristate "PPC44x GPIO support"
+	depends on 44x || COMPILE_TEST
+	select GPIO_GENERIC
+	help
+	  Enable gpiolib support for ppc440 based boards.
+
 config GPIO_PXA
 	bool "PXA GPIO support"
 	depends on ARCH_PXA || ARCH_MMP || COMPILE_TEST
@@ -646,7 +674,7 @@ config GPIO_ROCKCHIP
 config GPIO_RTD
 	tristate "Realtek DHC GPIO support"
 	depends on ARCH_REALTEK || COMPILE_TEST
-	default y
+	default ARCH_REALTEK
 	select GPIOLIB_IRQCHIP
 	help
 	  This option enables support for GPIOs found on Realtek DHC(Digital
@@ -655,6 +683,20 @@ config GPIO_RTD
 
 	  Say yes here to support GPIO functionality and GPIO interrupt on
 	  Realtek DHC SoCs.
+
+config GPIO_RTD1625
+	tristate "Realtek DHC RTD1625 GPIO support"
+	depends on ARCH_REALTEK || COMPILE_TEST
+	default ARCH_REALTEK
+	select GPIOLIB_IRQCHIP
+	select GPIO_REGMAP
+	select REGMAP_MMIO
+	help
+	  This option enables support for the GPIO controller on Realtek
+	  DHC (Digital Home Center) RTD1625 SoC.
+
+	  Say yes here to support both basic GPIO line functionality
+	  and GPIO interrupt handling capabilities for this platform.
 
 config GPIO_SAMA5D2_PIOBU
 	tristate "SAMA5D2 PIOBU GPIO support"
@@ -942,7 +984,8 @@ config GPIO_IDT3243X
 endmenu
 
 menu "Port-mapped I/O GPIO drivers"
-	depends on X86 && HAS_IOPORT # I/O space access
+	depends on X86 || COMPILE_TEST
+	depends on HAS_IOPORT # I/O space access
 
 config GPIO_VX855
 	tristate "VIA VX855/VX875 GPIO"
@@ -1362,6 +1405,18 @@ config GPIO_BD72720
 	  pins which can be configured to GPI or GPO, and three pins which can
 	  be configured to GPO on the ROHM PMIC. The pin configuration is done
 	  on OTP at manufacturing.
+
+config GPIO_BD73800
+	tristate "ROHM BD73800 GPIO support"
+	depends on MFD_ROHM_BD71828
+	select GPIO_REGMAP
+	help
+	  Support for GPIOs on ROHM BD73800 PMIC. There can be up to 4
+	  GPI or GPO pins available on the PMIC in total. The purpose of
+	  the pins is decided at the device manufacturing by OTP
+	  configuration and can't be reconfigured later. Enable this
+	  if your PMIC has pins set as GPIs or GPOs and if you wish to
+	  control the pins via the GPIO framework.
 
 config GPIO_BD9571MWV
 	tristate "ROHM BD9571 GPIO support"
@@ -1796,6 +1851,18 @@ endmenu
 menu "Auxiliary Bus GPIO drivers"
 	depends on AUXILIARY_BUS
 
+config GPIO_AD7768
+	tristate "Analog Devices AD7768 GPIO support"
+	depends on AD7768
+	depends on GPIOLIB
+	select GPIO_REGMAP
+	help
+	  Say yes here to expose the AD7768 utility pins as GPIOs when the
+	  device tree node is marked as a GPIO controller.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called gpio-ad7768.
+
 config GPIO_LTC4283
 	tristate "Analog Devices LTC4283 GPIO support"
 	depends on SENSORS_LTC4283
@@ -1807,6 +1874,18 @@ config GPIO_LTC4283
 	  be called gpio-ltc4283.
 
 endmenu
+
+config GPIO_TC9563
+	tristate "Toshiba TC9563 GPIO support"
+	depends on PCI_PWRCTRL_TC9563 || COMPILE_TEST
+	default m if ARCH_QCOM
+	select AUXILIARY_BUS
+	select GPIO_REGMAP
+	help
+	  This enables support for the GPIO controller embedded in the Toshiba
+	  TC9563 (and Qualcomm QPS615).  This device connects to the host
+	  via PCIe port, which is the upstream port on an internal PCIe
+	  switch.
 
 menu "PCI GPIO expanders"
 	depends on PCI

@@ -698,7 +698,6 @@ static void npc_set_features(struct rvu *rvu, int blkaddr, u8 intf)
 	proto_flags = BIT_ULL(NPC_SPORT_TCP) | BIT_ULL(NPC_SPORT_UDP) |
 		       BIT_ULL(NPC_DPORT_TCP) | BIT_ULL(NPC_DPORT_UDP) |
 		       BIT_ULL(NPC_SPORT_SCTP) | BIT_ULL(NPC_DPORT_SCTP) |
-		       BIT_ULL(NPC_SPORT_SCTP) | BIT_ULL(NPC_DPORT_SCTP) |
 		       BIT_ULL(NPC_TYPE_ICMP) | BIT_ULL(NPC_CODE_ICMP) |
 		       BIT_ULL(NPC_TCP_FLAGS);
 
@@ -729,7 +728,12 @@ static void npc_set_features(struct rvu *rvu, int blkaddr, u8 intf)
 		if (!npc_check_field(rvu, blkaddr, NPC_LB, intf))
 			*features &= ~BIT_ULL(NPC_OUTER_VID);
 
-	/* Allow extracting SPI field from AH and ESP headers at same offset */
+	/* Warn on unrelated MKEX fields colliding with SPI key bits.  AH/ESP
+	 * sharing the same SPI key offset is valid; use npc_is_field_present(),
+	 * not npc_check_field(), to advertise the feature.
+	 */
+	if (npc_check_overlap(rvu, blkaddr, NPC_IPSEC_SPI, 0, intf))
+		dev_warn(rvu->dev, "Overlap detected the field NPC_IPSEC_SPI\n");
 	if (npc_is_field_present(rvu, NPC_IPSEC_SPI, intf) &&
 	    (*features & (BIT_ULL(NPC_IPPROTO_ESP) | BIT_ULL(NPC_IPPROTO_AH))))
 		*features |= BIT_ULL(NPC_IPSEC_SPI);

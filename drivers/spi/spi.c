@@ -4,6 +4,7 @@
 // Copyright (C) 2005 David Brownell
 // Copyright (C) 2008 Secret Lab Technologies Ltd.
 
+#include <kunit/visibility.h>
 #include <linux/acpi.h>
 #include <linux/cache.h>
 #include <linux/clk/clk-conf.h>
@@ -43,6 +44,7 @@ EXPORT_TRACEPOINT_SYMBOL(spi_transfer_stop);
 #include "internals.h"
 
 static int __spi_setup(struct spi_device *spi, bool initial_setup);
+static int __spi_add_device(struct spi_device *spi, struct spi_device *parent);
 
 static DEFINE_IDR(spi_controller_idr);
 
@@ -297,6 +299,192 @@ static const struct attribute_group spi_controller_statistics_group = {
 	.attrs  = spi_controller_statistics_attrs,
 };
 
+#if IS_ENABLED(CONFIG_SPI_DYNAMIC)
+
+/*
+ * new_device_store - instantiate a new SPI device from userspace
+ *
+ * Takes parameters: <modalias> <chip_select> [<max_speed_hz> [<mode>]]
+ *
+ * Examples:
+ *   echo spidev 0 > new_device
+ *   echo spidev 0 10000000 > new_device
+ *   echo spidev 0 10000000 3 > new_device
+ */
+static ssize_t
+new_device_store(struct device *dev, struct device_attribute *attr,
+		 const char *buf, size_t count)
+{
+	struct spi_controller *ctlr = container_of(dev, struct spi_controller,
+						   dev);
+	struct spi_device *spi;
+	char modalias[SPI_NAME_SIZE];
+	unsigned int chip_select;
+	u32 max_speed_hz = 0;
+	u32 mode = 0;
+	char *blank;
+	int status;
+
+	blank = strchr(buf, ' ');
+	if (!blank) {
+		dev_err(dev, "new_device: Missing parameters\n");
+		return -EINVAL;
+	}
+
+	if (blank == buf || blank - buf > SPI_NAME_SIZE - 1) {
+		dev_err(dev, "new_device: Invalid device name\n");
+		return -EINVAL;
+	}
+
+	memset(modalias, 0, sizeof(modalias));
+	memcpy(modalias, buf, blank - buf);
+
+	/*
+	 * sscanf fills only the fields it matches; unmatched optional
+	 * fields (max_speed_hz, mode) stay zero from initialisation above.
+	 * max_speed_hz == 0 is clamped to the controller max by spi_setup().
+	 * mode == 0 selects SPI mode 0 (CPOL=0, CPHA=0).
+	 */
+	if (sscanf(++blank, "%u %u %u", &chip_select, &max_speed_hz, &mode) < 1) {
+		dev_err(dev, "new_device: Can't parse chip select\n");
+		return -EINVAL;
+	}
+
+	/*
+	 * spi_device.chip_select[] is u8, so cap at U8_MAX independently of
+	 * ctlr->num_chipselect (which is u16 and may exceed 255).  Without
+	 * this, values in (U8_MAX, num_chipselect) would silently truncate
+	 * inside spi_set_chipselect() and select the wrong CS.
+	 */
+	if (chip_select > U8_MAX || chip_select >= ctlr->num_chipselect) {
+		dev_err(dev, "new_device: Chip select %u out of range (num_chipselect=%u)\n",
+			chip_select, ctlr->num_chipselect);
+		return -EINVAL;
+	}
+
+	/*
+	 * Reject kernel-internal mode bits (SPI_NO_TX, SPI_NO_RX,
+	 * SPI_TPM_HW_FLOW, ...).  These are set only by in-kernel drivers
+	 * that know they are safe on their controller/device pair and must
+	 * not be settable through a userspace-writable sysfs.  Matches
+	 * spidev's SPI_IOC_WR_MODE32 handling (drivers/spi/spidev.c).
+	 */
+	if (mode & ~(u32)SPI_MODE_USER_MASK) {
+		dev_err(dev, "new_device: Invalid mode bits 0x%x\n",
+			mode & ~(u32)SPI_MODE_USER_MASK);
+		return -EINVAL;
+	}
+
+	spi = spi_alloc_device(ctlr);
+	if (!spi)
+		return -ENOMEM;
+
+	spi_set_chipselect(spi, 0, chip_select);
+	spi->max_speed_hz = max_speed_hz;
+	spi->mode = mode;
+	spi->cs_index_mask = BIT(0);
+	strscpy(spi->modalias, modalias, sizeof(spi->modalias));
+
+	/*
+	 * Set driver_override so that the device binds to the driver
+	 * named by modalias regardless of whether that driver's
+	 * id_table contains a matching entry.  This is needed because
+	 * some drivers (e.g. spidev) deliberately omit generic names
+	 * from their id_table.
+	 */
+	status = device_set_driver_override(&spi->dev, modalias);
+	if (status) {
+		spi_dev_put(spi);
+		return status;
+	}
+
+	/*
+	 * spi_unregister_controller() removes the new_device/delete_device
+	 * sysfs group before taking add_lock, so kernfs_drain() has already
+	 * completed by the time we get here and we cannot be racing with
+	 * teardown.  Take add_lock to serialise the __spi_add_device() and
+	 * list insertion with respect to non-sysfs callers of
+	 * __spi_add_device() (DT/ACPI, ancillary), which check
+	 * device_is_registered(&ctlr->dev) under the same lock.
+	 */
+	mutex_lock(&ctlr->add_lock);
+
+	status = __spi_add_device(spi, NULL);
+	if (status) {
+		mutex_unlock(&ctlr->add_lock);
+		spi_dev_put(spi);
+		return status;
+	}
+
+	list_add_tail(&spi->userspace_node, &ctlr->userspace_clients);
+	mutex_unlock(&ctlr->add_lock);
+
+	dev_info(dev, "new_device: Instantiated device %s at CS%u\n",
+		 modalias, chip_select);
+	return count;
+}
+static DEVICE_ATTR_IGNORE_LOCKDEP(new_device, 0200, NULL, new_device_store);
+
+static ssize_t
+delete_device_store(struct device *dev, struct device_attribute *attr,
+		    const char *buf, size_t count)
+{
+	struct spi_controller *ctlr = container_of(dev, struct spi_controller,
+						   dev);
+	struct spi_device *spi, *next;
+	unsigned short cs;
+	char end;
+	int res;
+
+	res = sscanf(buf, "%hu%c", &cs, &end);
+	if (res < 1) {
+		dev_err(dev, "delete_device: Can't parse chip select\n");
+		return -EINVAL;
+	}
+	if (res > 1 && end != '\n') {
+		dev_err(dev, "delete_device: Unexpected parameters\n");
+		return -EINVAL;
+	}
+
+	res = -ENOENT;
+	mutex_lock(&ctlr->add_lock);
+	list_for_each_entry_safe(spi, next, &ctlr->userspace_clients,
+				 userspace_node) {
+		if (spi_get_chipselect(spi, 0) == cs) {
+			dev_info(dev, "delete_device: Deleting device %s at CS%u\n",
+				 spi->modalias, cs);
+			list_del(&spi->userspace_node);
+			spi_unregister_device(spi);
+			res = count;
+			break;
+		}
+	}
+	mutex_unlock(&ctlr->add_lock);
+
+	if (res < 0)
+		dev_err(dev, "delete_device: Can't find device in list\n");
+	return res;
+}
+static DEVICE_ATTR_IGNORE_LOCKDEP(delete_device, 0200, NULL,
+				   delete_device_store);
+
+static struct attribute *spi_controller_userspace_attrs[] = {
+	&dev_attr_new_device.attr,
+	&dev_attr_delete_device.attr,
+	NULL,
+};
+
+static const struct attribute_group spi_controller_userspace_group = {
+	.attrs = spi_controller_userspace_attrs,
+};
+
+#endif /* CONFIG_SPI_DYNAMIC */
+
+/*
+ * spi_controller_userspace_group is registered manually for host controllers
+ * at the end of spi_register_controller() so new_device/delete_device only
+ * appear after DT/ACPI children and the queue are set up.
+ */
 static const struct attribute_group *spi_controller_groups[] = {
 	&spi_controller_statistics_group,
 	NULL,
@@ -742,6 +930,15 @@ static int __spi_add_device(struct spi_device *spi, struct spi_device *parent)
 	}
 
 	/*
+	 * Peripheral properties the core handles on behalf of controller
+	 * drivers are parsed here, rather than in the firmware specific
+	 * instantiation paths, so that device tree, ACPI and software nodes
+	 * are covered alike, and early enough for ->setup() to act on them.
+	 */
+	device_property_read_u32(&spi->dev, "rx-sample-delay-ns",
+				 &spi->rx_sample_delay_ns);
+
+	/*
 	 * Drivers may modify this initial i/o setup, but will
 	 * normally rely on the device being setup.  Devices
 	 * using SPI_CS_HIGH can't coexist well otherwise...
@@ -1152,8 +1349,24 @@ static int spi_map_buf_attrs(struct spi_controller *ctlr, struct device *dev,
 	int i, ret;
 
 	if (vmalloced_buf || kmap_buf) {
-		desc_len = min_t(unsigned long, max_seg_size, PAGE_SIZE);
-		sgs = DIV_ROUND_UP(len + offset_in_page(buf), desc_len);
+		size_t off = offset_in_page(buf);
+		size_t first = min_t(size_t, len, PAGE_SIZE - off);
+		size_t rest;
+
+		desc_len = min_t(size_t, max_seg_size, PAGE_SIZE);
+		/*
+		 * The buffer is first split at page boundaries, then every
+		 * piece is split into desc_len chunks.  Sizing the table with
+		 * DIV_ROUND_UP(len + off, desc_len) does not model that and
+		 * leaves zero-length entries whenever a page boundary does
+		 * not coincide with a chunk boundary (which trips
+		 * BUG_ON(!nslots) in swiotlb on 64K pages).
+		 */
+		sgs = DIV_ROUND_UP(first, desc_len);
+		rest = len - first;
+		sgs += (rest / PAGE_SIZE) * DIV_ROUND_UP(PAGE_SIZE, desc_len);
+		if (rest % PAGE_SIZE)
+			sgs += DIV_ROUND_UP(rest % PAGE_SIZE, desc_len);
 	} else if (virt_addr_valid(buf)) {
 		desc_len = min_t(size_t, max_seg_size, ctlr->max_dma_len);
 		sgs = DIV_ROUND_UP(len, desc_len);
@@ -1231,74 +1444,8 @@ void spi_unmap_buf(struct spi_controller *ctlr, struct device *dev,
 	spi_unmap_buf_attrs(ctlr, dev, sgt, dir, 0);
 }
 
-static int __spi_map_msg(struct spi_controller *ctlr, struct spi_message *msg)
-{
-	struct device *tx_dev, *rx_dev;
-	struct spi_transfer *xfer;
-	int ret;
-
-	if (!ctlr->can_dma)
-		return 0;
-
-	if (ctlr->dma_tx)
-		tx_dev = ctlr->dma_tx->device->dev;
-	else if (ctlr->dma_map_dev)
-		tx_dev = ctlr->dma_map_dev;
-	else
-		tx_dev = ctlr->dev.parent;
-
-	if (ctlr->dma_rx)
-		rx_dev = ctlr->dma_rx->device->dev;
-	else if (ctlr->dma_map_dev)
-		rx_dev = ctlr->dma_map_dev;
-	else
-		rx_dev = ctlr->dev.parent;
-
-	ret = -ENOMSG;
-	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		/* The sync is done before each transfer. */
-		unsigned long attrs = DMA_ATTR_SKIP_CPU_SYNC;
-
-		if (!ctlr->can_dma(ctlr, msg->spi, xfer))
-			continue;
-
-		if (xfer->tx_buf != NULL) {
-			ret = spi_map_buf_attrs(ctlr, tx_dev, &xfer->tx_sg,
-						(void *)xfer->tx_buf,
-						xfer->len, DMA_TO_DEVICE,
-						attrs);
-			if (ret != 0)
-				return ret;
-
-			xfer->tx_sg_mapped = true;
-		}
-
-		if (xfer->rx_buf != NULL) {
-			ret = spi_map_buf_attrs(ctlr, rx_dev, &xfer->rx_sg,
-						xfer->rx_buf, xfer->len,
-						DMA_FROM_DEVICE, attrs);
-			if (ret != 0) {
-				spi_unmap_buf_attrs(ctlr, tx_dev,
-						&xfer->tx_sg, DMA_TO_DEVICE,
-						attrs);
-
-				return ret;
-			}
-
-			xfer->rx_sg_mapped = true;
-		}
-	}
-	/* No transfer has been mapped, bail out with success */
-	if (ret)
-		return 0;
-
-	ctlr->cur_rx_dma_dev = rx_dev;
-	ctlr->cur_tx_dma_dev = tx_dev;
-
-	return 0;
-}
-
-static int __spi_unmap_msg(struct spi_controller *ctlr, struct spi_message *msg)
+VISIBLE_IF_KUNIT
+int __spi_unmap_msg(struct spi_controller *ctlr, struct spi_message *msg)
 {
 	struct device *rx_dev = ctlr->cur_rx_dma_dev;
 	struct device *tx_dev = ctlr->cur_tx_dma_dev;
@@ -1321,6 +1468,76 @@ static int __spi_unmap_msg(struct spi_controller *ctlr, struct spi_message *msg)
 
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(__spi_unmap_msg);
+
+VISIBLE_IF_KUNIT
+int __spi_map_msg(struct spi_controller *ctlr, struct spi_message *msg)
+{
+	struct device *tx_dev, *rx_dev;
+	struct spi_transfer *xfer;
+	int ret;
+
+	if (!ctlr->can_dma)
+		return 0;
+
+	if (ctlr->dma_tx)
+		tx_dev = dmaengine_get_dma_device(ctlr->dma_tx);
+	else if (ctlr->dma_map_dev)
+		tx_dev = ctlr->dma_map_dev;
+	else
+		tx_dev = ctlr->dev.parent;
+
+	if (ctlr->dma_rx)
+		rx_dev = dmaengine_get_dma_device(ctlr->dma_rx);
+	else if (ctlr->dma_map_dev)
+		rx_dev = ctlr->dma_map_dev;
+	else
+		rx_dev = ctlr->dev.parent;
+
+	/*
+	 * Store the devices before mapping so partial failures can be unwound
+	 * with the device that created each mapping.
+	 */
+	ctlr->cur_tx_dma_dev = tx_dev;
+	ctlr->cur_rx_dma_dev = rx_dev;
+
+	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
+		/* The sync is done before each transfer. */
+		unsigned long attrs = DMA_ATTR_SKIP_CPU_SYNC;
+
+		if (!ctlr->can_dma(ctlr, msg->spi, xfer))
+			continue;
+
+		if (xfer->tx_buf != NULL) {
+			ret = spi_map_buf_attrs(ctlr, tx_dev, &xfer->tx_sg,
+						(void *)xfer->tx_buf,
+						xfer->len, DMA_TO_DEVICE,
+						attrs);
+			if (ret)
+				goto unwind;
+
+			xfer->tx_sg_mapped = true;
+		}
+
+		if (xfer->rx_buf != NULL) {
+			ret = spi_map_buf_attrs(ctlr, rx_dev, &xfer->rx_sg,
+						xfer->rx_buf, xfer->len,
+						DMA_FROM_DEVICE, attrs);
+			if (ret)
+				goto unwind;
+
+			xfer->rx_sg_mapped = true;
+		}
+	}
+
+	return 0;
+
+unwind:
+	__spi_unmap_msg(ctlr, msg);
+
+	return ret;
+}
+EXPORT_SYMBOL_IF_KUNIT(__spi_map_msg);
 
 static void spi_dma_sync_for_device(struct spi_controller *ctlr,
 				    struct spi_transfer *xfer)
@@ -1373,6 +1590,7 @@ static inline int spi_unmap_msg(struct spi_controller *ctlr,
 				struct spi_message *msg)
 {
 	struct spi_transfer *xfer;
+	int ret;
 
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
 		/*
@@ -1385,7 +1603,12 @@ static inline int spi_unmap_msg(struct spi_controller *ctlr,
 			xfer->rx_buf = NULL;
 	}
 
-	return __spi_unmap_msg(ctlr, msg);
+	ret = __spi_unmap_msg(ctlr, msg);
+
+	ctlr->cur_rx_dma_dev = NULL;
+	ctlr->cur_tx_dma_dev = NULL;
+
+	return ret;
 }
 
 static int spi_map_msg(struct spi_controller *ctlr, struct spi_message *msg)
@@ -2695,7 +2918,7 @@ static void of_register_spi_devices(struct spi_controller *ctlr) { }
  *
  * This may only be called from main SPI device's probe routine.
  *
- * Return: 0 on success; negative errno on failure
+ * Return: the new device on success; an ERR_PTR() on failure
  */
 struct spi_device *spi_new_ancillary_device(struct spi_device *spi,
 					     u8 chip_select)
@@ -2785,9 +3008,9 @@ EXPORT_SYMBOL_GPL(devm_spi_new_ancillary_device);
 #ifdef CONFIG_ACPI
 struct acpi_spi_lookup {
 	struct spi_controller 	*ctlr;
+	acpi_handle		device_handle;
 	u32			max_speed_hz;
 	u32			mode;
-	int			irq;
 	u8			bits_per_word;
 	u8			chip_select;
 	int			n;
@@ -2879,7 +3102,7 @@ static int acpi_spi_add_resource(struct acpi_resource *ares, void *data)
 			if (lookup->index != -1 && lookup->n++ != lookup->index)
 				return 1;
 
-			status = acpi_get_handle(NULL,
+			status = acpi_get_handle(lookup->device_handle,
 						 sb->resource_source.string_ptr,
 						 &parent_handle);
 
@@ -2930,12 +3153,20 @@ static int acpi_spi_add_resource(struct acpi_resource *ares, void *data)
 			if (sb->device_polarity == ACPI_SPI_ACTIVE_HIGH)
 				lookup->mode |= SPI_CS_HIGH;
 		}
-	} else if (lookup->irq < 0) {
-		struct resource r;
-
-		if (acpi_dev_resource_interrupt(ares, 0, &r))
-			lookup->irq = r.start;
 	}
+
+	/* Always tell the ACPI core to skip this resource */
+	return 1;
+}
+
+static int acpi_spi_add_irq_resource(struct acpi_resource *ares, void *data)
+{
+	int *irq = data;
+	struct resource r;
+
+	if (*irq < 0 && ares->type != ACPI_RESOURCE_TYPE_SERIAL_BUS &&
+	    acpi_dev_resource_interrupt(ares, 0, &r))
+		*irq = r.start;
 
 	/* Always tell the ACPI core to skip this resource */
 	return 1;
@@ -2965,13 +3196,14 @@ struct spi_device *acpi_spi_device_alloc(struct spi_controller *ctlr,
 	struct list_head resource_list;
 	struct acpi_spi_lookup lookup = {};
 	struct spi_device *spi;
+	int irq = -1;
 	int ret;
 
 	if (!ctlr && index == -1)
 		return ERR_PTR(-EINVAL);
 
 	lookup.ctlr		= ctlr;
-	lookup.irq		= -1;
+	lookup.device_handle	= acpi_device_handle(adev);
 	lookup.index		= index;
 	lookup.n		= 0;
 
@@ -2994,6 +3226,19 @@ struct spi_device *acpi_spi_device_alloc(struct spi_controller *ctlr,
 	if (!lookup.max_speed_hz)
 		return ERR_PTR(-ENODEV);
 
+	/*
+	 * Only look up the IRQ once we know this is an SPI device for us.
+	 * Parsing an interrupt resource maps its GSI, which must not be done
+	 * for every unrelated ACPI device walked during enumeration.
+	 */
+	INIT_LIST_HEAD(&resource_list);
+	ret = acpi_dev_get_resources(adev, &resource_list,
+				     acpi_spi_add_irq_resource, &irq);
+	if (ret < 0)
+		return ERR_PTR(ret);
+
+	acpi_dev_free_resource_list(&resource_list);
+
 	spi = spi_alloc_device(lookup.ctlr);
 	if (!spi) {
 		dev_err(&lookup.ctlr->dev, "failed to allocate SPI device for %s\n",
@@ -3006,7 +3251,7 @@ struct spi_device *acpi_spi_device_alloc(struct spi_controller *ctlr,
 	ACPI_COMPANION_SET(&spi->dev, adev);
 	spi->max_speed_hz	= lookup.max_speed_hz;
 	spi->mode		|= lookup.mode;
-	spi->irq		= lookup.irq;
+	spi->irq		= irq;
 	spi->bits_per_word	= lookup.bits_per_word;
 	/*
 	 * By default spi->chip_select[0] will hold the physical CS number,
@@ -3259,6 +3504,9 @@ struct spi_controller *__spi_alloc_controller(struct device *dev,
 	mutex_init(&ctlr->bus_lock_mutex);
 	mutex_init(&ctlr->io_mutex);
 	mutex_init(&ctlr->add_lock);
+#if IS_ENABLED(CONFIG_SPI_DYNAMIC)
+	INIT_LIST_HEAD(&ctlr->userspace_clients);
+#endif
 	ctlr->bus_num = -1;
 	ctlr->num_chipselect = 1;
 	ctlr->num_data_lanes = 1;
@@ -3339,8 +3587,7 @@ static int spi_get_gpio_descs(struct spi_controller *ctlr)
 
 	ctlr->num_chipselect = max_t(int, nb, ctlr->num_chipselect);
 
-	cs = devm_kcalloc(dev, ctlr->num_chipselect, sizeof(*cs),
-			  GFP_KERNEL);
+	cs = devm_kzalloc_objs(dev, *cs, ctlr->num_chipselect);
 	if (!cs)
 		return -ENOMEM;
 	ctlr->cs_gpiods = cs;
@@ -3552,6 +3799,29 @@ int spi_register_controller(struct spi_controller *ctlr)
 	of_register_spi_devices(ctlr);
 	acpi_register_spi_devices(ctlr);
 
+#if IS_ENABLED(CONFIG_SPI_DYNAMIC)
+	/*
+	 * Register the new_device/delete_device sysfs interface as the
+	 * final step of host controller bringup, only after the queue,
+	 * boardinfo matching and DT/ACPI enumeration have all completed.
+	 * If this fails, the controller is otherwise usable, so log and
+	 * carry on rather than tearing everything down.
+	 */
+	if (!spi_controller_is_target(ctlr)) {
+		status = sysfs_create_group(&ctlr->dev.kobj,
+					    &spi_controller_userspace_group);
+		if (status) {
+			dev_warn(&ctlr->dev,
+				 "Failed to create userspace client interface: %d\n",
+				 status);
+		} else {
+			ctlr->userspace_registered = true;
+			/* Notify userspace that the new attributes are available. */
+			kobject_uevent(&ctlr->dev.kobj, KOBJ_CHANGE);
+		}
+	}
+#endif
+
 	return 0;
 
 del_ctrl:
@@ -3616,9 +3886,42 @@ void spi_unregister_controller(struct spi_controller *ctlr)
 	struct spi_controller *found;
 	int id = ctlr->bus_num;
 
+	/*
+	 * Drain in-flight new_device/delete_device sysfs stores and
+	 * prevent new ones from starting.  Must happen before we take
+	 * add_lock so kernfs_drain doesn't wait on a store that is
+	 * itself blocked on add_lock.
+	 */
+#if IS_ENABLED(CONFIG_SPI_DYNAMIC)
+	if (ctlr->userspace_registered) {
+		sysfs_remove_group(&ctlr->dev.kobj,
+				   &spi_controller_userspace_group);
+		ctlr->userspace_registered = false;
+	}
+#endif
+
 	/* Prevent addition of new devices, unregister existing ones */
 	if (IS_ENABLED(CONFIG_SPI_DYNAMIC))
 		mutex_lock(&ctlr->add_lock);
+
+#if IS_ENABLED(CONFIG_SPI_DYNAMIC)
+	/*
+	 * Drain userspace_clients before __unregister since
+	 * spi_unregister_device() doesn't do list_del() itself.  The
+	 * userspace sysfs group has already been removed above and
+	 * kernfs_drain() has completed, so no new entries can appear
+	 * here.
+	 */
+	while (!list_empty(&ctlr->userspace_clients)) {
+		struct spi_device *spi;
+
+		spi = list_first_entry(&ctlr->userspace_clients,
+				       struct spi_device,
+				       userspace_node);
+		list_del(&spi->userspace_node);
+		spi_unregister_device(spi);
+	}
+#endif
 
 	device_for_each_child(&ctlr->dev, NULL, __unregister);
 

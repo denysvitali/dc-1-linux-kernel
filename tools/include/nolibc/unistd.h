@@ -52,7 +52,11 @@ int access(const char *path, int amode)
 static __attribute__((unused))
 int _sys_ftruncate64(int fd, uint32_t length0, uint32_t length1)
 {
+#if defined(__NOLIBC_PAD_64BIT_SYSCALL_ARGUMENT_PAIR)
+	return __nolibc_syscall4(__NR_ftruncate64, fd, 0, length0, length1);
+#else
 	return __nolibc_syscall3(__NR_ftruncate64, fd, length0, length1);
+#endif
 }
 #define _sys_ftruncate64 _sys_ftruncate64
 #endif
@@ -73,6 +77,48 @@ int ftruncate(int fd, off_t length)
 	return __sysret(_sys_ftruncate(fd, length));
 }
 
+/*
+ * char *getcwd(char *buf, size_t size);
+ */
+
+static __attribute__((unused))
+int _sys_getcwd(char *buf, size_t size)
+{
+	return __nolibc_syscall2(__NR_getcwd, buf, size);
+}
+
+static __attribute__((unused))
+char *getcwd(char *buf, size_t size)
+{
+	int ret;
+
+	/* Unlike other libc's we don't handle passing NULL for buf */
+	if (!buf || !size) {
+		SET_ERRNO(EINVAL);
+		return NULL;
+	}
+
+	ret = __sysret(_sys_getcwd(buf, size));
+
+	/* On error return NULL, __sysret() above will have set errno */
+	if (ret < 0)
+		return NULL;
+
+	/* Handle no path being written or the kernel putting
+	 * "(unreachable)" into the buffer instead of a path.
+	 * This matches what musl is doing.
+	 */
+	if (ret == 0 || buf[0] != '/') {
+		SET_ERRNO(ENOENT);
+		return NULL;
+	}
+
+	/* ret must be the number of bytes written at this point,
+	 * so return the pointer to buf.
+	 */
+	return buf;
+}
+
 static __attribute__((unused))
 int msleep(unsigned int msecs)
 {
@@ -84,6 +130,22 @@ int msleep(unsigned int msecs)
 			!!(my_timeval.tv_usec % 1000);
 	else
 		return 0;
+}
+
+/*
+ * ssize_t readlink(const char *path, char *buf, size_t bufsiz);
+ */
+
+static __attribute__((unused))
+ssize_t _sys_readlink(const char *path, char *buf, size_t bufsiz)
+{
+	return __nolibc_syscall4(__NR_readlinkat, AT_FDCWD, path, buf, bufsiz);
+}
+
+static __attribute__((unused))
+ssize_t readlink(const char *path, char *buf, size_t bufsiz)
+{
+	return __sysret(_sys_readlink(path, buf, bufsiz));
 }
 
 static __attribute__((unused))

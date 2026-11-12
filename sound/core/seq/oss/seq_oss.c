@@ -67,6 +67,9 @@ static int __init alsa_seq_oss_init(void)
 {
 	int rc;
 
+	pr_warn("seq-oss: kernel OSS sequencer emulation is deprecated\n");
+	pr_warn("seq-oss: Use user-space solution (alsa-oss or oss-seq-emu) instead.\n");
+
 	rc = register_device();
 	if (rc < 0)
 		goto error;
@@ -206,17 +209,16 @@ odev_poll(struct file *file, poll_table * wait)
  * registration of sequencer minor device
  */
 
-static const struct file_operations seq_oss_f_ops =
-{
-	.owner =	THIS_MODULE,
-	.read =		odev_read,
-	.write =	odev_write,
-	.open =		odev_open,
-	.release =	odev_release,
-	.poll =		odev_poll,
-	.unlocked_ioctl =	odev_ioctl,
-	.compat_ioctl =	odev_ioctl_compat,
-	.llseek =	noop_llseek,
+static const struct file_operations seq_oss_f_ops = {
+	.owner		=	THIS_MODULE,
+	.read		=	odev_read,
+	.write		=	odev_write,
+	.open		=	odev_open,
+	.release	=	odev_release,
+	.poll		=	odev_poll,
+	.unlocked_ioctl	=	odev_ioctl,
+	.compat_ioctl	=	odev_ioctl_compat,
+	.llseek		=	noop_llseek,
 };
 
 static int __init

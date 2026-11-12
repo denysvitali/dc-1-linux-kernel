@@ -115,14 +115,14 @@ const struct reg_default cs42l43_reg_default[CS42L43_N_DEFAULTS] = {
 	{ CS42L43_DECIM_HPF_WNF_CTRL2,			0x00000001 },
 	{ CS42L43_DECIM_HPF_WNF_CTRL3,			0x00000001 },
 	{ CS42L43_DECIM_HPF_WNF_CTRL4,			0x00000001 },
-	{ CS42L43B_DECIM_HPF_WNF_CTRL5,			0x00000001 },
-	{ CS42L43B_DECIM_HPF_WNF_CTRL6,			0x00000001 },
 	{ CS42L43_DMIC_PDM_CTRL,			0x00000000 },
 	{ CS42L43_DECIM_VOL_CTRL_CH1_CH2,		0x20122012 },
 	{ CS42L43_DECIM_VOL_CTRL_CH3_CH4,		0x20122012 },
 	{ CS42L43B_DECIM_VOL_CTRL_CH1_CH2,		0x20122012 },
 	{ CS42L43B_DECIM_VOL_CTRL_CH3_CH4,		0x20122012 },
 	{ CS42L43B_DECIM_VOL_CTRL_CH5_CH6,		0x20122012 },
+	{ CS42L43B_DECIM_HPF_WNF_CTRL5,			0x00000001 },
+	{ CS42L43B_DECIM_HPF_WNF_CTRL6,			0x00000001 },
 	{ CS42L43_INTP_VOLUME_CTRL1,			0x00000180 },
 	{ CS42L43_INTP_VOLUME_CTRL2,			0x00000180 },
 	{ CS42L43_AMP1_2_VOL_RAMP,			0x00000022 },
@@ -160,10 +160,10 @@ const struct reg_default cs42l43_reg_default[CS42L43_N_DEFAULTS] = {
 	{ CS42L43_SWIRE_DP2_CH2_INPUT,			0x00000000 },
 	{ CS42L43_SWIRE_DP3_CH1_INPUT,			0x00000000 },
 	{ CS42L43_SWIRE_DP3_CH2_INPUT,			0x00000000 },
-	{ CS42L43B_SWIRE_DP3_CH3_INPUT,			0x00000000 },
-	{ CS42L43B_SWIRE_DP3_CH4_INPUT,			0x00000000 },
 	{ CS42L43_SWIRE_DP4_CH1_INPUT,			0x00000000 },
 	{ CS42L43_SWIRE_DP4_CH2_INPUT,			0x00000000 },
+	{ CS42L43B_SWIRE_DP3_CH3_INPUT,			0x00000000 },
+	{ CS42L43B_SWIRE_DP3_CH4_INPUT,			0x00000000 },
 	{ CS42L43B_SWIRE_DP4_CH3_INPUT,			0x00000000 },
 	{ CS42L43B_SWIRE_DP4_CH4_INPUT,			0x00000000 },
 	{ CS42L43_ASRC_INT1_INPUT1,			0x00000000 },
@@ -178,14 +178,10 @@ const struct reg_default cs42l43_reg_default[CS42L43_N_DEFAULTS] = {
 	{ CS42L43_ISRC1INT2_INPUT1,			0x00000000 },
 	{ CS42L43_ISRC1DEC1_INPUT1,			0x00000000 },
 	{ CS42L43_ISRC1DEC2_INPUT1,			0x00000000 },
-	{ CS42L43B_ISRC1DEC3_INPUT1,			0x00000000 },
-	{ CS42L43B_ISRC1DEC4_INPUT1,			0x00000000 },
 	{ CS42L43_ISRC2INT1_INPUT1,			0x00000000 },
 	{ CS42L43_ISRC2INT2_INPUT1,			0x00000000 },
 	{ CS42L43_ISRC2DEC1_INPUT1,			0x00000000 },
 	{ CS42L43_ISRC2DEC2_INPUT1,			0x00000000 },
-	{ CS42L43B_ISRC2DEC3_INPUT1,			0x00000000 },
-	{ CS42L43B_ISRC2DEC4_INPUT1,			0x00000000 },
 	{ CS42L43_EQ1MIX_INPUT1,			0x00800000 },
 	{ CS42L43_EQ1MIX_INPUT2,			0x00800000 },
 	{ CS42L43_EQ1MIX_INPUT3,			0x00800000 },
@@ -212,6 +208,10 @@ const struct reg_default cs42l43_reg_default[CS42L43_N_DEFAULTS] = {
 	{ CS42L43_AMP4MIX_INPUT2,			0x00800000 },
 	{ CS42L43_AMP4MIX_INPUT3,			0x00800000 },
 	{ CS42L43_AMP4MIX_INPUT4,			0x00800000 },
+	{ CS42L43B_ISRC1DEC3_INPUT1,			0x00000000 },
+	{ CS42L43B_ISRC1DEC4_INPUT1,			0x00000000 },
+	{ CS42L43B_ISRC2DEC3_INPUT1,			0x00000000 },
+	{ CS42L43B_ISRC2DEC4_INPUT1,			0x00000000 },
 	{ CS42L43_ASRC_INT_ENABLES,			0x00000100 },
 	{ CS42L43_ASRC_DEC_ENABLES,			0x00000100 },
 	{ CS42L43_PDNCNTL,				0x00000000 },
@@ -586,16 +586,11 @@ static int cs42l43_soft_reset(struct cs42l43 *cs42l43)
  */
 static int cs42l43_wait_for_attach(struct cs42l43 *cs42l43)
 {
-	if (!cs42l43->attached) {
-		unsigned long timeout = msecs_to_jiffies(CS42L43_SDW_ATTACH_TIMEOUT_MS);
-		unsigned long time;
+	int ret;
 
-		time = wait_for_completion_timeout(&cs42l43->device_attach, timeout);
-		if (!time) {
-			dev_err(cs42l43->dev, "Timed out waiting for device re-attach\n");
-			return -ETIMEDOUT;
-		}
-	}
+	ret = sdw_slave_wait_for_init(cs42l43->sdw, CS42L43_SDW_ATTACH_TIMEOUT_MS);
+	if (ret)
+		return ret;
 
 	regcache_cache_only(cs42l43->regmap, false);
 
@@ -964,6 +959,7 @@ static void cs42l43_boot_work(struct work_struct *work)
 {
 	struct cs42l43 *cs42l43 = container_of(work, struct cs42l43, boot_work);
 	unsigned int devid, revid, otp;
+	bool valid_id;
 	int ret;
 
 	ret = cs42l43_wait_for_attach(cs42l43);
@@ -978,16 +974,21 @@ static void cs42l43_boot_work(struct work_struct *work)
 
 	switch (devid) {
 	case CS42L43_DEVID_VAL:
+		valid_id = (cs42l43->variant_id == CS42L43_DEVID_VAL);
+		break;
 	case CS42L43B_DEVID_VAL:
-		if (devid != cs42l43->variant_id) {
-			dev_err(cs42l43->dev,
-				"Device ID (0x%06x) does not match variant ID (0x%06lx)\n",
-				devid, cs42l43->variant_id);
-			goto err;
-		}
+	case CS42L44_DEVID_VAL:
+		valid_id = (cs42l43->variant_id == CS42L43B_DEVID_VAL);
 		break;
 	default:
 		dev_err(cs42l43->dev, "Unrecognised devid: 0x%06x\n", devid);
+		goto err;
+	}
+
+	if (!valid_id) {
+		dev_err(cs42l43->dev,
+			"Device ID (0x%06x) does not match variant ID (0x%06lx)\n",
+			devid, cs42l43->variant_id);
 		goto err;
 	}
 
@@ -1104,14 +1105,18 @@ static int cs42l43_power_down(struct cs42l43 *cs42l43)
 	return 0;
 }
 
-static void cs42l43_dev_remove(void *data)
+static void cs42l43_dev_power_down(void *data)
 {
 	struct cs42l43 *cs42l43 = data;
 
-	cancel_work_sync(&cs42l43->boot_work);
-
 	cs42l43_power_down(cs42l43);
 }
+
+void cs42l43_dev_remove(struct cs42l43 *cs42l43)
+{
+	flush_work(&cs42l43->boot_work);
+}
+EXPORT_SYMBOL_NS_GPL(cs42l43_dev_remove, "MFD_CS42L43");
 
 int cs42l43_dev_probe(struct cs42l43 *cs42l43)
 {
@@ -1120,7 +1125,6 @@ int cs42l43_dev_probe(struct cs42l43 *cs42l43)
 	dev_set_drvdata(cs42l43->dev, cs42l43);
 
 	mutex_init(&cs42l43->pll_lock);
-	init_completion(&cs42l43->device_attach);
 	init_completion(&cs42l43->device_detach);
 	init_completion(&cs42l43->firmware_download);
 	INIT_WORK(&cs42l43->boot_work, cs42l43_boot_work);
@@ -1159,7 +1163,7 @@ int cs42l43_dev_probe(struct cs42l43 *cs42l43)
 	if (ret)
 		return ret;
 
-	ret = devm_add_action_or_reset(cs42l43->dev, cs42l43_dev_remove, cs42l43);
+	ret = devm_add_action_or_reset(cs42l43->dev, cs42l43_dev_power_down, cs42l43);
 	if (ret)
 		return ret;
 

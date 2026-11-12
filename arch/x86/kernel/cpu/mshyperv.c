@@ -148,7 +148,6 @@ EXPORT_SYMBOL_GPL(hv_set_msr);
 static void (*mshv_handler)(void);
 static void (*vmbus_handler)(void);
 static void (*hv_stimer0_handler)(void);
-static void (*hv_kexec_handler)(void);
 static void (*hv_crash_handler)(struct pt_regs *regs);
 
 DEFINE_IDTENTRY_SYSVEC(sysvec_hyperv_callback)
@@ -215,16 +214,6 @@ void hv_remove_stimer0_handler(void)
 	hv_stimer0_handler = NULL;
 }
 
-void hv_setup_kexec_handler(void (*handler)(void))
-{
-	hv_kexec_handler = handler;
-}
-
-void hv_remove_kexec_handler(void)
-{
-	hv_kexec_handler = NULL;
-}
-
 void hv_setup_crash_handler(void (*handler)(struct pt_regs *regs))
 {
 	hv_crash_handler = handler;
@@ -240,17 +229,13 @@ static void hv_machine_shutdown(void)
 {
 	if (kexec_in_progress) {
 		hv_stimer_global_cleanup();
-
-		if (hv_kexec_handler)
-			hv_kexec_handler();
-	}
-
-	/*
-	 * Call hv_cpu_die() on all the CPUs, otherwise later the hypervisor
-	 * corrupts the old VP Assist Pages and can crash the kexec kernel.
-	 */
-	if (kexec_in_progress)
+		/*
+		 * Call hv_cpu_die() on all the CPUs, otherwise later the
+		 * hypervisor corrupts the old VP Assist Pages and can crash
+		 * the kexec kernel.
+		 */
 		cpuhp_remove_state(CPUHP_AP_HYPERV_ONLINE);
+	}
 
 	/* The function calls stop_other_cpus(). */
 	native_machine_shutdown();
@@ -502,17 +487,32 @@ static void hv_reserve_irq_vectors(void)
 	#define HYPERV_DBG_ASSERT_VECTOR	0x2C
 	#define HYPERV_DBG_SERVICE_VECTOR	0x2D
 
+	/*
+	 * The hypervisor delivers these three to the NT HAL and refuses to
+	 * map a device interrupt to any of them.
+	 *
+	 * The hypervisor will provide a hint in the future when these
+	 * vectors become available to use.
+	 */
+	#define HAL_NT_APC_VECTOR		0x1F
+	#define HAL_NT_DPC_VECTOR		0x2F
+	#define HAL_NT_CLOCK_IPI_VECTOR		0xD2
+
 	if (cpu_feature_enabled(X86_FEATURE_FRED))
 		return;
 
 	if (test_and_set_bit(HYPERV_DBG_ASSERT_VECTOR, system_vectors) ||
 	    test_and_set_bit(HYPERV_DBG_SERVICE_VECTOR, system_vectors) ||
-	    test_and_set_bit(HYPERV_DBG_FASTFAIL_VECTOR, system_vectors))
+	    test_and_set_bit(HYPERV_DBG_FASTFAIL_VECTOR, system_vectors) ||
+	    test_and_set_bit(HAL_NT_APC_VECTOR, system_vectors) ||
+	    test_and_set_bit(HAL_NT_DPC_VECTOR, system_vectors) ||
+	    test_and_set_bit(HAL_NT_CLOCK_IPI_VECTOR, system_vectors))
 		BUG();
 
-	pr_info("Hyper-V: reserve vectors: 0x%x 0x%x 0x%x\n",
+	pr_info("Hyper-V: reserve vectors: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
 		HYPERV_DBG_ASSERT_VECTOR, HYPERV_DBG_SERVICE_VECTOR,
-		HYPERV_DBG_FASTFAIL_VECTOR);
+		HYPERV_DBG_FASTFAIL_VECTOR, HAL_NT_APC_VECTOR,
+		HAL_NT_DPC_VECTOR, HAL_NT_CLOCK_IPI_VECTOR);
 }
 
 static void __init ms_hyperv_init_platform(void)
@@ -716,9 +716,7 @@ static void __init ms_hyperv_init_platform(void)
 	}
 
 	/* Install system interrupt handler for stimer0 */
-	if (ms_hyperv.misc_features & HV_STIMER_DIRECT_MODE_AVAILABLE) {
-		sysvec_install(HYPERV_STIMER0_VECTOR, sysvec_hyperv_stimer0);
-	}
+	sysvec_install(HYPERV_STIMER0_VECTOR, sysvec_hyperv_stimer0);
 
 # ifdef CONFIG_SMP
 	smp_ops.smp_prepare_boot_cpu = hv_smp_prepare_boot_cpu;

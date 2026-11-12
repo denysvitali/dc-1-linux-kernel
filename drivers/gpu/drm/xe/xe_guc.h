@@ -30,6 +30,7 @@
 	xe_guc_fw_version_at_least((guc), MAKE_GUC_VER_ARGS(ver))
 
 struct drm_printer;
+struct xe_gt;
 
 void xe_guc_comm_init_early(struct xe_guc *guc);
 int xe_guc_init_noalloc(struct xe_guc *guc);
@@ -45,6 +46,7 @@ void xe_guc_runtime_suspend(struct xe_guc *guc);
 void xe_guc_runtime_resume(struct xe_guc *guc);
 int xe_guc_suspend(struct xe_guc *guc);
 int xe_guc_softreset(struct xe_guc *guc);
+u32 xe_guc_bo_wa_flags(struct xe_gt *gt);
 void xe_guc_notify(struct xe_guc *guc);
 int xe_guc_auth_huc(struct xe_guc *guc, u32 rsa_addr);
 int xe_guc_mmio_send(struct xe_guc *guc, const u32 *request, u32 len);
@@ -62,31 +64,14 @@ void xe_guc_stop(struct xe_guc *guc);
 int xe_guc_start(struct xe_guc *guc);
 void xe_guc_declare_wedged(struct xe_guc *guc);
 bool xe_guc_using_main_gamctrl_queues(struct xe_guc *guc);
+bool xe_guc_has_paging_engine(struct xe_guc *guc);
 
 #if IS_ENABLED(CONFIG_DRM_XE_KUNIT_TEST)
 int xe_guc_g2g_test_notification(struct xe_guc *guc, u32 *payload, u32 len);
 #endif
 
-static inline u16 xe_engine_class_to_guc_class(enum xe_engine_class class)
-{
-	switch (class) {
-	case XE_ENGINE_CLASS_RENDER:
-		return GUC_RENDER_CLASS;
-	case XE_ENGINE_CLASS_VIDEO_DECODE:
-		return GUC_VIDEO_CLASS;
-	case XE_ENGINE_CLASS_VIDEO_ENHANCE:
-		return GUC_VIDEOENHANCE_CLASS;
-	case XE_ENGINE_CLASS_COPY:
-		return GUC_BLITTER_CLASS;
-	case XE_ENGINE_CLASS_COMPUTE:
-		return GUC_COMPUTE_CLASS;
-	case XE_ENGINE_CLASS_OTHER:
-		return GUC_GSC_OTHER_CLASS;
-	default:
-		XE_WARN_ON(class);
-		return -1;
-	}
-}
+u16 xe_hwe_to_guc_class(struct xe_hw_engine *hwe);
+u16 xe_hwe_guc_logical_instance(struct xe_hw_engine *hwe);
 
 static inline struct xe_gt *guc_to_gt(struct xe_guc *guc)
 {

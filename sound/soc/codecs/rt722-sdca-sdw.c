@@ -6,6 +6,7 @@
 //
 //
 
+#include <linux/cleanup.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/module.h>
@@ -113,6 +114,7 @@ static int rt722_sdca_mbq_size(struct device *dev, unsigned int reg)
 	case 0x2000090 ... 0x2000094:
 	case 0x20000b1:
 	case 0x20000b4:
+	case 0x3010000:
 	case 0x3110000:
 	case 0x5300000 ... 0x5300300:
 	case 0x5400002:
@@ -196,15 +198,18 @@ static bool rt722_sdca_volatile_register(struct device *dev, unsigned int reg)
 	case 0x2000007:
 	case 0x200000d:
 	case 0x2000019:
+	case 0x200001a:
 	case 0x2000020:
 	case 0x2000030:
 	case 0x2000046:
 	case 0x2000067:
 	case 0x2000084:
 	case 0x2000086:
+	case 0x3010000:
 	case 0x3110000:
 	case 0x5800003:
 	case 0x5810000:
+	case 0x6100008:
 	case 0x44011000 ... 0x440115ff:
 	case 0x44012000:
 	case 0x44012021:
@@ -299,8 +304,8 @@ static int rt722_sdca_read_prop(struct sdw_slave *slave)
 	prop->sink_ports = BIT(3) | BIT(1); /* BITMAP:  00001010 */
 
 	nval = hweight32(prop->source_ports);
-	prop->src_dpn_prop = devm_kcalloc(&slave->dev, nval,
-		sizeof(*prop->src_dpn_prop), GFP_KERNEL);
+	prop->src_dpn_prop = devm_kzalloc_objs(&slave->dev, *prop->src_dpn_prop,
+					       nval);
 	if (!prop->src_dpn_prop)
 		return -ENOMEM;
 
@@ -317,8 +322,8 @@ static int rt722_sdca_read_prop(struct sdw_slave *slave)
 
 	/* do this again for sink now */
 	nval = hweight32(prop->sink_ports);
-	prop->sink_dpn_prop = devm_kcalloc(&slave->dev, nval,
-		sizeof(*prop->sink_dpn_prop), GFP_KERNEL);
+	prop->sink_dpn_prop = devm_kzalloc_objs(&slave->dev,
+						*prop->sink_dpn_prop, nval);
 	if (!prop->sink_dpn_prop)
 		return -ENOMEM;
 
@@ -466,10 +471,8 @@ static void rt722_sdca_sdw_remove(struct sdw_slave *slave)
 {
 	struct rt722_sdca_priv *rt722 = dev_get_drvdata(&slave->dev);
 
-	if (rt722->hw_init) {
-		cancel_delayed_work_sync(&rt722->jack_detect_work);
-		cancel_delayed_work_sync(&rt722->jack_btn_check_work);
-	}
+	cancel_delayed_work_sync(&rt722->jack_detect_work);
+	cancel_delayed_work_sync(&rt722->jack_btn_check_work);
 
 	if (rt722->first_hw_init)
 		pm_runtime_disable(&slave->dev);
@@ -513,13 +516,13 @@ static int rt722_sdca_dev_system_suspend(struct device *dev)
 	 * deferred work completes and before the parent disables
 	 * interrupts on the link
 	 */
-	mutex_lock(&rt722_sdca->disable_irq_lock);
-	rt722_sdca->disable_irq = true;
-	ret1 = sdw_update_no_pm(slave, SDW_SCP_SDCA_INTMASK1,
-				SDW_SCP_SDCA_INTMASK_SDCA_0, 0);
-	ret2 = sdw_update_no_pm(slave, SDW_SCP_SDCA_INTMASK2,
-				SDW_SCP_SDCA_INTMASK_SDCA_8, 0);
-	mutex_unlock(&rt722_sdca->disable_irq_lock);
+	scoped_guard(mutex, &rt722_sdca->disable_irq_lock) {
+		rt722_sdca->disable_irq = true;
+		ret1 = sdw_update_no_pm(slave, SDW_SCP_SDCA_INTMASK1,
+					SDW_SCP_SDCA_INTMASK_SDCA_0, 0);
+		ret2 = sdw_update_no_pm(slave, SDW_SCP_SDCA_INTMASK2,
+					SDW_SCP_SDCA_INTMASK_SDCA_8, 0);
+	}
 
 	if (ret1 < 0 || ret2 < 0) {
 		/* log but don't prevent suspend from happening */
@@ -541,13 +544,15 @@ static int rt722_sdca_dev_resume(struct device *dev)
 		return 0;
 
 	if (!slave->unattach_request) {
-		mutex_lock(&rt722->disable_irq_lock);
-		if (rt722->disable_irq == true) {
-			sdw_write_no_pm(slave, SDW_SCP_SDCA_INTMASK1, SDW_SCP_SDCA_INTMASK_SDCA_0);
-			sdw_write_no_pm(slave, SDW_SCP_SDCA_INTMASK2, SDW_SCP_SDCA_INTMASK_SDCA_8);
-			rt722->disable_irq = false;
+		scoped_guard(mutex, &rt722->disable_irq_lock) {
+			if (rt722->disable_irq) {
+				sdw_write_no_pm(slave, SDW_SCP_SDCA_INTMASK1,
+						SDW_SCP_SDCA_INTMASK_SDCA_0);
+				sdw_write_no_pm(slave, SDW_SCP_SDCA_INTMASK2,
+						SDW_SCP_SDCA_INTMASK_SDCA_8);
+				rt722->disable_irq = false;
+			}
 		}
-		mutex_unlock(&rt722->disable_irq_lock);
 	}
 
 	ret = sdw_slave_wait_for_init(slave, RT722_PROBE_TIMEOUT);
@@ -557,7 +562,13 @@ static int rt722_sdca_dev_resume(struct device *dev)
 	}
 
 	regcache_cache_only(rt722->regmap, false);
-	regcache_sync(rt722->regmap);
+	ret = regcache_sync(rt722->regmap);
+	if (ret) {
+		regcache_cache_only(rt722->regmap, true);
+		regcache_mark_dirty(rt722->regmap);
+		return ret;
+	}
+
 	return 0;
 }
 

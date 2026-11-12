@@ -438,6 +438,8 @@ int mlx5_mdev_init(struct mlx5_core_dev *dev, int profile_idx);
 void mlx5_mdev_uninit(struct mlx5_core_dev *dev);
 int mlx5_frag_buf_pools_init(struct mlx5_core_dev *dev);
 void mlx5_frag_buf_pools_cleanup(struct mlx5_core_dev *dev);
+int mlx5_db_pools_init(struct mlx5_core_dev *dev);
+void mlx5_db_pools_cleanup(struct mlx5_core_dev *dev);
 int mlx5_init_one(struct mlx5_core_dev *dev);
 int mlx5_init_one_devl_locked(struct mlx5_core_dev *dev);
 void mlx5_uninit_one(struct mlx5_core_dev *dev);
@@ -530,4 +532,9 @@ static inline bool mlx5_pcie_cong_event_supported(struct mlx5_core_dev *dev)
 
 	return true;
 }
+
+int mlx5_data_direct_init(struct mlx5_core_dev *mdev);
+void mlx5_data_direct_cleanup(struct mlx5_core_dev *mdev);
+int mlx5_data_direct_driver_register(void);
+void mlx5_data_direct_driver_unregister(void);
 #endif /* __MLX5_CORE_H__ */

@@ -222,7 +222,7 @@ static void devlink_notify(struct devlink *devlink, enum devlink_command cmd)
 
 int devlink_nl_get_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct sk_buff *msg;
 	int err;
 
@@ -412,9 +412,9 @@ static struct net *devlink_netns_get(struct sk_buff *skb,
 	return net;
 }
 
-static void devlink_reload_netns_change(struct devlink *devlink,
-					struct net *curr_net,
-					struct net *dest_net)
+void devlink_reload_netns_change(struct devlink *devlink,
+				 struct net *curr_net,
+				 struct net *dest_net)
 {
 	/* Userspace needs to be notified about devlink objects
 	 * removed from original and entering new network namespace.
@@ -519,7 +519,7 @@ free_msg:
 
 int devlink_nl_reload_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	enum devlink_reload_action action;
 	enum devlink_reload_limit limit;
 	struct net *dest_net = NULL;
@@ -578,6 +578,7 @@ int devlink_nl_reload_doit(struct sk_buff *skb, struct genl_info *info)
 		    action != DEVLINK_RELOAD_ACTION_DRIVER_REINIT) {
 			NL_SET_ERR_MSG_MOD(info->extack,
 					   "Changing namespace is only supported for reinit action");
+			put_net(dest_net);
 			return -EOPNOTSUPP;
 		}
 	}
@@ -683,7 +684,7 @@ nla_put_failure:
 
 int devlink_nl_eswitch_get_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct sk_buff *msg;
 	int err;
 
@@ -704,7 +705,7 @@ int devlink_nl_eswitch_get_doit(struct sk_buff *skb, struct genl_info *info)
 
 int devlink_nl_eswitch_set_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	const struct devlink_ops *ops = devlink->ops;
 	enum devlink_eswitch_encap_mode encap_mode;
 	u8 inline_mode;
@@ -906,7 +907,7 @@ err_cancel_msg:
 
 int devlink_nl_info_get_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct sk_buff *msg;
 	int err;
 
@@ -1134,7 +1135,7 @@ int devlink_nl_flash_update_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr *nla_overwrite_mask, *nla_file_name;
 	struct devlink_flash_update_params params = {};
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	const char *file_name;
 	u32 supported_params;
 	int ret;
@@ -1168,7 +1169,7 @@ int devlink_nl_flash_update_doit(struct sk_buff *skb, struct genl_info *info)
 
 	nla_file_name = info->attrs[DEVLINK_ATTR_FLASH_UPDATE_FILE_NAME];
 	file_name = nla_data(nla_file_name);
-	ret = request_firmware(&params.fw, file_name, devlink->dev);
+	ret = request_firmware_direct(&params.fw, file_name, devlink->dev);
 	if (ret) {
 		NL_SET_ERR_MSG_ATTR(info->extack, nla_file_name,
 				    "failed to locate the requested firmware file");
@@ -1244,7 +1245,7 @@ int devlink_compat_flash_update(struct devlink *devlink, const char *file_name)
 		goto out_unlock;
 	}
 
-	ret = request_firmware(&params.fw, file_name, devlink->dev);
+	ret = request_firmware_direct(&params.fw, file_name, devlink->dev);
 	if (ret)
 		goto out_unlock;
 
@@ -1302,7 +1303,7 @@ err_cancel_msg:
 
 int devlink_nl_selftests_get_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct sk_buff *msg;
 	int err;
 
@@ -1372,7 +1373,7 @@ static const struct nla_policy devlink_selftest_nl_policy[DEVLINK_ATTR_SELFTEST_
 int devlink_nl_selftests_run_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct nlattr *tb[DEVLINK_ATTR_SELFTEST_ID_MAX + 1];
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct nlattr *attrs, *selftests;
 	struct sk_buff *msg;
 	void *hdr;
