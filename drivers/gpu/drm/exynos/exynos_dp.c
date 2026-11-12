@@ -24,11 +24,10 @@
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_of.h>
-#include <drm/drm_panel.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
-#include <drm/drm_simple_kms_helper.h>
 #include <drm/exynos_drm.h>
 
 #include "exynos_drm_crtc.h"
@@ -79,6 +78,10 @@ static void exynos_dp_nop(struct drm_encoder *encoder)
 	/* do nothing */
 }
 
+static const struct drm_encoder_funcs exynos_dp_encoder_funcs = {
+	.destroy = drm_encoder_cleanup,
+};
+
 static const struct drm_encoder_helper_funcs exynos_dp_encoder_helper_funcs = {
 	.mode_set = exynos_dp_mode_set,
 	.enable = exynos_dp_nop,
@@ -95,7 +98,12 @@ static int exynos_dp_bind(struct device *dev, struct device *master, void *data)
 
 	dp->drm_dev = drm_dev;
 
-	drm_simple_encoder_init(drm_dev, encoder, DRM_MODE_ENCODER_TMDS);
+	ret = drm_encoder_init(drm_dev, encoder, &exynos_dp_encoder_funcs,
+			       DRM_MODE_ENCODER_TMDS, NULL);
+	if (ret) {
+		dev_err(dp->dev, "Failed to initialize encoder\n");
+		return ret;
+	}
 
 	drm_encoder_helper_add(encoder, &exynos_dp_encoder_helper_funcs);
 
@@ -138,11 +146,9 @@ static const struct component_ops exynos_dp_ops = {
 static int exynos_dp_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *np;
 	struct exynos_dp_device *dp;
 
-	dp = devm_kzalloc(&pdev->dev, sizeof(struct exynos_dp_device),
-			  GFP_KERNEL);
+	dp = devm_kzalloc_obj(&pdev->dev, struct exynos_dp_device);
 	if (!dp)
 		return -ENOMEM;
 
@@ -153,18 +159,6 @@ static int exynos_dp_probe(struct platform_device *pdev)
 	 * that analogix dp driver would take charge of the drvdata.
 	 */
 	platform_set_drvdata(pdev, dp);
-
-	/* This is for the backward compatibility. */
-	np = of_parse_phandle(dev->of_node, "panel", 0);
-	if (np) {
-		dp->plat_data.panel = of_drm_find_panel(np);
-
-		of_node_put(np);
-		if (IS_ERR(dp->plat_data.panel))
-			return PTR_ERR(dp->plat_data.panel);
-
-		goto out;
-	}
 
 	if (of_get_display_timings(dev->of_node)) {
 		dp->plat_data.next_bridge = devm_drm_of_display_mode_bridge(dp->dev,
@@ -180,12 +174,11 @@ static int exynos_dp_probe(struct platform_device *pdev)
 	dp->plat_data.power_off = exynos_dp_poweroff;
 	dp->plat_data.ops = &exynos_dp_ops;
 
-out:
 	dp->adp = analogix_dp_probe(dev, &dp->plat_data);
 	if (IS_ERR(dp->adp))
 		return PTR_ERR(dp->adp);
 
-	if (dp->plat_data.panel || dp->plat_data.next_bridge)
+	if (dp->plat_data.next_bridge)
 		return component_add(&pdev->dev, &exynos_dp_ops);
 	else
 		return analogix_dp_finish_probe(dp->adp);

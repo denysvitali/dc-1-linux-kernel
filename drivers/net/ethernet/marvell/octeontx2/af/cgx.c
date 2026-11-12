@@ -518,6 +518,18 @@ int cgx_set_pkind(void *cgxd, u8 lmac_id, int pkind)
 	return 0;
 }
 
+int cgx_get_pkind(void *cgxd, u8 lmac_id, int *pkind)
+{
+	struct cgx *cgx = cgxd;
+
+	if (!is_lmac_valid(cgx, lmac_id))
+		return -ENODEV;
+
+	*pkind = cgx_read(cgx, lmac_id, cgx->mac_ops->rxid_map_offset);
+	*pkind = *pkind & 0x3F;
+	return 0;
+}
+
 static u8 cgx_get_lmac_type(void *cgxd, int lmac_id)
 {
 	struct cgx *cgx = cgxd;
@@ -740,6 +752,16 @@ u64 cgx_features_get(void *cgxd)
 	return ((struct cgx *)cgxd)->hw_features;
 }
 
+u64 cgx_get_dmacflt_dropped_pktcnt(void *cgxd, int lmac_id)
+{
+	struct cgx *cgx = cgxd;
+
+	if (!is_lmac_valid(cgx, lmac_id))
+		return 0;
+
+	return cgx_read(cgx, lmac_id, CGXX_CMRX_RX_STAT4);
+}
+
 int cgx_stats_reset(void *cgxd, int lmac_id)
 {
 	struct cgx *cgx = cgxd;
@@ -959,15 +981,9 @@ int verify_lmac_fc_cfg(void *cgxd, int lmac_id, u8 tx_pause, u8 rx_pause,
 	if (!lmac)
 		return -ENODEV;
 
-	if (!rx_pause)
-		clear_bit(pfvf_idx, lmac->rx_fc_pfvf_bmap.bmap);
-	else
-		set_bit(pfvf_idx, lmac->rx_fc_pfvf_bmap.bmap);
+	assign_bit(pfvf_idx, lmac->rx_fc_pfvf_bmap.bmap, rx_pause);
 
-	if (!tx_pause)
-		clear_bit(pfvf_idx, lmac->tx_fc_pfvf_bmap.bmap);
-	else
-		set_bit(pfvf_idx, lmac->tx_fc_pfvf_bmap.bmap);
+	assign_bit(pfvf_idx, lmac->tx_fc_pfvf_bmap.bmap, tx_pause);
 
 	/* check if other pfvfs are using flow control */
 	if (!rx_pause && bitmap_weight(lmac->rx_fc_pfvf_bmap.bmap, lmac->rx_fc_pfvf_bmap.max)) {
@@ -1931,7 +1947,8 @@ static struct mac_ops	cgx_mac_ops    = {
 	.pfc_config =                   cgx_lmac_pfc_config,
 	.mac_get_pfc_frm_cfg   =        cgx_lmac_get_pfc_frm_cfg,
 	.mac_reset   =			cgx_lmac_reset,
-	.mac_stats_reset       =	cgx_stats_reset,
+	.get_dmacflt_dropped_pktcnt      =      cgx_get_dmacflt_dropped_pktcnt,
+	.mac_stats_reset		 =	cgx_stats_reset,
 	.mac_x2p_reset                   =      cgx_x2p_reset,
 	.mac_enadis_rx			 =      cgx_enadis_rx,
 };
@@ -1942,7 +1959,7 @@ static int cgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct cgx *cgx;
 	int err, nvec;
 
-	cgx = devm_kzalloc(dev, sizeof(*cgx), GFP_KERNEL);
+	cgx = devm_kzalloc_obj(dev, *cgx);
 	if (!cgx)
 		return -ENOMEM;
 	cgx->pdev = pdev;
@@ -2020,8 +2037,6 @@ static int cgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 
 	list_add(&cgx->cgx_list, &cgx_list);
-
-
 	cgx_populate_features(cgx);
 
 	mutex_init(&cgx->lock);

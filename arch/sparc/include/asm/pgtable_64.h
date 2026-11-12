@@ -96,16 +96,6 @@ bool kern_addr_valid(unsigned long addr);
 #define PTRS_PER_PUD	(1UL << PUD_BITS)
 #define PTRS_PER_PGD	(1UL << PGDIR_BITS)
 
-#define pmd_ERROR(e)							\
-	pr_err("%s:%d: bad pmd %p(%016lx) seen at (%pS)\n",		\
-	       __FILE__, __LINE__, &(e), pmd_val(e), __builtin_return_address(0))
-#define pud_ERROR(e)							\
-	pr_err("%s:%d: bad pud %p(%016lx) seen at (%pS)\n",		\
-	       __FILE__, __LINE__, &(e), pud_val(e), __builtin_return_address(0))
-#define pgd_ERROR(e)							\
-	pr_err("%s:%d: bad pgd %p(%016lx) seen at (%pS)\n",		\
-	       __FILE__, __LINE__, &(e), pgd_val(e), __builtin_return_address(0))
-
 #endif /* !(__ASSEMBLER__) */
 
 /* PTE bits which are the same in SUN4U and SUN4V format.  */
@@ -944,10 +934,6 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 
 #define pte_clear(mm,addr,ptep)		\
 	set_pte_at((mm), (addr), (ptep), __pte(0UL))
-
-#define __HAVE_ARCH_PTE_CLEAR_NOT_PRESENT_FULL
-#define pte_clear_not_present_full(mm,addr,ptep,fullmm)	\
-	__set_pte_at((mm), (addr), (ptep), __pte(0UL), (fullmm))
 
 #ifdef DCACHE_ALIASING_POSSIBLE
 #define __HAVE_ARCH_MOVE_PTE

@@ -13,7 +13,7 @@ import os
 import socket
 from lib.py import ksft_run, ksft_exit, ksft_pr
 from lib.py import NetDrvEpEnv, EthtoolFamily, NetdevFamily
-from lib.py import cmd, bkg, rand_port, defer
+from lib.py import cmd, bkg, ctl_file_write, rand_port, defer
 from lib.py import ksft_in
 from lib.py import ksft_variants, KsftNamedVariant, KsftSkipEx, KsftFailEx
 
@@ -21,6 +21,8 @@ from lib.py import ksft_variants, KsftNamedVariant, KsftSkipEx, KsftFailEx
 ETH_RSS_HASH_TOP = 1
 # Must match RPS_MAX_CPUS in toeplitz.c
 RPS_MAX_CPUS = 16
+# Cap Rx queues so IRQ pinning leaves free CPUs in the RPS_MAX_CPUS range
+QUEUE_CAP = 8
 
 
 def _check_rps_and_rfs_not_configured(cfg):
@@ -46,6 +48,25 @@ def _get_cpu_for_irq(irq):
         if "," in data or "-" in data:
             raise KsftFailEx(f"IRQ{irq} is not mapped to a single core: {data}")
         return int(data)
+
+
+def _cap_queue_count(cfg):
+    ehdr = {"header": {"dev-index": cfg.ifindex}}
+    chans = cfg.ethnl.channels_get(ehdr)
+
+    config = {}
+    restore = {}
+    for key in ("combined-count", "rx-count"):
+        cur = chans.get(key, 0)
+        if cur > QUEUE_CAP:
+            config[key] = QUEUE_CAP
+            restore[key] = cur
+
+    if not config:
+        return
+
+    cfg.ethnl.channels_set(ehdr | config)
+    defer(cfg.ethnl.channels_set, ehdr | restore)
 
 
 def _get_irq_cpus(cfg):
@@ -92,7 +113,7 @@ def _get_unused_rps_cpus(cfg, count=2):
 
 
 def _configure_rps(cfg, rps_cpus):
-    """Configure RPS for all Rx queues."""
+    """Configure RPS for all Rx queues, restored at the end of the test."""
 
     mask = 0
     for cpu in rps_cpus:
@@ -102,9 +123,8 @@ def _configure_rps(cfg, rps_cpus):
 
     # Set RPS bitmap for all rx queues
     for rps_file in glob.glob(f"/sys/class/net/{cfg.ifname}/queues/rx-*/rps_cpus"):
-        with open(rps_file, "w", encoding="utf-8") as fp:
-            # sysfs expects hex without '0x' prefix, toeplitz.c needs the prefix
-            fp.write(mask[2:])
+        # sysfs expects hex without '0x' prefix, toeplitz.c needs the prefix
+        ctl_file_write(rps_file, mask[2:])
 
     return mask
 
@@ -177,6 +197,7 @@ def test(cfg, proto_flag, ipver, grp):
     ]
 
     if grp:
+        _cap_queue_count(cfg)
         _check_rps_and_rfs_not_configured(cfg)
     if grp == "rss":
         irq_cpus = ",".join([str(x) for x in _get_irq_cpus(cfg)])
@@ -186,7 +207,6 @@ def test(cfg, proto_flag, ipver, grp):
         # Get CPUs not used by Rx queues and configure them for RPS
         rps_cpus = _get_unused_rps_cpus(cfg, count=2)
         rps_mask = _configure_rps(cfg, rps_cpus)
-        defer(_configure_rps, cfg, [])
         rx_cmd += ["-r", rps_mask]
         ksft_pr(f"RPS using CPUs: {rps_cpus}, mask: {rps_mask}")
 

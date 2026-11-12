@@ -797,7 +797,7 @@ static int __intel_gt_reset(struct intel_gt *gt, intel_engine_mask_t engine_mask
 bool intel_has_gpu_reset(const struct intel_gt *gt)
 {
 	if (!gt->i915->params.reset)
-		return NULL;
+		return false;
 
 	return intel_get_gpu_reset(gt);
 }
@@ -1433,13 +1433,7 @@ static void intel_gt_reset_global(struct intel_gt *gt,
 			need_display_reset;
 
 		if (reset_display) {
-			if (atomic_read(&i915->pending_fb_pin)) {
-				drm_dbg_kms(&i915->drm,
-					    "Modeset potentially stuck, unbreaking through wedging\n");
-
-				intel_gt_set_wedged(gt);
-			}
-
+			intel_gt_set_wedged(gt);
 			intel_display_reset_prepare(display);
 		}
 

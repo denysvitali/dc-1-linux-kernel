@@ -3239,7 +3239,7 @@ static const struct drm_edid *it6505_bridge_edid_read(struct drm_bridge *bridge,
 static const struct drm_bridge_funcs it6505_bridge_funcs = {
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.attach = it6505_bridge_attach,
 	.detach = it6505_bridge_detach,
 	.mode_valid = it6505_bridge_mode_valid,
@@ -3607,10 +3607,8 @@ static int it6505_i2c_probe(struct i2c_client *client)
 					IRQF_TRIGGER_LOW | IRQF_ONESHOT |
 					IRQF_NO_AUTOEN,
 					"it6505-intp", it6505);
-	if (err) {
-		dev_err(dev, "Failed to request INTP threaded IRQ: %d", err);
+	if (err)
 		return err;
-	}
 
 	INIT_WORK(&it6505->link_works, it6505_link_training_work);
 	INIT_WORK(&it6505->hdcp_wait_ksv_list, it6505_hdcp_wait_ksv_list);
@@ -3652,7 +3650,7 @@ static void it6505_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id it6505_id[] = {
-	{ "it6505" },
+	{ .name = "it6505" },
 	{ }
 };
 

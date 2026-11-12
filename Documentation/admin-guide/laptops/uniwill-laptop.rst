@@ -72,10 +72,24 @@ Lightbar
 --------
 
 The ``uniwill-laptop`` driver exposes the lightbar found on some models as a standard multicolor
-LED class device. The default name of this LED class device is ``uniwill:multicolor:status``.
+LED class device. The default name of this LED class device is ``uniwill:rgb:status``.
 
-See Documentation/ABI/testing/sysfs-driver-uniwill-laptop for details on how to control the various
-animation modes of the lightbar.
+The lightbar supports a separate rainbow animation mode that can be enabled by selecting the
+`uniwill-rainbow` LED trigger. To enable a breathing animation during suspend, see
+Documentation/ABI/testing/sysfs-driver-uniwill-laptop for details.
+
+Keyboard Backlight
+------------------
+
+The ``uniwill-laptop`` driver supports controlling the keyboard backlight using the standard
+LED class interface. The default name of this LED class device is ``uniwill:white:kbd_backlight``
+when the keyboard backlight supports only a single color, or ``uniwill:rgb:kbd_backlight``
+when the keyboard backlight supports RGB colors. The maximum intensity for each color channel
+in RGB mode is 50.
+
+Keep in mind that due to hardware design choices, the driver does not support the RGB value
+``0x000000`` (black), instead it will fall back to ``0x010101`` (faint white). In order to
+disable the keyboard backlight, the standard LED brightness setting has to be used instead.
 
 Configurable TGP
 ----------------
@@ -84,6 +98,20 @@ The ``uniwill-laptop`` driver allows to set the configurable TGP for devices wit
 allow it.
 
 See Documentation/ABI/testing/sysfs-driver-uniwill-laptop for details.
+
+AC Auto Boot
+------------
+
+The ``uniwill-laptop`` driver allows the user to configure if the system should automatically
+boot when being connected to a power source, see
+Documentation/ABI/testing/sysfs-driver-uniwill-laptop for details.
+
+USB Powershare
+--------------
+
+The ``uniwill-laptop`` driver allows the user to configure if the system should continue to
+provide power via the USB ports when hibernating or powered off, see
+Documentation/ABI/testing/sysfs-driver-uniwill-laptop for details.
 
 References
 ==========

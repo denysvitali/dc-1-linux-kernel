@@ -1626,6 +1626,7 @@ static int kvaser_usb_hydra_get_busparams(struct kvaser_usb_net_priv *priv,
 	reinit_completion(&priv->get_busparams_comp);
 
 	err = kvaser_usb_send_cmd(dev, cmd, cmd_len);
+	kfree(cmd);
 	if (err)
 		return err;
 
@@ -1803,7 +1804,7 @@ static int kvaser_usb_hydra_init_channel(struct kvaser_usb_net_priv *priv)
 {
 	struct kvaser_usb_net_hydra_priv *hydra;
 
-	hydra = devm_kzalloc(&priv->dev->intf->dev, sizeof(*hydra), GFP_KERNEL);
+	hydra = devm_kzalloc_obj(&priv->dev->intf->dev, *hydra);
 	if (!hydra)
 		return -ENOMEM;
 

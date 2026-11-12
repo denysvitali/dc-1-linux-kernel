@@ -311,7 +311,7 @@ static void efx_gen_tun_header_udp(struct efx_tc_encap_action *encap, u8 len)
 	encap->encap_hdr_len += sizeof(*udp);
 
 	udp->dest = key->tp_dst;
-	udp->len = cpu_to_be16(sizeof(*udp) + len);
+	udp_set_len_short(udp, sizeof(*udp) + len);
 }
 
 static void efx_gen_tun_header_vxlan(struct efx_tc_encap_action *encap)
@@ -527,10 +527,10 @@ static int efx_neigh_event(struct efx_nic *efx, struct neighbour *n)
 	if (WARN_ON(!efx->tc))
 		return NOTIFY_DONE;
 
-	if (n->tbl == &arp_tbl) {
+	if (n->tbl->family == AF_INET) {
 		keysize = sizeof(keys.dst_ip);
 #if IS_ENABLED(CONFIG_IPV6)
-	} else if (n->tbl == &nd_tbl) {
+	} else if (n->tbl->family == AF_INET6) {
 		ipv6 = true;
 		keysize = sizeof(keys.dst_ip6);
 #endif

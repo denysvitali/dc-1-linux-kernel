@@ -317,6 +317,14 @@
 	status = "okay";
 };
 
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/qcs615/a612_zap.mbn";
+};
+
 &i2c5 {
 	clock-frequency = <400000>;
 	status = "okay";
@@ -358,9 +366,6 @@
 };
 
 &pcie {
-	perst-gpios = <&tlmm 89 GPIO_ACTIVE_LOW>;
-	wake-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;
-
 	pinctrl-0 = <&pcie_default_state>;
 	pinctrl-names = "default";
 
@@ -375,6 +380,8 @@
 };
 
 &pcie_port0 {
+	reset-gpios = <&tlmm 89 GPIO_ACTIVE_LOW>;
+	wake-gpios = <&tlmm 100 GPIO_ACTIVE_LOW>;
 	wifi@0 {
 		compatible = "pci17cb,1103";
 		reg = <0x10000 0x0 0x0 0x0 0x0>;
@@ -403,10 +410,14 @@
 };
 
 &qupv3_id_0 {
+	firmware-name = "qcom/qcs615/qupv3fw.elf";
+
 	status = "okay";
 };
 
 &qupv3_id_1 {
+	firmware-name = "qcom/qcs615/qupv3fw.elf";
+
 	status = "okay";
 };
 
@@ -527,7 +538,7 @@
 		vddbtcmx-supply = <&vreg_pmu_btcmx_0p85>;
 		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
 		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
-		vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
+		vddrfa1p7-supply = <&vreg_pmu_rfa_1p7>;
 	};
 };
 
@@ -589,8 +600,8 @@
 };
 
 &usb_qmpphy_2 {
-	vdda-phy-supply = <&vreg_l11a>;
-	vdda-pll-supply = <&vreg_l5a>;
+	vdda-phy-supply = <&vreg_l5a>;
+	vdda-pll-supply = <&vreg_l11a>;
 
 	status = "okay";
 };

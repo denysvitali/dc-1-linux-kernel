@@ -319,7 +319,9 @@ static bool pn533_acr122_is_rx_frame_valid(void *_frame, struct pn533 *dev)
 	if (frame->ccid.type != 0x83)
 		return false;
 
-	if (!frame->ccid.datalen)
+	if (frame->ccid.datalen < 2 ||
+	    frame->ccid.datalen > PN533_ACR122_FRAME_MAX_PAYLOAD_LEN +
+	    PN533_ACR122_RX_FRAME_TAIL_LEN)
 		return false;
 
 	if (frame->data[frame->ccid.datalen - 2] == 0x63)
@@ -488,7 +490,7 @@ static int pn533_usb_probe(struct usb_interface *interface,
 			 PN533_STD_FRAME_TAIL_LEN;
 	int rc;
 
-	phy = devm_kzalloc(&interface->dev, sizeof(*phy), GFP_KERNEL);
+	phy = devm_kzalloc_obj(&interface->dev, *phy);
 	if (!phy)
 		return -ENOMEM;
 

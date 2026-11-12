@@ -1171,7 +1171,7 @@ static int ncm_unwrap_ntb(struct gether *port,
 	unsigned char	*ntb_ptr = skb->data;
 	__le16		*tmp;
 	unsigned	index, index2;
-	int		ndp_index;
+	unsigned int	ndp_index;
 	unsigned	dg_len, dg_len2;
 	unsigned	ndp_len;
 	unsigned	block_len;
@@ -1457,7 +1457,7 @@ static int ncm_bind(struct usb_configuration *c, struct usb_function *f)
 	ncm_opts = container_of(f->fi, struct f_ncm_opts, func_inst);
 
 	if (cdev->use_os_string) {
-		os_desc_table = kzalloc(sizeof(*os_desc_table), GFP_KERNEL);
+		os_desc_table = kzalloc_obj(*os_desc_table);
 		if (!os_desc_table)
 			return -ENOMEM;
 	}
@@ -1766,7 +1766,7 @@ static struct usb_function *ncm_alloc(struct usb_function_instance *fi)
 	int status;
 
 	/* allocate and initialize one new instance */
-	ncm = kzalloc(sizeof(*ncm), GFP_KERNEL);
+	ncm = kzalloc_obj(*ncm);
 	if (!ncm)
 		return ERR_PTR(-ENOMEM);
 

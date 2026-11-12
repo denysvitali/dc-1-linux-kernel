@@ -52,7 +52,15 @@ __msg("('global_calls_good_only') is global and assumed valid.")
 /* eventually global_good() is transitively validated as well */
 __msg("Validating global_good() func")
 __msg("('global_good') is safe for any args that match its prototype")
-__msg("insns processed {{[0-9]+\\+[0-9]+\\+[0-9]+$}}")
+__msg("subprog 0 (chained_global_func_calls_success) main insns_self 7 insns_total 7 stack")
+__msg("subprog {{[0-9]+}} (global_calls_good_only) global insns_self 2 insns_total 2 stack")
+#if defined(__BPF_CPU_VERSION__) && __BPF_CPU_VERSION__ >= 4
+__msg("subprog {{[0-9]+}} (global_good) global insns_self 3 insns_total 3 stack")
+__msg("processed 12 insns")
+#else
+__msg("subprog {{[0-9]+}} (global_good) global insns_self 5 insns_total 5 stack")
+__msg("processed 14 insns")
+#endif
 int chained_global_func_calls_success(void)
 {
 	int sum = 0;
@@ -187,7 +195,7 @@ int arg_tag_nonnull_ptr_good(void *ctx)
 
 SEC("?raw_tp")
 __failure __log_level(2)
-__msg("R1 is expected to be non-NULL")
+__msg("Possibly NULL pointer passed to trusted R1")
 int arg_tag_nonnull_ptr_null_bad(void *ctx)
 {
 	int y = 74;
@@ -526,6 +534,38 @@ int return_from_void_global(struct __sk_buff *skb)
 	);
 
 	return 0;
+}
+
+int global_calls_loop(int x);
+
+static __noinline void static_calls_global(int x)
+{
+	global_calls_loop(x);
+}
+
+static __noinline int loop_cb_calls_static(u32 i, void *ctx)
+{
+	static_calls_global(i);
+	return 0;
+}
+
+__noinline int global_calls_loop(int x)
+{
+	bpf_loop(1, loop_cb_calls_static, NULL, 0);
+	return 0;
+}
+
+/*
+ * loop_cb_calls_static() -> static_calls_global() -> global_calls_loop() ->
+ * bpf_loop() -> loop_cb_calls_static() is an unbounded recursion that the
+ * main verification pass can't see, because it doesn't follow calls of global
+ * functions. None of the functions use stack.
+ */
+SEC("?raw_tp")
+__failure __msg("recursive call from global_calls_loop() to loop_cb_calls_static()")
+int recursion_via_global_func_and_callback(const void *ctx)
+{
+	return loop_cb_calls_static(0, NULL);
 }
 
 char _license[] SEC("license") = "GPL";

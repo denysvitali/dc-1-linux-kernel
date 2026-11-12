@@ -222,13 +222,6 @@ ndo_stop:
 	Context: process
 	Note: netif_running() is guaranteed false
 
-ndo_do_ioctl:
-	Synchronization: rtnl_lock() semaphore.
-
-	This is only called by network subsystems internally,
-	not by user space calling ioctl as it was in before
-	linux-5.14.
-
 ndo_siocbond:
 	Synchronization: rtnl_lock() semaphore. In addition, netdev instance
 	lock if the driver implements queue management or shaper API.
@@ -292,15 +285,21 @@ ndo_set_rx_mode:
 	in process context.
 
 ndo_set_rx_mode_async:
-	Synchronization: rtnl_lock() semaphore. In addition, netdev instance
-	lock if the driver implements queue management or shaper API.
+	Synchronization: netdev instance lock for "ops locked" drivers,
+	rtnl_lock() semaphore for all other drivers.
 	Context: process (from a work queue)
 	Notes: Async version of ndo_set_rx_mode which runs in process
 	context. Receives snapshots of the unicast and multicast address lists.
 
 ndo_change_rx_flags:
-	Synchronization: rtnl_lock() semaphore. In addition, netdev instance
-	lock if the driver implements queue management or shaper API.
+	Synchronization: netdev instance lock for "ops locked" drivers,
+	rtnl_lock() semaphore for all other drivers.
+
+ndo_work:
+	Synchronization: netdev instance lock for "ops locked" drivers,
+	rtnl_lock() semaphore for all other drivers.
+	Context: process (from a work queue)
+	Notes: Runs deferred work scheduled with netdev_work_sched().
 
 ndo_setup_tc:
 	Locking depends on ``tc_setup_type``. For most types the callback
@@ -421,9 +420,16 @@ running under the lock:
 * ``NETDEV_CHANGENAME``
 * ``NETDEV_REGISTER``
 * ``NETDEV_UP``
+* ``NETDEV_DOWN``
+* ``NETDEV_GOING_DOWN``
 
 The following notifiers are running without the lock:
 * ``NETDEV_UNREGISTER``
+
+Many SW devices (uppers) catch their lower's ``NETDEV_UNREGISTER``
+events and may interact with them via ``dev_*()`` handlers, which take
+the instance lock. Until we convert these devices to ``netif_*()`` variants,
+``NETDEV_UNREGISTER`` stays unlocked.
 
 There are no clear expectations for the remaining notifiers. Notifiers not on
 the list may run with or without the instance lock, potentially even invoking

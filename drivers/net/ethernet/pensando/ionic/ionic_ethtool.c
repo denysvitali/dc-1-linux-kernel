@@ -655,15 +655,9 @@ static int ionic_cmb_rings_toggle(struct ionic_lif *lif, bool cmb_tx, bool cmb_r
 	if (pages_used < 0)
 		return pages_used;
 
-	if (cmb_tx)
-		set_bit(IONIC_LIF_F_CMB_TX_RINGS, lif->state);
-	else
-		clear_bit(IONIC_LIF_F_CMB_TX_RINGS, lif->state);
+	assign_bit(IONIC_LIF_F_CMB_TX_RINGS, lif->state, cmb_tx);
 
-	if (cmb_rx)
-		set_bit(IONIC_LIF_F_CMB_RX_RINGS, lif->state);
-	else
-		clear_bit(IONIC_LIF_F_CMB_RX_RINGS, lif->state);
+	assign_bit(IONIC_LIF_F_CMB_RX_RINGS, lif->state, cmb_rx);
 
 	if (cmb_tx || cmb_rx)
 		netdev_info(lif->netdev, "Enabling CMB %s %s rings - %d pages\n",
@@ -1041,10 +1035,14 @@ static int ionic_get_ts_info(struct net_device *netdev,
 
 	info->phc_index = ptp_clock_index(lif->phc->ptp);
 
-	info->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE |
-				SOF_TIMESTAMPING_TX_HARDWARE |
-				SOF_TIMESTAMPING_RX_HARDWARE |
-				SOF_TIMESTAMPING_RAW_HARDWARE;
+	info->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE;
+
+	if (!(lif->hw_features & IONIC_ETH_HW_TIMESTAMP))
+		return 0;
+
+	info->so_timestamping |= SOF_TIMESTAMPING_TX_HARDWARE |
+				 SOF_TIMESTAMPING_RX_HARDWARE |
+				 SOF_TIMESTAMPING_RAW_HARDWARE;
 
 	/* tx modes */
 

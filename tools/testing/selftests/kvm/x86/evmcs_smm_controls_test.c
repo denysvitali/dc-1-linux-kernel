@@ -22,9 +22,6 @@
 
 #define SYNC_PORT	0xe
 
-#define STR(x) #x
-#define XSTR(s) STR(s)
-
 /*
  * SMI handler: runs in real-address mode.
  * Reports SMRAM_STAGE via port IO, then does RSM.
@@ -37,7 +34,7 @@ static u8 smi_handler[] = {
 
 static inline void sync_with_host(u64 phase)
 {
-	asm volatile("in $" XSTR(SYNC_PORT) ", %%al \n"
+	asm volatile("in $" __stringify(SYNC_PORT) ", %%al \n"
 		     : "+a" (phase));
 }
 
@@ -52,20 +49,17 @@ static void l2_guest_code(void)
 static void guest_code(struct vmx_pages *vmx_pages,
 		       struct hyperv_test_pages *hv_pages)
 {
-#define L2_GUEST_STACK_SIZE 64
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 
 	/* Set up Hyper-V enlightenments and eVMCS */
 	wrmsr(HV_X64_MSR_GUEST_OS_ID, HYPERV_LINUX_OS_ID);
 	enable_vp_assist(hv_pages->vp_assist_gpa, hv_pages->vp_assist);
 	evmcs_enable();
 
-	GUEST_ASSERT(prepare_for_vmx_operation(vmx_pages));
-	GUEST_ASSERT(load_evmcs(hv_pages));
-	prepare_vmcs(vmx_pages, l2_guest_code,
-		     &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	prepare_for_vmx_operation(vmx_pages);
+	load_evmcs(hv_pages);
+	prepare_vmcs(vmx_pages, l2_guest_code);
 
-	GUEST_ASSERT(!vmlaunch());
+	vmlaunch();
 
 	/* L2 exits via vmcall if test fails */
 	sync_with_host(2);

@@ -47,6 +47,7 @@ description: |
       For PM8150, smps1 - smps10, ldo1 - ldo18
       For PM8150L, smps1 - smps8, ldo1 - ldo11, bob, flash, rgb
       For PM8350, smps1 - smps12, ldo1 - ldo10
+      For PM8350B, ldo1
       For PM8350C, smps1 - smps10, ldo1 - ldo13, bob
       For PM8450, smps1 - smps6, ldo1 - ldo4
       For PM8550, smps1 - smps6, ldo1 - ldo17, bob1 - bob2
@@ -82,6 +83,7 @@ properties:
       - qcom,pm8150-rpmh-regulators
       - qcom,pm8150l-rpmh-regulators
       - qcom,pm8350-rpmh-regulators
+      - qcom,pm8350b-rpmh-regulators
       - qcom,pm8350c-rpmh-regulators
       - qcom,pm8450-rpmh-regulators
       - qcom,pm8550-rpmh-regulators
@@ -184,6 +186,22 @@ allOf:
         vdd-l9-l10-supply: true
       patternProperties:
         "^vdd-s[1-8]-supply$": true
+
+  - if:
+      properties:
+        compatible:
+          enum:
+            - qcom,pm6350-rpmh-regulators
+    then:
+      properties:
+        vdd-l2-l5-l7-supply: true
+        vdd-l3-l6-l8-l9-l10-supply: true
+        vdd-l12-l14-supply: true
+        vdd-l15-l19-l22-supply: true
+        vdd-l18-l20-l21-supply: true
+      patternProperties:
+        "^vdd-l([14]|1[1367])-supply$": true
+        "^vdd-s[1-6]-supply$": true
 
   - if:
       properties:
@@ -336,6 +354,15 @@ allOf:
         vdd-l8-supply: true
       patternProperties:
         "^vdd-s([1-9]|1[0-2])-supply$": true
+
+  - if:
+      properties:
+        compatible:
+          enum:
+            - qcom,pm8350b-rpmh-regulators
+    then:
+      properties:
+        vdd-l1-supply: true
 
   - if:
       properties:

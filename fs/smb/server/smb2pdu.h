@@ -61,10 +61,82 @@ struct preauth_integrity_info {
 #define SMB2_SESSION_IN_PROGRESS	BIT(0)
 #define SMB2_SESSION_VALID		BIT(1)
 
-#define SMB2_SESSION_TIMEOUT		(10 * HZ)
-
 /* Apple Defined Contexts */
 #define SMB2_CREATE_AAPL		"AAPL"
+
+/*
+ * AAPL SMB2 extension -- kAAPL_SERVER_QUERY create context.
+ *
+ * Command code and bitmap values are the existing
+ * SMB2_CRTCTX_AAPL_* constants in fs/smb/common/smb2pdu.h.
+ *
+ * Omitting the model string when reply_bitmap includes
+ * SMB2_CRTCTX_AAPL_MODEL_INFO causes smbfs.kext to enter a broken
+ * disconnect path requiring a reboot.
+ *
+ * Layout: ccontext(16) + Name[4] + Pad[4] + cmd(4) + reserved(4) +
+ *         reply_bitmap(8) + server_caps(8) + vol_caps(8)
+ * When MODEL_INFO requested, appended: pad2(4) + model_bytes(4) + UTF-16LE
+ */
+#define SMB2_CREATE_AAPL_LEN	4
+
+/*
+ * Server capability flags (server_caps field) -- SMB2_CRTCTX_AAPL_UNIX_BASED:
+ * prevents macOS Windows-compat mode (question-mark icons).
+ * SMB2_CRTCTX_AAPL_SUPPORTS_OSX_COPYFILE: enables server-side file copy via
+ * FSCTL_SRV_COPYCHUNK. SMB2_CRTCTX_AAPL_SUPPORTS_READ_DIR_ATTR: inline
+ * FinderInfo per FIND entry, set when client also advertises the bit;
+ * format: EaSize=max_access, ShortName[0..7]=rfork_size,
+ * ShortName[8..23]=FinderInfo(16B), Reserved2=unix_mode.
+ */
+#define AAPL_SERVER_CAPS_KSMBD	(SMB2_CRTCTX_AAPL_UNIX_BASED | \
+				 SMB2_CRTCTX_AAPL_SUPPORTS_OSX_COPYFILE | \
+				 SMB2_CRTCTX_AAPL_SUPPORTS_READ_DIR_ATTR)
+
+/*
+ * READDIR_ATTR_V2 (SMB2_CRTCTX_AAPL_SUPPORTS_READ_DIR_ATTR_V2, see
+ * fs/smb/common/smb2pdu.h) extends the same inline-FinderInfo mechanism
+ * above with a flags field, confirmed byte-identical to V1 otherwise
+ * against AAPL's actual public client behavior. When a client's own
+ * client_caps requests V2, the server advertises V2 instead of V1 in
+ * its own server_caps reply; V1 and V2 are mutually exclusive on the
+ * wire, not both set together. The wire format's ShortNameLength+Reserved
+ * (ignored in V1) become a single flags field in V2 --
+ * AAPL_READDIR_ATTR_V2_NO_XATTR is the only flag bit currently defined,
+ * signaling the item has no xattrs/streams so the client can skip a
+ * separate query.
+ */
+#define AAPL_READDIR_ATTR_V2_NO_XATTR	0x01
+
+/* Model string: up to 31 ASCII chars */
+#define AAPL_MODEL_MAX_CHARS	31
+#define AAPL_MODEL_UTF16_BYTES	(AAPL_MODEL_MAX_CHARS * 2)
+
+/*
+ * Max AAPL response: header(24) + base data(32) + pad2(4) + model_bytes(4)
+ * + model(62), 8-byte aligned: ALIGN(126, 8) = 128 bytes.
+ */
+#define AAPL_RSP_MAX_SIZE	128
+
+/* AAPL server query request (client->server) */
+struct aapl_server_query_req {
+	__le32 cmd;
+	__le32 reserved;
+	__le64 req_bitmap;
+	__le64 client_caps;
+} __packed;
+
+struct create_aapl_rsp {
+	struct create_context_hdr ccontext;
+	__u8   Name[4];
+	__u8   Pad[4];
+	__le32 cmd;
+	__le32 reserved;
+	__le64 reply_bitmap;
+	__le64 server_caps;
+	__le64 vol_caps;
+	/* when MODEL_INFO requested: __le32 pad2; __le32 model_bytes; __le16 model[] */
+} __packed;
 
 #define DURABLE_HANDLE_MAX_TIMEOUT	300000
 
@@ -84,8 +156,7 @@ struct create_durable_rsp {
 } __packed;
 
 /*
- * See POSIX-SMB2 2.2.14.2.16
- * Link: https://gitlab.com/samba-team/smb3-posix-spec/-/blob/master/smb3_posix_extensions.md
+ * See POSIX-SMB2 2.1.3.2.1
  */
 struct create_posix_rsp {
 	struct create_context_hdr ccontext;
@@ -96,6 +167,8 @@ struct create_posix_rsp {
 	/* SidBuffer contain two sids(Domain sid(28), UNIX group sid(16)) */
 	u8 SidBuffer[44];
 } __packed;
+
+__le32 smb2_get_reparse_tag_special_file(umode_t mode);
 
 #define SMB2_0_IOCTL_IS_FSCTL 0x00000001
 
@@ -127,7 +200,7 @@ struct file_sparse {
 #define FILE_INTERNAL_INFORMATION_SIZE        8
 #define FILE_EA_INFORMATION_SIZE              4
 #define FILE_ACCESS_INFORMATION_SIZE          4
-#define FILE_NAME_INFORMATION_SIZE            9
+#define FILE_NAME_INFORMATION_SIZE            8
 #define FILE_RENAME_INFORMATION_SIZE          10
 #define FILE_LINK_INFORMATION_SIZE            11
 #define FILE_NAMES_INFORMATION_SIZE           12
@@ -139,7 +212,6 @@ struct file_sparse {
 #define FILE_ALL_INFORMATION_SIZE             104
 #define FILE_ALLOCATION_INFORMATION_SIZE      19
 #define FILE_END_OF_FILE_INFORMATION_SIZE     20
-#define FILE_ALTERNATE_NAME_INFORMATION_SIZE  8
 #define FILE_STREAM_INFORMATION_SIZE          32
 #define FILE_PIPE_INFORMATION_SIZE            23
 #define FILE_PIPE_LOCAL_INFORMATION_SIZE      24
@@ -186,7 +258,7 @@ struct smb2_file_alignment_info {
 	__le32 AlignmentRequirement;
 } __packed;
 
-struct smb2_file_alt_name_info {
+struct smb2_file_name_info {
 	__le32 FileNameLength;
 	char FileName[];
 } __packed;
@@ -197,6 +269,13 @@ struct smb2_file_stream_info {
 	__le64 StreamSize;
 	__le64 StreamAllocationSize;
 	char   StreamName[];
+} __packed;
+
+struct srv_snapshot_array {
+	__le32 NumberOfSnapShots;
+	__le32 NumberOfSnapShotsReturned;
+	__le32 SnapShotArraySize;
+	__le32 Reserved;
 } __packed;
 
 struct smb2_file_standard_info {
@@ -271,6 +350,7 @@ struct create_sd_buf_req {
 	struct smb_ntsd ntsd;
 } __packed;
 
+/* See POSIX-FSCC 2.2.1 */
 struct smb2_posix_info {
 	__le32 NextEntryOffset;
 	__u32 Ignored;
@@ -284,20 +364,18 @@ struct smb2_posix_info {
 	__le64 Inode;
 	__le32 DeviceId;
 	__le32 Zero;
-	/* beginning of POSIX Create Context Response */
+	/*
+	 * Beginning of POSIX Create Context Response
+	 * See POSIX-SMB2 2.1.3.2.1
+	 */
 	__le32 HardLinks;
 	__le32 ReparseTag;
 	__le32 Mode;
 	/* SidBuffer contain two sids (UNIX user sid(16), UNIX group sid(16)) */
 	u8 SidBuffer[32];
+	/* End of POSIX Create Context Response */
 	__le32 name_len;
 	u8 name[];
-	/*
-	 * var sized owner SID
-	 * var sized group SID
-	 * le32 filenamelength
-	 * u8  filename[]
-	 */
 } __packed;
 
 /* functions */
@@ -317,6 +395,7 @@ bool is_smb2_rsp(struct ksmbd_work *work);
 u16 get_smb2_cmd_val(struct ksmbd_work *work);
 void set_smb2_rsp_status(struct ksmbd_work *work, __le32 err);
 int init_smb2_rsp_hdr(struct ksmbd_work *work);
+bool smb2_check_compound_fid(struct ksmbd_work *work);
 int smb2_allocate_rsp_buf(struct ksmbd_work *work);
 bool is_chained_smb2_message(struct ksmbd_work *work);
 int init_smb2_neg_rsp(struct ksmbd_work *work);
@@ -340,6 +419,7 @@ struct channel *lookup_chann_list(struct ksmbd_session *sess,
 void smb3_preauth_hash_rsp(struct ksmbd_work *work);
 bool smb3_is_transform_hdr(void *buf);
 int smb3_decrypt_req(struct ksmbd_work *work);
+int ksmbd_check_transform_session(struct ksmbd_work *work, u64 tr_sess_id);
 int smb3_encrypt_resp(struct ksmbd_work *work);
 bool smb3_11_final_sess_setup_resp(struct ksmbd_work *work);
 int smb2_set_rsp_credits(struct ksmbd_work *work);
@@ -347,6 +427,7 @@ bool smb3_encryption_negotiated(struct ksmbd_conn *conn);
 
 /* smb2 misc functions */
 int ksmbd_smb2_check_message(struct ksmbd_work *work);
+void smb2_complete_request_open(struct ksmbd_work *work);
 
 /* smb2 command handlers */
 int smb2_handle_negotiate(struct ksmbd_work *work);

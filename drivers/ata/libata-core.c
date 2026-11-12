@@ -434,6 +434,7 @@ static void ata_force_link_limits(struct ata_link *link)
  */
 static void ata_force_xfermask(struct ata_device *dev)
 {
+	struct ata_port *ap = dev->link->ap;
 	int devno = dev->link->pmp + dev->devno;
 	int alt_devno = devno;
 	int i;
@@ -458,6 +459,17 @@ static void ata_force_xfermask(struct ata_device *dev)
 
 		ata_unpack_xfermask(fe->param.xfer_mask,
 				    &pio_mask, &mwdma_mask, &udma_mask);
+
+		/* Make sure that the port supports the specified xfer modes. */
+		if (!(pio_mask & ap->pio_mask) &&
+		    !(mwdma_mask & ap->mwdma_mask) &&
+		    !(udma_mask & ap->udma_mask)) {
+			ata_dev_warn(dev,
+				     "FORCE: ignoring unsupported xfer_mask %s\n",
+				     fe->param.name);
+			continue;
+		}
+
 		if (udma_mask)
 			dev->udma_mask = udma_mask;
 		else if (mwdma_mask) {
@@ -2047,6 +2059,10 @@ void ata_dev_power_set_standby(struct ata_device *dev)
 	struct ata_taskfile tf;
 	unsigned int err_mask;
 
+	/* Issue STANDBY IMMEDIATE command only if supported by the device */
+	if (!ata_dev_power_init_tf(dev, &tf, false))
+		return;
+
 	/* If the device is already sleeping or in standby, do nothing. */
 	if ((dev->flags & ATA_DFLAG_SLEEPING) ||
 	    !ata_dev_power_is_active(dev))
@@ -2063,10 +2079,6 @@ void ata_dev_power_set_standby(struct ata_device *dev)
 
 	if ((ap_flags & ATA_FLAG_NO_HIBERNATE_SPINDOWN) &&
 	    system_entering_hibernation())
-		return;
-
-	/* Issue STANDBY IMMEDIATE command only if supported by the device */
-	if (!ata_dev_power_init_tf(dev, &tf, false))
 		return;
 
 	ata_dev_notice(dev, "Entering standby power mode\n");
@@ -2488,7 +2500,7 @@ static void ata_dev_config_sense_reporting(struct ata_device *dev)
 	}
 }
 
-static void ata_dev_config_zac(struct ata_device *dev)
+static void ata_dev_config_zoned(struct ata_device *dev)
 {
 	unsigned int err_mask;
 	u8 *identify_buf = dev->sector_buf;
@@ -2497,7 +2509,7 @@ static void ata_dev_config_zac(struct ata_device *dev)
 	dev->zac_zones_optimal_nonseq = U32_MAX;
 	dev->zac_zones_max_open = U32_MAX;
 
-	if (!ata_dev_is_zac(dev))
+	if (!ata_dev_is_zoned(dev))
 		return;
 
 	if (!ata_identify_page_supported(dev, ATA_LOG_ZONED_INFORMATION)) {
@@ -2705,6 +2717,71 @@ not_supported:
 	ata_dev_cleanup_cdl_resources(dev);
 }
 
+static void ata_dev_config_depop(struct ata_device *dev)
+{
+	unsigned int err_mask;
+	u64 val;
+
+	/* Ignore old drives. */
+	if (ata_id_major_version(dev->id) < 11)
+		goto not_supported;
+
+	/* NCQ Autosense is required. */
+	if (!ata_identify_page_supported(dev, ATA_LOG_SUPPORTED_CAPABILITIES) ||
+	    !ata_id_has_ncq_autosense(dev->id))
+		goto not_supported;
+
+	err_mask = ata_read_log_page(dev, ATA_LOG_IDENTIFY_DEVICE,
+				     ATA_LOG_SUPPORTED_CAPABILITIES,
+				     dev->sector_buf, 1);
+	if (err_mask)
+		goto not_supported;
+
+	/* Check depopulation capabilities bits. */
+	val = get_unaligned_le64(&dev->sector_buf[152]);
+	if (!(val & BIT_ULL(63)))
+		goto not_supported;
+
+	/*
+	 * Support for at least the GET PHYSICAL ELEMENT STATUS and
+	 * REMOVE ELEMENT AND TRUNCATE commands is mandated.
+	 */
+	if (!(val & BIT_ULL(0)) || !(val & BIT_ULL(1)))
+		goto not_supported;
+
+	dev->flags |= ATA_DFLAG_DEPOP;
+
+	/* Check if RESTORE ELEMENTS AND REBUILD is supported. */
+	if (val & BIT_ULL(2))
+		dev->flags |= ATA_DFLAG_DEPOP_RESTORE;
+
+	/*
+	 * For ZAC devices, check if REMOVE ELEMENT AND MODIFY ZONES is
+	 * supported.
+	 */
+	if (dev->class != ATA_DEV_ZAC)
+		return;
+
+	err_mask = ata_read_log_page(dev, ATA_LOG_IDENTIFY_DEVICE,
+				     ATA_LOG_ZONED_INFORMATION,
+				     dev->sector_buf, 1);
+	if (err_mask)
+		return;
+
+	val = get_unaligned_le64(&dev->sector_buf[8]);
+	if (!(val & BIT_ULL(63)))
+		return;
+
+	if (val & BIT_ULL(1))
+		dev->flags |= ATA_DFLAG_DEPOP_MODIFY;
+
+	return;
+
+not_supported:
+	dev->flags &= ~(ATA_DFLAG_DEPOP | ATA_DFLAG_DEPOP_RESTORE |
+			ATA_DFLAG_DEPOP_MODIFY);
+}
+
 static int ata_dev_config_lba(struct ata_device *dev)
 {
 	const u16 *id = dev->id;
@@ -2907,9 +2984,10 @@ static void ata_dev_config_lpm(struct ata_device *dev)
 		    (dev->id[ATA_ID_SATA_CAPABILITY] & 0xe) == 0x2)
 			dev->quirks |= ATA_QUIRK_NOLPM;
 
-		/* ATI specific quirk */
-		if ((dev->quirks & ATA_QUIRK_NO_LPM_ON_ATI) &&
-		    ata_dev_check_adapter(dev, PCI_VENDOR_ID_ATI))
+		/* ATI and AMD specific quirk */
+		if ((dev->quirks & ATA_QUIRK_NO_LPM_ON_ATI_AND_AMD) &&
+		    (ata_dev_check_adapter(dev, PCI_VENDOR_ID_ATI) ||
+		     ata_dev_check_adapter(dev, PCI_VENDOR_ID_AMD)))
 			dev->quirks |= ATA_QUIRK_NOLPM;
 	}
 
@@ -2942,7 +3020,7 @@ static void ata_dev_print_features(struct ata_device *dev)
 		return;
 
 	ata_dev_info(dev,
-		     "Features:%s%s%s%s%s%s%s%s%s%s\n",
+		     "Features:%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
 		     dev->flags & ATA_DFLAG_FUA ? " FUA" : "",
 		     dev->flags & ATA_DFLAG_TRUSTED ? " Trust" : "",
 		     dev->flags & ATA_DFLAG_DA ? " Dev-Attention" : "",
@@ -2952,7 +3030,10 @@ static void ata_dev_print_features(struct ata_device *dev)
 		     dev->flags & ATA_DFLAG_NCQ_SEND_RECV ? " NCQ-sndrcv" : "",
 		     dev->flags & ATA_DFLAG_NCQ_PRIO ? " NCQ-prio" : "",
 		     dev->flags & ATA_DFLAG_CDL ? " CDL" : "",
-		     dev->cpr_log ? " CPR" : "");
+		     dev->cpr_log ? " CPR" : "",
+		     dev->flags & ATA_DFLAG_DEPOP ? " Depop" : "",
+		     dev->flags & ATA_DFLAG_DEPOP_RESTORE ? " Depop-Restore" : "",
+		     dev->flags & ATA_DFLAG_DEPOP_MODIFY ? " Depop-Modify" : "");
 }
 
 /**
@@ -3111,10 +3192,11 @@ int ata_dev_configure(struct ata_device *dev)
 		ata_dev_config_fua(dev);
 		ata_dev_config_devslp(dev);
 		ata_dev_config_sense_reporting(dev);
-		ata_dev_config_zac(dev);
+		ata_dev_config_zoned(dev);
 		ata_dev_config_trusted(dev);
 		ata_dev_config_cpr(dev);
 		ata_dev_config_cdl(dev);
+		ata_dev_config_depop(dev);
 		dev->cdb_len = 32;
 
 		if (print_info)
@@ -4067,7 +4149,7 @@ static const char * const ata_quirk_names[] = {
 	[__ATA_QUIRK_MAX_SEC]		= "maxsec",
 	[__ATA_QUIRK_MAX_TRIM_128M]	= "maxtrim128m",
 	[__ATA_QUIRK_NO_NCQ_ON_ATI]	= "noncqonati",
-	[__ATA_QUIRK_NO_LPM_ON_ATI]	= "nolpmonati",
+	[__ATA_QUIRK_NO_LPM_ON_ATI_AND_AMD] = "nolpmonatiandamd",
 	[__ATA_QUIRK_NO_ID_DEV_LOG]	= "noiddevlog",
 	[__ATA_QUIRK_NO_LOG_DIR]	= "nologdir",
 	[__ATA_QUIRK_NO_FUA]		= "nofua",
@@ -4253,7 +4335,8 @@ static const struct ata_dev_quirks_entry __ata_dev_quirks[] = {
 	{ "MAXTOR 6L080L4",	"A93.0500",	ATA_QUIRK_BROKEN_HPA },
 
 	/* this one allows HPA unlocking but fails IOs on the area */
-	{ "OCZ-VERTEX",		    "1.30",	ATA_QUIRK_BROKEN_HPA },
+	{ "OCZ-VERTEX",		    "1.30",	ATA_QUIRK_BROKEN_HPA |
+						ATA_QUIRK_NO_FUA },
 
 	/* Devices which report 1 sector over size HPA */
 	{ "ST340823A",		NULL,		ATA_QUIRK_HPA_SIZE },
@@ -4351,15 +4434,15 @@ static const struct ata_dev_quirks_entry __ata_dev_quirks[] = {
 	{ "Samsung SSD 860*",		NULL,	ATA_QUIRK_NO_NCQ_TRIM |
 						ATA_QUIRK_ZERO_AFTER_TRIM |
 						ATA_QUIRK_NO_NCQ_ON_ATI |
-						ATA_QUIRK_NO_LPM_ON_ATI },
+						ATA_QUIRK_NO_LPM_ON_ATI_AND_AMD },
 	{ "Samsung SSD 870*",		NULL,	ATA_QUIRK_NO_NCQ_TRIM |
 						ATA_QUIRK_ZERO_AFTER_TRIM |
 						ATA_QUIRK_NO_NCQ_ON_ATI |
-						ATA_QUIRK_NO_LPM_ON_ATI },
+						ATA_QUIRK_NO_LPM_ON_ATI_AND_AMD },
 	{ "SAMSUNG*MZ7LH*",		NULL,	ATA_QUIRK_NO_NCQ_TRIM |
 						ATA_QUIRK_ZERO_AFTER_TRIM |
 						ATA_QUIRK_NO_NCQ_ON_ATI |
-						ATA_QUIRK_NO_LPM_ON_ATI },
+						ATA_QUIRK_NO_LPM_ON_ATI_AND_AMD },
 	{ "FCCT*M500*",			NULL,	ATA_QUIRK_NO_NCQ_TRIM |
 						ATA_QUIRK_ZERO_AFTER_TRIM },
 
@@ -4389,6 +4472,8 @@ static const struct ata_dev_quirks_entry __ata_dev_quirks[] = {
 	{ "Crucial*",			NULL,	ATA_QUIRK_ZERO_AFTER_TRIM },
 	{ "INTEL SSDSC2KG480G8", "XCV10120",	ATA_QUIRK_ZERO_AFTER_TRIM |
 						ATA_QUIRK_MAX_SEC },
+	{ "INTEL*SSDSC2CT*",		NULL,	ATA_QUIRK_ZERO_AFTER_TRIM |
+						ATA_QUIRK_NO_FUA },
 	{ "INTEL*SSD*",			NULL,	ATA_QUIRK_ZERO_AFTER_TRIM },
 	{ "SSD*INTEL*",			NULL,	ATA_QUIRK_ZERO_AFTER_TRIM },
 	{ "Samsung*SSD*",		NULL,	ATA_QUIRK_ZERO_AFTER_TRIM },
@@ -4409,9 +4494,20 @@ static const struct ata_dev_quirks_entry __ata_dev_quirks[] = {
 	{ "WDC WD1200JD-*",		NULL,	ATA_QUIRK_WD_BROKEN_LPM },
 	{ "WDC WD1600JD-*",		NULL,	ATA_QUIRK_WD_BROKEN_LPM },
 	{ "WDC WD2000JD-*",		NULL,	ATA_QUIRK_WD_BROKEN_LPM },
-	{ "WDC WD2500JD-*",		NULL,	ATA_QUIRK_WD_BROKEN_LPM },
+	{ "WDC WD2500JD-*",		NULL,	ATA_QUIRK_WD_BROKEN_LPM |
+						ATA_QUIRK_NO_FUA },
 	{ "WDC WD3000JD-*",		NULL,	ATA_QUIRK_WD_BROKEN_LPM },
 	{ "WDC WD3200JD-*",		NULL,	ATA_QUIRK_WD_BROKEN_LPM },
+
+	/*
+	 * WD drives with LPM issues (irrespective of supported SATA speeds).
+	 * (Unlike ATA_QUIRK_WD_BROKEN_LPM, which is only applied if the drive
+	 * exposes SATA Gen1 speed support, and SATA Gen1 speed support only.)
+	 */
+	{ "WDC WD100EFGX-68CPLN0",	NULL,	ATA_QUIRK_NOLPM },
+	{ "WDC WD102KFBX-68M95N0",	NULL,	ATA_QUIRK_NOLPM },
+	{ "WDC WD141KFGX-68FH9N0",	NULL,	ATA_QUIRK_NOLPM },
+	{ "WD Green 2.5 480GB",		NULL,	ATA_QUIRK_NOLPM },
 
 	/*
 	 * This sata dom device goes on a walkabout when the ATA_LOG_DIRECTORY
@@ -4424,7 +4520,6 @@ static const struct ata_dev_quirks_entry __ata_dev_quirks[] = {
 	{ "Maxtor",		"BANC1G10",	ATA_QUIRK_NO_FUA },
 	{ "WDC*WD2500J*",	NULL,		ATA_QUIRK_NO_FUA },
 	{ "OCZ-VERTEX*",	NULL,		ATA_QUIRK_NO_FUA },
-	{ "INTEL*SSDSC2CT*",	NULL,		ATA_QUIRK_NO_FUA },
 
 	/* End Marker */
 	{ }
@@ -6049,6 +6144,46 @@ int ata_host_start(struct ata_host *host)
 EXPORT_SYMBOL_GPL(ata_host_start);
 
 /**
+ *	ata_host_undo_start - undo ata_host_start()
+ *	@host: ATA host to undo_start
+ *
+ *	Stop the ports of @host and drop the devres action registered by
+ *	ata_host_start(), without calling ->host_stop().  Nothing is done if
+ *	@host has not been started.
+ *
+ *	This gives the release of the host resources back to the caller, which
+ *	is what a driver whose probe() error path releases those resources
+ *	itself needs when starting or activating the host fails.
+ *
+ *	LOCKING:
+ *	Inherited from calling layer (may sleep).
+ */
+void ata_host_undo_start(struct ata_host *host)
+{
+	int i;
+
+	if (!(host->flags & ATA_HOST_STARTED))
+		return;
+
+	for (i = 0; i < host->n_ports; i++) {
+		struct ata_port *ap = host->ports[i];
+
+		if (ap->ops->port_stop)
+			ap->ops->port_stop(ap);
+	}
+
+	/*
+	 * Drop the action added by ata_host_start() without calling it.
+	 * It does not exist if neither ->port_stop() nor ->host_stop() is
+	 * implemented, in which case there is nothing to drop.
+	 */
+	devres_destroy(host->dev, ata_host_stop, NULL, NULL);
+
+	host->flags &= ~ATA_HOST_STARTED;
+}
+EXPORT_SYMBOL_GPL(ata_host_undo_start);
+
+/**
  *	ata_host_init - Initialize a host struct for sas (ipr, libsas)
  *	@host:	host to initialize
  *	@dev:	device host is attached to
@@ -6118,9 +6253,15 @@ static void async_port_probe(void *data, async_cookie_t cookie)
  *	@sht: template for SCSI host
  *
  *	Register initialized ATA host.  @host is allocated using
- *	ata_host_alloc() and fully initialized by LLD.  This function
- *	starts ports, registers @host with ATA and SCSI layers and
- *	probe registered devices.
+ *	ata_host_alloc(), fully initialized by the LLD and started using
+ *	ata_host_start().  This function registers @host with the ATA and
+ *	SCSI layers and probes the registered devices.
+ *
+ *	On failure, the host remains started, i.e. the devres action
+ *	registered by ata_host_start() is kept, so ->host_stop() is called by
+ *	the driver core when probe() fails.  A caller which releases the host
+ *	resources in its own probe() error path must therefore call
+ *	ata_host_undo_start().
  *
  *	LOCKING:
  *	Inherited from calling layer (may sleep).
@@ -6215,6 +6356,10 @@ EXPORT_SYMBOL_GPL(ata_host_register);
  *	have set polling mode on the port. In this case, @irq_handler
  *	should be NULL.
  *
+ *	On failure, the ports are stopped again and the devres action
+ *	registered by ata_host_start() is dropped without calling
+ *	->host_stop(), so releasing the host resources is left to the caller.
+ *
  *	LOCKING:
  *	Inherited from calling layer (may sleep).
  *
@@ -6235,27 +6380,40 @@ int ata_host_activate(struct ata_host *host, int irq,
 	/* Special case for polling mode */
 	if (!irq) {
 		WARN_ON(irq_handler);
-		return ata_host_register(host, sht);
+		rc = ata_host_register(host, sht);
+		if (rc)
+			goto undo_start;
+
+		return 0;
 	}
 
 	irq_desc = devm_kasprintf(host->dev, GFP_KERNEL, "%s[%s]",
 				  dev_driver_string(host->dev),
 				  dev_name(host->dev));
-	if (!irq_desc)
-		return -ENOMEM;
+	if (!irq_desc) {
+		rc = -ENOMEM;
+		goto undo_start;
+	}
 
 	rc = devm_request_irq(host->dev, irq, irq_handler, irq_flags,
 			      irq_desc, host);
 	if (rc)
-		return rc;
+		goto undo_start;
 
 	for (i = 0; i < host->n_ports; i++)
 		ata_port_desc_misc(host->ports[i], irq);
 
 	rc = ata_host_register(host, sht);
-	/* if failed, just free the IRQ and leave ports alone */
-	if (rc)
+	if (rc) {
+		/* Free the IRQ, so that the handler can no longer run */
 		devm_free_irq(host->dev, irq, host);
+		goto undo_start;
+	}
+
+	return 0;
+
+undo_start:
+	ata_host_undo_start(host);
 
 	return rc;
 }

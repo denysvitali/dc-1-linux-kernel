@@ -88,6 +88,89 @@ int iter_err_unsafe_asm_loop(const void *ctx)
 	return 0;
 }
 
+/*
+ * Naked function, so there is no compiler-generated glue and the whole inlined program can be
+ * matched. Pinned to arches whose JITs zero-extend 32-bit writes implicitly
+ * (bpf_jit_needs_zext() == false); on arches that need explicit zero-extension the verifier
+ * interleaves "wN = wN" insns and the fixed shape below would not match. The inlining itself is
+ * arch independent, so checking it on these arches is sufficient.
+ *
+ * bpf_iter_num_new() emits the full range check (distance computation and both the -EINVAL and
+ * -E2BIG error paths); bpf_iter_num_next() and bpf_iter_num_destroy() are inlined too.
+ */
+SEC("raw_tp")
+__arch_x86_64
+__arch_arm64
+__success
+__xlated("r6 = r10")
+__xlated("r6 += -8")
+__xlated("call unknown")
+__xlated("r3 = r0")
+__xlated("r3 &= 65535")
+__xlated("r1 = r6")
+__xlated("r2 = 0")
+/* bpf_iter_num_new(&it, 0, <non-const>) with the range check kept */
+__xlated("if w2 s> w3 goto pc+8")
+__xlated("w0 = w3")
+__xlated("w0 -= w2")
+__xlated("if r0 > 0x800000 goto pc+8")
+__xlated("w2 += -1")
+__xlated("*(u32 *)(r1 +0) = r2")
+__xlated("*(u32 *)(r1 +4) = r3")
+__xlated("r0 = 0")
+__xlated("goto pc+5")
+__xlated("*(u64 *)(r1 +0) = 0")
+__xlated("r0 = -22")
+__xlated("goto pc+2")
+__xlated("*(u64 *)(r1 +0) = 0")
+__xlated("r0 = -7")
+__xlated("r1 = r6")
+/* bpf_iter_num_next(&it) */
+__xlated("r0 = *(u32 *)(r1 +0)")
+__xlated("w0 += 1")
+__xlated("r2 = *(u32 *)(r1 +4)")
+__xlated("if w0 s>= w2 goto pc+3")
+__xlated("*(u32 *)(r1 +0) = r0")
+__xlated("r0 = r1")
+__xlated("goto pc+2")
+__xlated("*(u64 *)(r1 +0) = 0")
+__xlated("r0 = 0")
+__xlated("if r0 != 0x0 goto pc-11")
+__xlated("r1 = r6")
+/* bpf_iter_num_destroy(&it) is inlined to a nop */
+__xlated("goto pc+0")
+__xlated("r0 = 0")
+__xlated("exit")
+int __naked iter_num_new_inlined(void)
+{
+	asm volatile (
+		/* r6 points to struct bpf_iter_num on the stack */
+		"r6 = r10;"
+		"r6 += -8;"
+		/* non-constant end so the range checks are kept */
+		"call %[bpf_get_prandom_u32];"
+		"r3 = r0;"
+		"r3 &= 0xffff;"
+		"r1 = r6;"
+		"r2 = 0;"
+		"call %[bpf_iter_num_new];"
+	"1:"
+		"r1 = r6;"
+		"call %[bpf_iter_num_next];"
+		"if r0 != 0 goto 1b;"
+		"r1 = r6;"
+		"call %[bpf_iter_num_destroy];"
+		"r0 = 0;"
+		"exit;"
+		:
+		: __imm(bpf_get_prandom_u32),
+		  __imm(bpf_iter_num_new),
+		  __imm(bpf_iter_num_next),
+		  __imm(bpf_iter_num_destroy)
+		: __clobber_common, "r6"
+	);
+}
+
 SEC("raw_tp")
 __success
 int iter_while_loop(const void *ctx)
@@ -1605,7 +1688,7 @@ int iter_subprog_check_stacksafe(const void *ctx)
 struct bpf_iter_num global_it;
 
 SEC("raw_tp")
-__failure __msg("R1 expected pointer to an iterator on stack")
+__failure __msg("R1 type=map_value expected=fp")
 int iter_new_bad_arg(const void *ctx)
 {
 	bpf_iter_num_new(&global_it, 0, 1);
@@ -1613,7 +1696,7 @@ int iter_new_bad_arg(const void *ctx)
 }
 
 SEC("raw_tp")
-__failure __msg("R1 expected pointer to an iterator on stack")
+__failure __msg("R1 type=map_value expected=fp")
 int iter_next_bad_arg(const void *ctx)
 {
 	bpf_iter_num_next(&global_it);
@@ -1621,7 +1704,7 @@ int iter_next_bad_arg(const void *ctx)
 }
 
 SEC("raw_tp")
-__failure __msg("R1 expected pointer to an iterator on stack")
+__failure __msg("R1 type=map_value expected=fp")
 int iter_destroy_bad_arg(const void *ctx)
 {
 	bpf_iter_num_destroy(&global_it);
@@ -2064,6 +2147,427 @@ __naked int stack_misc_vs_scalar_in_a_loop(void)
 		  __imm_addr(amap)
 		: __clobber_all
 	);
+}
+
+__used
+static int loop_cb5(int i, __u64 *ctx)
+{
+	/* unsafe on a second iteration */
+	small_arr[*ctx] = i;
+	*ctx = 100500;
+	return 0;
+}
+
+SEC("raw_tp")
+__flag(BPF_F_TEST_STATE_FREQ)
+__failure __msg("memory access is {{.*}} and is outside of the object of size 64")
+__naked void loop_counter_precision_2nd_iter(void)
+{
+	asm volatile (
+		"call %[bpf_get_prandom_u32];"
+		"*(u64 *)(r10 - 8) = 0;"
+		"r1 = 2;"
+		"if r0 == 42 goto +1;"
+		"r1 = 1;"
+		"r2 = loop_cb5 ll;"
+		"r3 = r10;"
+		"r3 += -8;"
+		"r4 = 0;"
+		/*
+		 * Explore with nr_loops=1 on a first path and nr_loops=2 on a second path.
+		 * Buggy verifier did not propagate r1 precision properly,
+		 * and thus checkpoints created for nr_loops=1 case matched nr_loops=2 case.
+		 */
+		"call %[bpf_loop];"
+		"r0 = 0;"
+		"exit;"
+		:
+		: __imm(bpf_loop),
+		  __imm(bpf_get_prandom_u32)
+		: __clobber_all
+	);
+}
+
+/*
+ * An iterator that is destroyed and created again inside its loop starts from
+ * the beginning and the loop never ends. In the first four progs the first
+ * prune point after bpf_iter_num_new() is the call of bpf_iter_num_next().
+ */
+SEC("socket")
+__description("iter: remake in the loop, jump to next")
+__failure __msg("infinite loop detected")
+__naked void iter_remake_jmp(void)
+{
+	asm volatile (
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+"1:"
+	"call %[bpf_ktime_get_ns];"
+	"if r0 != 0 goto 3f;"
+	"r1 = r10;"
+	"r1 += -8;"
+"2:"
+	"call %[bpf_iter_num_next];"
+	"if r0 != 0 goto 1b;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r0 = 0;"
+	"exit;"
+"3:"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+	"r1 = r10;"
+	"r1 += -8;"
+	"goto 2b;"
+	:
+	: __imm(bpf_iter_num_new),
+	  __imm(bpf_iter_num_next),
+	  __imm(bpf_iter_num_destroy),
+	  __imm(bpf_ktime_get_ns)
+	: __clobber_all);
+}
+
+__used __naked static void iter_remake(void)
+{
+	asm volatile (
+	"r6 = r1;"
+	"call %[bpf_iter_num_destroy];"
+	"r1 = r6;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+	"r0 = 0;"
+	"exit;"
+	:
+	: __imm(bpf_iter_num_new),
+	  __imm(bpf_iter_num_destroy)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("iter: remake in a callee, jump to next")
+__failure __msg("infinite loop detected")
+__naked void iter_remake_callee_jmp(void)
+{
+	asm volatile (
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+"1:"
+	"call %[bpf_ktime_get_ns];"
+	"if r0 != 0 goto 3f;"
+	"r1 = r10;"
+	"r1 += -8;"
+"2:"
+	"call %[bpf_iter_num_next];"
+	"if r0 != 0 goto 1b;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r0 = 0;"
+	"exit;"
+"3:"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call iter_remake;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"goto 2b;"
+	:
+	: __imm(bpf_iter_num_new),
+	  __imm(bpf_iter_num_next),
+	  __imm(bpf_iter_num_destroy),
+	  __imm(bpf_ktime_get_ns)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("iter: remake after next, jump to next")
+__failure __msg("infinite loop detected")
+__naked void iter_remake_after_next_jmp(void)
+{
+	asm volatile (
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+	"r1 = r10;"
+	"r1 += -8;"
+"1:"
+	"call %[bpf_iter_num_next];"
+	"if r0 == 0 goto 2f;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+	"r1 = r10;"
+	"r1 += -8;"
+	"goto 1b;"
+"2:"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r0 = 0;"
+	"exit;"
+	:
+	: __imm(bpf_iter_num_new),
+	  __imm(bpf_iter_num_next),
+	  __imm(bpf_iter_num_destroy),
+	  __imm(bpf_ktime_get_ns)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("iter: two iterators, remake each after its next")
+__failure __msg("infinite loop detected")
+__naked void iter_remake_two_jmp(void)
+{
+	asm volatile (
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+	"r1 = r10;"
+	"r1 += -16;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+	"r1 = r10;"
+	"r1 += -8;"
+"1:"
+	"call %[bpf_iter_num_next];"
+	"if r0 == 0 goto 2f;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+	"r1 = r10;"
+	"r1 += -16;"
+	"call %[bpf_iter_num_next];"
+	"if r0 == 0 goto 2f;"
+	"r1 = r10;"
+	"r1 += -16;"
+	"call %[bpf_iter_num_destroy];"
+	"r1 = r10;"
+	"r1 += -16;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+	"r1 = r10;"
+	"r1 += -8;"
+	"goto 1b;"
+"2:"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r1 = r10;"
+	"r1 += -16;"
+	"call %[bpf_iter_num_destroy];"
+	"r0 = 0;"
+	"exit;"
+	:
+	: __imm(bpf_iter_num_new),
+	  __imm(bpf_iter_num_next),
+	  __imm(bpf_iter_num_destroy),
+	  __imm(bpf_ktime_get_ns)
+	: __clobber_all);
+}
+
+/* Same loops with a prune point in front of bpf_iter_num_next() */
+SEC("socket")
+__description("iter: remake in the loop")
+__failure __msg("infinite loop detected")
+__flag(BPF_F_TEST_STATE_FREQ)
+__naked void iter_remake_inline(void)
+{
+	asm volatile (
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+"1:"
+	"call %[bpf_ktime_get_ns];"
+	"if r0 == 0 goto 2f;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+"2:"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_next];"
+	"if r0 != 0 goto 1b;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r0 = 0;"
+	"exit;"
+	:
+	: __imm(bpf_iter_num_new),
+	  __imm(bpf_iter_num_next),
+	  __imm(bpf_iter_num_destroy),
+	  __imm(bpf_ktime_get_ns)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("iter: remake in a callee")
+__failure __msg("infinite loop detected")
+__flag(BPF_F_TEST_STATE_FREQ)
+__naked void iter_remake_callee(void)
+{
+	asm volatile (
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+"1:"
+	"call %[bpf_ktime_get_ns];"
+	"if r0 == 0 goto 2f;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call iter_remake;"
+"2:"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_next];"
+	"if r0 != 0 goto 1b;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r0 = 0;"
+	"exit;"
+	:
+	: __imm(bpf_iter_num_new),
+	  __imm(bpf_iter_num_next),
+	  __imm(bpf_iter_num_destroy),
+	  __imm(bpf_ktime_get_ns)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("iter: remake after next")
+__failure __msg("infinite loop detected")
+__flag(BPF_F_TEST_STATE_FREQ)
+__naked void iter_remake_after_next(void)
+{
+	asm volatile (
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+"1:"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_next];"
+	"if r0 == 0 goto 2f;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+	"goto 1b;"
+"2:"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r0 = 0;"
+	"exit;"
+	:
+	: __imm(bpf_iter_num_new),
+	  __imm(bpf_iter_num_next),
+	  __imm(bpf_iter_num_destroy),
+	  __imm(bpf_ktime_get_ns)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("iter: remake when drained")
+__failure __msg("infinite loop detected")
+__flag(BPF_F_TEST_STATE_FREQ)
+__naked void iter_remake_drained(void)
+{
+	asm volatile (
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+"1:"
+	"call %[bpf_ktime_get_ns];"
+	"if r0 == 119 goto 2f;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_next];"
+	"if r0 != 0 goto 1b;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r1 = r10;"
+	"r1 += -8;"
+	"r2 = 0;"
+	"r3 = 10;"
+	"call %[bpf_iter_num_new];"
+	"goto 1b;"
+"2:"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call %[bpf_iter_num_destroy];"
+	"r0 = 0;"
+	"exit;"
+	:
+	: __imm(bpf_iter_num_new),
+	  __imm(bpf_iter_num_next),
+	  __imm(bpf_iter_num_destroy),
+	  __imm(bpf_ktime_get_ns)
+	: __clobber_all);
+}
+
+/* The inner iterator is created in every iteration of the outer loop */
+SEC("socket")
+__description("iter: nested loops")
+__success __retval(12)
+int iter_nested_remake(void *ctx)
+{
+	int i, j, sum = 0;
+
+	bpf_for(i, 0, 3) {
+		bpf_for(j, 0, 4)
+			sum++;
+	}
+	return sum;
 }
 
 char _license[] SEC("license") = "GPL";

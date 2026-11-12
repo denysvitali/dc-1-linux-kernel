@@ -167,7 +167,7 @@ struct sof_ipc4_pipeline {
 };
 
 /**
- * struct sof_ipc4_multi_pipeline_data - multi pipeline trigger IPC data
+ * struct ipc4_pipeline_set_state_data - multi pipeline trigger IPC data
  * @count: Number of pipelines to be triggered
  * @pipeline_instance_ids: Flexible array of IDs of the pipelines to be triggered
  */
@@ -197,12 +197,15 @@ struct sof_ipc4_pin_format {
  * @input_pin_fmts: Available input pin formats
  * @num_input_formats: Number of input pin formats
  * @num_output_formats: Number of output pin formats
+ * @changed_params: Mask of changed params by the module instance between it's
+ *		    input and output formts (rate, channels, depth)
  */
 struct sof_ipc4_available_audio_format {
 	struct sof_ipc4_pin_format *output_pin_fmts;
 	struct sof_ipc4_pin_format *input_pin_fmts;
 	u32 num_input_formats;
 	u32 num_output_formats;
+	u32 changed_params;
 };
 
 /**
@@ -210,13 +213,18 @@ struct sof_ipc4_available_audio_format {
  * @node_id: ID of Gateway Node
  * @dma_buffer_size: Preferred Gateway DMA buffer size (in bytes)
  * @config_length: Length of gateway node configuration blob specified in #config_data
- * config_data: Gateway node configuration blob
+ * @config_data: Gateway node configuration blob
  */
 struct sof_copier_gateway_cfg {
 	uint32_t node_id;
 	uint32_t dma_buffer_size;
 	uint32_t config_length;
 	uint32_t config_data[];
+};
+
+/* bit definition in copier_feature_mask */
+enum sof_ipc4_copier_feature {
+	SOF_IPC4_COPIER_FAST_MODE = 0, /* free running mode of host copier */
 };
 
 /**
@@ -285,7 +293,9 @@ struct sof_ipc4_dma_stream_ch_map {
 struct sof_ipc4_dma_config {
 	uint8_t dma_method;
 	uint8_t pre_allocated_by_host;
+	/* private: */
 	uint16_t rsvd;
+	/* public: */
 	uint32_t dma_channel_id;
 	uint32_t stream_id;
 	struct sof_ipc4_dma_stream_ch_map dma_stream_channel_map;
@@ -296,7 +306,7 @@ struct sof_ipc4_dma_config {
 #define SOF_IPC4_GTW_DMA_CONFIG_ID 0x1000
 
 /**
- * struct sof_ipc4_dma_config: DMA configuration
+ * struct sof_ipc4_dma_config_tlv - DMA configuration
  * @type: set to SOF_IPC4_GTW_DMA_CONFIG_ID
  * @length: sizeof(struct sof_ipc4_dma_config) + dma_config.dma_priv_config_size
  * @dma_config: actual DMA configuration
@@ -321,6 +331,7 @@ struct sof_ipc4_alh_configuration_blob {
  * @data: IPC copier data
  * @copier_config: Copier + blob
  * @ipc_config_size: Size of copier_config
+ * @ipc_config_data: Copier module config data
  * @available_fmt: Available audio format
  * @frame_fmt: frame format
  * @msg: message structure for copier
@@ -518,6 +529,8 @@ struct sof_ipc4_base_module_cfg_ext {
  * @msg: IPC4 message struct containing header and data info
  * @base_config_ext_size: Size of the base config extension data in bytes
  * @init_config: Module init config type (SOF_IPC4_MODULE_INIT_CONFIG_TYPE_*)
+ * @init_ext_module_data: module_data for init_ext object
+ * @init_ext_module_size: size of init_ext_module_data
  */
 struct sof_ipc4_process {
 	struct sof_ipc4_base_module_cfg base_config;
@@ -529,6 +542,8 @@ struct sof_ipc4_process {
 	struct sof_ipc4_msg msg;
 	u32 base_config_ext_size;
 	u32 init_config;
+	void *init_ext_module_data;
+	size_t init_ext_module_size;
 };
 
 bool sof_ipc4_copier_is_single_bitdepth(struct snd_sof_dev *sdev,

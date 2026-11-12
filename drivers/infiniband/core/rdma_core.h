@@ -71,14 +71,19 @@ int uverbs_output_written(const struct uverbs_attr_bundle *bundle, size_t idx);
 
 void setup_ufile_idr_uobject(struct ib_uverbs_file *ufile);
 
-#if IS_ENABLED(CONFIG_INFINIBAND_USER_ACCESS)
-struct ib_udata *uverbs_get_cleared_udata(struct uverbs_attr_bundle *attrs);
-#else
-static inline struct ib_udata *uverbs_get_cleared_udata(struct uverbs_attr_bundle *attrs)
+/*
+ * When calling a destroy function during an error unwind we need to pass in
+ * the udata that is sanitized of all user arguments. Ie from the driver
+ * perspective it looks like no udata was passed.
+ */
+static inline struct ib_udata *
+uverbs_get_cleared_udata(struct uverbs_attr_bundle *attrs)
 {
-	return NULL;
+	if (!attrs)
+		return NULL;
+	attrs->driver_udata = (struct ib_udata){};
+	return &attrs->driver_udata;
 }
-#endif
 
 /*
  * This is the runtime description of the uverbs API, used by the syscall
@@ -159,6 +164,7 @@ void uverbs_user_mmap_disassociate(struct ib_uverbs_file *ufile);
 
 extern const struct uapi_definition uverbs_def_obj_async_fd[];
 extern const struct uapi_definition uverbs_def_obj_counters[];
+extern const struct uapi_definition uverbs_def_obj_comp_cntr[];
 extern const struct uapi_definition uverbs_def_obj_cq[];
 extern const struct uapi_definition uverbs_def_obj_device[];
 extern const struct uapi_definition uverbs_def_obj_dm[];

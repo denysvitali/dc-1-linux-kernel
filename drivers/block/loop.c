@@ -54,6 +54,7 @@ struct loop_device {
 
 	struct file	*lo_backing_file;
 	unsigned int	lo_min_dio_size;
+	unsigned int	lo_dio_mem_align;
 	struct block_device *lo_device;
 
 	gfp_t		old_gfp_mask;
@@ -104,7 +105,7 @@ static DEFINE_MUTEX(loop_validate_mutex);
  *
  * Since loop_validate_file() traverses on other "struct loop_device" if
  * is_loop_device() is true, we need a global lock for serializing concurrent
- * loop_configure()/loop_change_fd()/__loop_clr_fd() calls.
+ * loop_configure()/__loop_clr_fd() calls.
  */
 static int loop_global_lock_killable(struct loop_device *lo, bool global)
 {
@@ -378,7 +379,7 @@ static int lo_rw_aio(struct loop_device *lo, struct loop_cmd *cmd,
 		iov_iter_bvec(&iter, rw,
 			__bvec_iter_bvec(rq->bio->bi_io_vec, rq->bio->bi_iter),
 			nr_bvec, blk_rq_bytes(rq));
-		iter.iov_offset = rq->bio->bi_iter.bi_bvec_done;
+		iter.iov_offset = rq->bio->bi_iter.bi_offset;
 	}
 	atomic_set(&cmd->ref, 2);
 
@@ -447,26 +448,39 @@ static void loop_reread_partitions(struct loop_device *lo)
 			__func__, lo->lo_number, lo->lo_file_name, rc);
 }
 
-static unsigned int loop_query_min_dio_size(struct loop_device *lo)
+static void loop_update_dio_alignment(struct loop_device *lo)
 {
 	struct file *file = lo->lo_backing_file;
 	struct block_device *sb_bdev = file->f_mapping->host->i_sb->s_bdev;
 	struct kstat st;
 
 	/*
-	 * Use the minimal dio alignment of the file system if provided.
+	 * Use the dio alignment of the file system if provided.  The incomoing
+	 * request's bio_vec is forwarded to the backing file unchanged, so its
+	 * required memory alignment becomes the device's dma_alignment when
+	 * used for direct-io.  The file system reports zeroed alignments if the
+	 * file can't be used for direct-io at all, so fall back to the block
+	 * device limits in that case.
 	 */
 	if (!vfs_getattr(&file->f_path, &st, STATX_DIOALIGN, 0) &&
-	    (st.result_mask & STATX_DIOALIGN))
-		return st.dio_offset_align;
+	    (st.result_mask & STATX_DIOALIGN) && st.dio_mem_align) {
+		lo->lo_min_dio_size = st.dio_offset_align;
+		lo->lo_dio_mem_align = min(st.dio_mem_align - 1, PAGE_SIZE - 1);
+		return;
+	}
 
 	/*
 	 * In a perfect world this wouldn't be needed, but as of Linux 6.13 only
 	 * a handful of file systems support the STATX_DIOALIGN flag.
 	 */
-	if (sb_bdev)
-		return bdev_logical_block_size(sb_bdev);
-	return SECTOR_SIZE;
+	if (sb_bdev) {
+		lo->lo_min_dio_size = bdev_logical_block_size(sb_bdev);
+		lo->lo_dio_mem_align = bdev_dma_alignment(sb_bdev);
+		return;
+	}
+
+	lo->lo_min_dio_size = SECTOR_SIZE;
+	lo->lo_dio_mem_align = SECTOR_SIZE - 1;
 }
 
 static inline int is_loop_device(struct file *file)
@@ -509,7 +523,7 @@ static void loop_assign_backing_file(struct loop_device *lo, struct file *file)
 			lo->old_gfp_mask & ~(__GFP_IO | __GFP_FS));
 	if (lo->lo_backing_file->f_flags & O_DIRECT)
 		lo->lo_flags |= LO_FLAGS_DIRECT_IO;
-	lo->lo_min_dio_size = loop_query_min_dio_size(lo);
+	loop_update_dio_alignment(lo);
 }
 
 static int loop_check_backing_file(struct file *file)
@@ -521,109 +535,6 @@ static int loop_check_backing_file(struct file *file)
 		return -EINVAL;
 
 	return 0;
-}
-
-/*
- * loop_change_fd switched the backing store of a loopback device to
- * a new file. This is useful for operating system installers to free up
- * the original file and in High Availability environments to switch to
- * an alternative location for the content in case of server meltdown.
- * This can only work if the loop device is used read-only, and if the
- * new backing store is the same size and type as the old backing store.
- */
-static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
-			  unsigned int arg)
-{
-	struct file *file = fget(arg);
-	struct file *old_file;
-	unsigned int memflags;
-	int error;
-	bool partscan;
-	bool is_loop;
-
-	if (!file)
-		return -EBADF;
-
-	error = loop_check_backing_file(file);
-	if (error) {
-		fput(file);
-		return error;
-	}
-
-	/* suppress uevents while reconfiguring the device */
-	dev_set_uevent_suppress(disk_to_dev(lo->lo_disk), 1);
-
-	is_loop = is_loop_device(file);
-	error = loop_global_lock_killable(lo, is_loop);
-	if (error)
-		goto out_putf;
-	error = -ENXIO;
-	if (lo->lo_state != Lo_bound)
-		goto out_err;
-
-	/* the loop device has to be read-only */
-	error = -EINVAL;
-	if (!(lo->lo_flags & LO_FLAGS_READ_ONLY))
-		goto out_err;
-
-	error = loop_validate_file(file, bdev);
-	if (error)
-		goto out_err;
-
-	old_file = lo->lo_backing_file;
-
-	error = -EINVAL;
-
-	/* size of the new backing store needs to be the same */
-	if (lo_calculate_size(lo, file) != lo_calculate_size(lo, old_file))
-		goto out_err;
-
-	/*
-	 * We might switch to direct I/O mode for the loop device, write back
-	 * all dirty data the page cache now that so that the individual I/O
-	 * operations don't have to do that.
-	 */
-	vfs_fsync(file, 0);
-
-	/* and ... switch */
-	disk_force_media_change(lo->lo_disk);
-	memflags = blk_mq_freeze_queue(lo->lo_queue);
-	mapping_set_gfp_mask(old_file->f_mapping, lo->old_gfp_mask);
-	loop_assign_backing_file(lo, file);
-	loop_update_dio(lo);
-	blk_mq_unfreeze_queue(lo->lo_queue, memflags);
-	partscan = lo->lo_flags & LO_FLAGS_PARTSCAN;
-	loop_global_unlock(lo, is_loop);
-
-	/*
-	 * Flush loop_validate_file() before fput(), for l->lo_backing_file
-	 * might be pointing at old_file which might be the last reference.
-	 */
-	if (!is_loop) {
-		mutex_lock(&loop_validate_mutex);
-		mutex_unlock(&loop_validate_mutex);
-	}
-	/*
-	 * We must drop file reference outside of lo_mutex as dropping
-	 * the file ref can take open_mutex which creates circular locking
-	 * dependency.
-	 */
-	fput(old_file);
-	dev_set_uevent_suppress(disk_to_dev(lo->lo_disk), 0);
-	if (partscan)
-		loop_reread_partitions(lo);
-
-	error = 0;
-done:
-	kobject_uevent(&disk_to_dev(lo->lo_disk)->kobj, KOBJ_CHANGE);
-	return error;
-
-out_err:
-	loop_global_unlock(lo, is_loop);
-out_putf:
-	fput(file);
-	dev_set_uevent_suppress(disk_to_dev(lo->lo_disk), 0);
-	goto done;
 }
 
 /* loop sysfs attributes */
@@ -940,6 +851,19 @@ static unsigned int loop_default_blocksize(struct loop_device *lo)
 	return SECTOR_SIZE;
 }
 
+static void loop_set_dma_limit(struct loop_device *lo, struct queue_limits *lim)
+{
+	/*
+	 * Direct I/O forwards the user pages to the backing file unchanged, so
+	 * track the backing's DMA alignment requirement as the mode is toggled.
+	 */
+	if (lo->lo_flags & LO_FLAGS_DIRECT_IO)
+		lim->dma_alignment = max_t(unsigned int, lo->lo_dio_mem_align,
+					   SECTOR_SIZE - 1);
+	else
+		lim->dma_alignment = SECTOR_SIZE - 1;
+}
+
 static void loop_update_limits(struct loop_device *lo, struct queue_limits *lim,
 		unsigned int bsize)
 {
@@ -961,6 +885,7 @@ static void loop_update_limits(struct loop_device *lo, struct queue_limits *lim,
 	lim->logical_block_size = bsize;
 	lim->physical_block_size = bsize;
 	lim->io_min = bsize;
+	loop_set_dma_limit(lo, lim);
 	lim->features &= ~(BLK_FEAT_WRITE_CACHE | BLK_FEAT_ROTATIONAL);
 	if (file->f_op->fsync && !(lo->lo_flags & LO_FLAGS_READ_ONLY))
 		lim->features |= BLK_FEAT_WRITE_CACHE;
@@ -1187,12 +1112,11 @@ static int loop_clr_fd(struct loop_device *lo)
 
 	/*
 	 * Since lo_ioctl() is called without locks held, it is possible that
-	 * loop_configure()/loop_change_fd() and loop_clr_fd() run in parallel.
+	 * loop_configure() and loop_clr_fd() run in parallel.
 	 *
 	 * Therefore, use global lock when setting Lo_rundown state in order to
 	 * make sure that loop_validate_file() will fail if the "struct file"
-	 * which loop_configure()/loop_change_fd() found via fget() was this
-	 * loop device.
+	 * which loop_configure() found via fget() was this loop device.
 	 */
 	err = loop_global_lock_killable(lo, true);
 	if (err)
@@ -1412,6 +1336,7 @@ static int loop_set_dio(struct loop_device *lo, unsigned long arg)
 {
 	bool use_dio = !!arg;
 	unsigned int memflags;
+	struct queue_limits lim;
 
 	if (lo->lo_state != Lo_bound)
 		return -ENXIO;
@@ -1425,11 +1350,14 @@ static int loop_set_dio(struct loop_device *lo, unsigned long arg)
 		vfs_fsync(lo->lo_backing_file, 0);
 	}
 
+	lim = queue_limits_start_update(lo->lo_queue);
 	memflags = blk_mq_freeze_queue(lo->lo_queue);
 	if (use_dio)
 		lo->lo_flags |= LO_FLAGS_DIRECT_IO;
 	else
 		lo->lo_flags &= ~LO_FLAGS_DIRECT_IO;
+	loop_set_dma_limit(lo, &lim);
+	queue_limits_commit_update(lo->lo_queue, &lim);
 	blk_mq_unfreeze_queue(lo->lo_queue, memflags);
 	return 0;
 }
@@ -1534,7 +1462,7 @@ static int lo_ioctl(struct block_device *bdev, blk_mode_t mode,
 		return loop_configure(lo, mode, bdev, &config);
 	}
 	case LOOP_CHANGE_FD:
-		return loop_change_fd(lo, bdev, arg);
+		return -EOPNOTSUPP;
 	case LOOP_CLR_FD:
 		return loop_clr_fd(lo);
 	case LOOP_SET_STATUS:
@@ -1676,8 +1604,10 @@ static int lo_compat_ioctl(struct block_device *bdev, blk_mode_t mode,
 
 	switch(cmd) {
 	case LOOP_SET_STATUS:
-		err = loop_set_status_compat(lo,
-			     (const struct compat_loop_info __user *)arg);
+		err = -EPERM;
+		if ((mode & BLK_OPEN_WRITE) || capable(CAP_SYS_ADMIN))
+			err = loop_set_status_compat(lo,
+				(const struct compat_loop_info __user *)arg);
 		break;
 	case LOOP_GET_STATUS:
 		err = loop_get_status_compat(lo,

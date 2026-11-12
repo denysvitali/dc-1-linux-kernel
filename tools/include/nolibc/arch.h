@@ -32,8 +32,17 @@
 #include "arch-openrisc.h"
 #elif defined(__hppa__)
 #include "arch-parisc.h"
+#elif defined(__alpha__)
+#include "arch-alpha.h"
+#elif defined(__hexagon__)
+#include "arch-hexagon.h"
 #else
 #error Unsupported Architecture
+#endif
+
+
+#ifndef __NOLIBC_BITS_PER_SYSCALL_ARG
+#define __NOLIBC_BITS_PER_SYSCALL_ARG __BITS_PER_LONG
 #endif
 
 #endif /* _NOLIBC_ARCH_H */

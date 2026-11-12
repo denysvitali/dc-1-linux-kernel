@@ -99,17 +99,10 @@ static int cs42l43_sdw_update_status(struct sdw_slave *sdw, enum sdw_slave_statu
 
 		sdw_write_no_pm(sdw, CS42L43_GEN_INT_MASK_1,
 				CS42L43_INT_STAT_GEN1_MASK);
-
-		cs42l43->attached = true;
-
-		complete(&cs42l43->device_attach);
 		break;
 	case SDW_SLAVE_UNATTACHED:
 		dev_dbg(cs42l43->dev, "Device detach\n");
 
-		cs42l43->attached = false;
-
-		reinit_completion(&cs42l43->device_attach);
 		complete(&cs42l43->device_detach);
 		break;
 	default:
@@ -171,7 +164,7 @@ static int cs42l43_sdw_probe(struct sdw_slave *sdw, const struct sdw_device_id *
 	struct cs42l43 *cs42l43;
 	struct device *dev = &sdw->dev;
 
-	cs42l43 = devm_kzalloc(dev, sizeof(*cs42l43), GFP_KERNEL);
+	cs42l43 = devm_kzalloc_obj(dev, *cs42l43);
 	if (!cs42l43)
 		return -ENOMEM;
 
@@ -187,10 +180,18 @@ static int cs42l43_sdw_probe(struct sdw_slave *sdw, const struct sdw_device_id *
 	return cs42l43_dev_probe(cs42l43);
 }
 
+static void cs42l43_sdw_remove(struct sdw_slave *sdw)
+{
+	struct cs42l43 *cs42l43 = dev_get_drvdata(&sdw->dev);
+
+	cs42l43_dev_remove(cs42l43);
+}
+
 static const struct sdw_device_id cs42l43_sdw_id[] = {
-	SDW_SLAVE_ENTRY(0x01FA, 0x4243, (void *) CS42L43_DEVID_VAL),
-	SDW_SLAVE_ENTRY(0x01FA, 0x2A3B, (void *) CS42L43B_DEVID_VAL),
-	{}
+	SDW_SLAVE_ENTRY(0x01FA, 0x4243, (void *)CS42L43_DEVID_VAL),
+	SDW_SLAVE_ENTRY(0x01FA, 0x2A3B, (void *)CS42L43B_DEVID_VAL),
+	SDW_SLAVE_ENTRY(0x01FA, 0x4244, (void *)CS42L43B_DEVID_VAL),
+	{ }
 };
 MODULE_DEVICE_TABLE(sdw, cs42l43_sdw_id);
 
@@ -201,6 +202,7 @@ static struct sdw_driver cs42l43_sdw_driver = {
 	},
 
 	.probe		= cs42l43_sdw_probe,
+	.remove		= cs42l43_sdw_remove,
 	.id_table	= cs42l43_sdw_id,
 	.ops		= &cs42l43_sdw_ops,
 };

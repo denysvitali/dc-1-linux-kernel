@@ -205,7 +205,7 @@ static int p2wi_probe(struct platform_device *pdev)
 	if (of_get_child_count(np) > 1)
 		return dev_err_probe(dev, -EINVAL, "P2WI only supports one target device\n");
 
-	p2wi = devm_kzalloc(dev, sizeof(struct p2wi), GFP_KERNEL);
+	p2wi = devm_kzalloc_obj(dev, struct p2wi);
 	if (!p2wi)
 		return -ENOMEM;
 
@@ -261,10 +261,8 @@ static int p2wi_probe(struct platform_device *pdev)
 	i2c_set_adapdata(&p2wi->adapter, p2wi);
 
 	ret = devm_request_irq(dev, irq, p2wi_interrupt, 0, pdev->name, p2wi);
-	if (ret) {
-		dev_err_probe(dev, ret, "can't register interrupt handler irq%d\n", irq);
+	if (ret)
 		goto err_reset_assert;
-	}
 
 	writel(P2WI_CTRL_SOFT_RST, p2wi->regs + P2WI_CTRL);
 

@@ -1437,7 +1437,7 @@
 			#access-controller-cells = <3>;
 			ranges = <0x30c00000 0x30c00000 0x400000>;
 
-			spba-bus@30c00000 {
+			spba5: spba-bus@30c00000 {
 				compatible = "fsl,spba-bus", "simple-bus";
 				reg = <0x30c00000 0x100000>;
 				#address-cells = <1>;
@@ -1599,6 +1599,7 @@
 					      <0x30cc0e00 0x080>;
 					reg-names = "ram", "regs", "rxfifo",
 						    "txfifo";
+					#sound-dai-cells = <0>;
 					interrupts = /* XCVR IRQ 0 */
 						     <GIC_SPI 128 IRQ_TYPE_LEVEL_HIGH>,
 						     /* XCVR IRQ 1 */

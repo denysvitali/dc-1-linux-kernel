@@ -92,8 +92,10 @@ static int qcom_ec_read(struct qcom_ec *ec, u8 cmd, u8 resp_len, u8 *resp)
 		return ret;
 	else if (ret == 0 || ret == 0xff)
 		return -EOPNOTSUPP;
+	else if (ret != resp_len)
+		return -EIO;
 
-	if (resp[0] >= resp_len)
+	if (resp[0] != resp_len - 1)
 		return -EINVAL;
 
 	return 0;
@@ -329,17 +331,28 @@ static const struct thermal_cooling_device_ops qcom_ec_thermal_ops = {
 static int qcom_ec_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
+	int ret;
 
-	return i2c_smbus_write_byte_data(client, EC_MODERN_STANDBY_CMD,
-					 EC_MODERN_STANDBY_EXIT);
+	ret = i2c_smbus_write_byte_data(client, EC_MODERN_STANDBY_CMD,
+				      EC_MODERN_STANDBY_EXIT);
+	enable_irq(client->irq);
+
+	return ret;
 }
 
 static int qcom_ec_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
+	int ret;
 
-	return i2c_smbus_write_byte_data(client, EC_MODERN_STANDBY_CMD,
-					 EC_MODERN_STANDBY_ENTER);
+	/* Keep SCI reads from racing the I2C controller's system sleep. */
+	disable_irq(client->irq);
+	ret = i2c_smbus_write_byte_data(client, EC_MODERN_STANDBY_CMD,
+				      EC_MODERN_STANDBY_ENTER);
+	if (ret)
+		enable_irq(client->irq);
+
+	return ret;
 }
 
 static int qcom_ec_probe(struct i2c_client *client)
@@ -349,7 +362,7 @@ static int qcom_ec_probe(struct i2c_client *client)
 	unsigned int i;
 	int ret;
 
-	ec = devm_kzalloc(dev, sizeof(*ec), GFP_KERNEL);
+	ec = devm_kzalloc_obj(dev, *ec);
 	if (!ec)
 		return -ENOMEM;
 
@@ -379,7 +392,8 @@ static int qcom_ec_probe(struct i2c_client *client)
 		return 0;
 	}
 
-	ec->ec_cdev = devm_kcalloc(dev, ec->thermal_cap.fan_cnt, sizeof(*ec->ec_cdev), GFP_KERNEL);
+	ec->ec_cdev = devm_kzalloc_objs(dev, *ec->ec_cdev,
+					ec->thermal_cap.fan_cnt);
 	if (!ec->ec_cdev)
 		return -ENOMEM;
 

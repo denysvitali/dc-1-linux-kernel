@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * Hardware monitoring driver for Infineon Multi-phase Digital XDPE1A2G5B
- * and XDPE1A2G7B Controllers
+ * Hardware monitoring driver for Infineon Multi-phase Digital XDPE1A2G5B,
+ * XDPE1A2G7B and XDPE1A2G7C Controllers
  *
  * Copyright (c) 2026 Infineon Technologies. All rights reserved.
  */
@@ -23,7 +23,7 @@ static int xdpe1a2g7b_identify(struct i2c_client *client,
 	int vout_mode;
 
 	/*
-	 * XDPE1A2G5B and XDPE1A2G7B support both Linear and NVIDIA PWM VID data
+	 * XDPE1A2G5B and XDPE1A2G7B/7C support both Linear and NVIDIA PWM VID data
 	 * formats via VOUT_MODE. Note that the device pages/loops are not fully
 	 * independent: configuration is shared, so programming each page/loop
 	 * separately is not supported.
@@ -57,6 +57,13 @@ static int xdpe1a2g7b_identify(struct i2c_client *client,
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_SENSORS_XDPE1A2G7B_REGULATOR)
+static const struct regulator_desc xdpe1a2g7b_reg_desc[] = {
+	PMBUS_REGULATOR("vout", 0),
+	PMBUS_REGULATOR("vout", 1),
+};
+#endif
+
 static struct pmbus_driver_info xdpe1a2g7b_info = {
 	.pages = XDPE1A2G7B_PAGE_NUM,
 	.identify = xdpe1a2g7b_identify,
@@ -72,6 +79,10 @@ static struct pmbus_driver_info xdpe1a2g7b_info = {
 	.func[1] = PMBUS_HAVE_VIN | PMBUS_HAVE_VOUT | PMBUS_HAVE_STATUS_VOUT |
 		   PMBUS_HAVE_IIN | PMBUS_HAVE_IOUT | PMBUS_HAVE_STATUS_IOUT |
 		   PMBUS_HAVE_PIN | PMBUS_HAVE_POUT | PMBUS_HAVE_STATUS_INPUT,
+#if IS_ENABLED(CONFIG_SENSORS_XDPE1A2G7B_REGULATOR)
+	.num_regulators = XDPE1A2G7B_PAGE_NUM,
+	.reg_desc = xdpe1a2g7b_reg_desc,
+#endif
 };
 
 static int xdpe1a2g7b_probe(struct i2c_client *client)
@@ -89,6 +100,7 @@ static int xdpe1a2g7b_probe(struct i2c_client *client)
 static const struct i2c_device_id xdpe1a2g7b_id[] = {
 	{ .name = "xdpe1a2g5b" },
 	{ .name = "xdpe1a2g7b" },
+	{ .name = "xdpe1a2g7c" },
 	{ }
 };
 
@@ -97,6 +109,7 @@ MODULE_DEVICE_TABLE(i2c, xdpe1a2g7b_id);
 static const struct of_device_id __maybe_unused xdpe1a2g7b_of_match[] = {
 	{ .compatible = "infineon,xdpe1a2g5b" },
 	{ .compatible = "infineon,xdpe1a2g7b" },
+	{ .compatible = "infineon,xdpe1a2g7c" },
 	{}
 };
 
@@ -114,6 +127,6 @@ static struct i2c_driver xdpe1a2g7b_driver = {
 module_i2c_driver(xdpe1a2g7b_driver);
 
 MODULE_AUTHOR("Ashish Yadav <ashish.yadav@infineon.com>");
-MODULE_DESCRIPTION("PMBus driver for Infineon XDPE1A2G5B/7B");
+MODULE_DESCRIPTION("PMBus driver for Infineon XDPE1A2G5B/7B/7C");
 MODULE_LICENSE("GPL");
 MODULE_IMPORT_NS("PMBUS");

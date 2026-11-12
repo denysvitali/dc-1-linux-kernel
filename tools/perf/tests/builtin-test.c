@@ -10,37 +10,47 @@
 #ifdef HAVE_BACKTRACE_SUPPORT
 #include <execinfo.h>
 #endif
-#include <poll.h>
-#include <unistd.h>
 #include <setjmp.h>
-#include <string.h>
+#include <stdio.h>
 #include <stdlib.h>
-#include <sys/types.h>
+#include <string.h>
+
+#include "util/config.h"
+
 #include <dirent.h>
-#include <sys/wait.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/ioctl.h>
-#include "util/term.h"
-#include "builtin.h"
-#include "config.h"
-#include "hist.h"
-#include "intlist.h"
-#include "tests.h"
-#include "debug.h"
-#include "color.h"
-#include <subcmd/parse-options.h>
-#include <subcmd/run-command.h>
-#include "string2.h"
-#include "symbol.h"
-#include "util/rlimit.h"
-#include "util/strbuf.h"
 #include <linux/kernel.h>
 #include <linux/string.h>
-#include <subcmd/exec-cmd.h>
 #include <linux/zalloc.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
+#include <subcmd/exec-cmd.h>
+#include <subcmd/parse-options.h>
+#include <subcmd/run-command.h>
+
+#include <sys/mman.h>
+
+#include "builtin.h"
+#include "color.h"
+#include "config.h"
+#include "debug.h"
+#include "hist.h"
+#include "intlist.h"
+#include "string2.h"
+#include "symbol.h"
 #include "tests-scripts.h"
+#include "tests.h"
+#include "util/cap.h"
+#include "util/event.h"
+#include "util/mutex.h"
+#include "util/rlimit.h"
+#include "util/strbuf.h"
+#include "util/term.h"
 
 static const char *junit_filename;
 static struct strbuf junit_xml_buf = STRBUF_INIT;
@@ -52,10 +62,23 @@ static struct strbuf junit_xml_buf = STRBUF_INIT;
 static bool dont_fork;
 /* Fork the tests in parallel and wait for their completion. */
 static bool sequential;
+/* List what each test needs, set by the "requisites" subcommand. */
+static bool list_requisites;
 /* Number of times each test is run. */
 static unsigned int runs_per_test = 1;
 /* Number of lines to include in failure snippet. */
 static unsigned int failure_snippet_lines = 10;
+/*
+ * The tests mapping ring buffers take turns using their share of
+ * kernel.perf_event_mlock_kb via this mutex, shared with the forked test
+ * processes and robust so that a test killed while holding it doesn't leave
+ * the budget locked, see mutex_init_pshared_robust().
+ */
+struct mlock_budget {
+	struct mutex lock;
+};
+
+static struct mlock_budget *mlock_budget;
 const char *dso_to_test;
 const char *test_objdump_path = "objdump";
 static const char *workload_control;
@@ -65,7 +88,8 @@ static const char *workload_control;
  * dependent on the initialization, as such GCC with LTO complains of
  * conflicting definitions with a weak symbol.
  */
-#if defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__powerpc64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || \
+	defined(__powerpc64__) || defined(__riscv)
 extern struct test_suite *arch_tests[];
 #else
 static struct test_suite *arch_tests[] = {
@@ -96,6 +120,7 @@ static struct test_suite *generic_tests[] = {
 	&suite__hists_link,
 	&suite__bp_signal,
 	&suite__bp_signal_overflow,
+	&suite__event_refresh,
 	&suite__bp_accounting,
 	&suite__wp,
 	&suite__task_exit,
@@ -147,6 +172,7 @@ static struct test_suite *generic_tests[] = {
 	&suite__dlfilter,
 	&suite__sigtrap,
 	&suite__event_groups,
+	&suite__hybrid_merge,
 	&suite__symbols,
 	&suite__util,
 	&suite__subcmd_help,
@@ -168,6 +194,8 @@ static struct test_workload *workloads[] = {
 	&workload__jitdump,
 	&workload__context_switch_loop,
 	&workload__deterministic,
+	&workload__callchain,
+	&workload__false_sharing,
 
 #ifdef HAVE_RUST_SUPPORT
 	&workload__code_with_type,
@@ -275,6 +303,30 @@ static const char *test_description(const struct test_suite *t, int test_case)
 	return t->desc;
 }
 
+static void requisites__fprintf(FILE *fp, const struct test_suite *t, int test_case)
+{
+	bool needs_mlock = t->needs_mlock, exclusive;
+
+	if (test_case < 0)
+		test_case = test_suite__num_test_cases(t) == 1 ? 0 : -1;
+
+	if (test_case >= 0) {
+		exclusive = t->test_cases[test_case].exclusive;
+		/* The catch-all implies every other requisite. */
+		needs_mlock = needs_mlock || exclusive;
+	} else {
+		exclusive = false;
+	}
+
+	if (!exclusive && !needs_mlock)
+		return;
+
+	fprintf(fp, " (");
+	if (exclusive)
+		fprintf(fp, "exclusive, ");
+	fprintf(fp, "mlock)");
+}
+
 static test_fnptr test_function(const struct test_suite *t, int test_case)
 {
 	if (test_case <= 0)
@@ -344,12 +396,30 @@ static void child_test_sig_handler(int sig)
 	siglongjmp(run_test_jmp_buf, sig);
 }
 
+static int run_test_case(struct child_test *child)
+{
+	return test_function(child->test, child->test_case_num)(child->test, child->test_case_num);
+}
+
+/* The thread safety analysis can't express a lock held conditionally. */
+static int run_test_case_mlocked(struct child_test *child)
+{
+	int err;
+
+	mutex_lock(&mlock_budget->lock);
+	err = run_test_case(child);
+	mutex_unlock(&mlock_budget->lock);
+
+	return err;
+}
+
 static int run_test_child(struct child_process *process)
 {
 	const int signals[] = {
 		SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGINT, SIGPIPE, SIGQUIT, SIGSEGV, SIGTERM,
 	};
 	struct child_test *child = container_of(process, struct child_test, process);
+	bool needs_mlock = mlock_budget && child->test->needs_mlock;
 	int err;
 
 	close_parent_fds();
@@ -366,7 +436,12 @@ static int run_test_child(struct child_process *process)
 
 	pr_debug("---- start ----\n");
 	pr_debug("test child forked, pid %d\n", getpid());
-	err = test_function(child->test, child->test_case_num)(child->test, child->test_case_num);
+
+	if (needs_mlock)
+		err = run_test_case_mlocked(child);
+	else
+		err = run_test_case(child);
+
 	pr_debug("---- end(%d) ----\n", err);
 
 	check_leaks();
@@ -415,73 +490,73 @@ static char *xml_escape(const char *str)
 	return res ? res : strdup("");
 }
 
-static const char *format_test_description(const char *desc, int max_desc_width,
-					  char *buf, size_t buf_sz)
+static int get_term_width(void)
 {
-	int len = strlen(desc);
+	struct winsize ws;
+	int cols = 80;
+	int term_width;
 
 	/*
-	 * Clamp to buf_sz to prevent GCC format-truncation warnings
-	 * when terminal width is very large.
+	 * If output is redirected to a file or piped, we don't need to wrap
+	 * or truncate at all. Use a massive virtually infinite terminal width
+	 * so descriptions are printed in full.
 	 */
-	if (max_desc_width >= (int)buf_sz)
-		max_desc_width = buf_sz - 1;
+	if (!isatty(fileno(debug_file())))
+		return 10000;
 
-	if (len > max_desc_width) {
-		snprintf(buf, buf_sz, "%.*s...", max_desc_width - 3, desc);
-		return buf;
-	}
-	return desc;
+	get_term_dimensions(&ws);
+	if (ws.ws_col > 0)
+		cols = ws.ws_col;
+
+	/*
+	 * Limit description width to fit on a single line. We subtract 35
+	 * columns of headroom to allocate space for:
+	 * - The suite index prefix: e.g. " 10.100:" (8 characters) plus 1 space separator.
+	 * - The trailing colon (1 character) and space before status (1 character).
+	 * - The longest status results: e.g. "Skip (some metrics failed)" (26 characters)
+	 *   or "Running (XX active)" (20 characters).
+	 *
+	 * A minimum description width of 10 is enforced to ensure names are
+	 * legible even on very narrow consoles.
+	 */
+	term_width = cols - 35;
+	if (term_width < 10)
+		term_width = 10;
+
+	return term_width;
+}
+
+static int get_max_desc_width(int width)
+{
+	int term_width = get_term_width();
+
+	return width > term_width ? term_width : width;
 }
 
 static int print_test_result(struct test_suite *t, int curr_suite, int curr_test_case,
 			     int result, int width, int running,
 			     const char *err_output, double elapsed)
 {
-	char desc_buf[256];
-	const char *desc = test_description(t, curr_test_case);
-	struct winsize ws;
-	int max_desc_area_width;
-	int target_desc_area_width;
-	int desc_padding;
-
-	get_term_dimensions(&ws);
-	/*
-	 * Total terminal columns minus space for status e.g. " Running (12 active)"
-	 * which is 20 chars, plus a margin of 3 chars = 23 chars.
-	 */
-	max_desc_area_width = ws.ws_col - 23;
-	if (max_desc_area_width < 40)
-		max_desc_area_width = 40;
-
-	/* Standard test has prefix "%3d: " which is 5 chars */
-	target_desc_area_width = width + 5;
-	if (target_desc_area_width > max_desc_area_width)
-		target_desc_area_width = max_desc_area_width;
+	int pad_width = get_max_desc_width(width);
+	int term_width = get_term_width();
 
 	if (test_suite__num_test_cases(t) > 1) {
 		char prefix[32];
 		int len = snprintf(prefix, sizeof(prefix), "%3d.%1d:",
 				   curr_suite + 1, curr_test_case + 1);
+		int pad = len >= 4 ? pad_width + 4 - len : pad_width;
+		int trunc = len >= 4 ? term_width + 4 - len : term_width;
 
-		desc_padding = target_desc_area_width - (len + 1);
-		if (desc_padding < 20)
-			desc_padding = 20;
-
-		desc = format_test_description(desc, desc_padding, desc_buf, sizeof(desc_buf));
-		pr_info("%s %-*s:", prefix, desc_padding, desc);
+		pr_info("%s %-*.*s:", prefix, pad, trunc,
+			test_description(t, curr_test_case));
 	} else {
-		desc_padding = target_desc_area_width - 5;
-		if (desc_padding < 20)
-			desc_padding = 20;
-
-		desc = format_test_description(desc, desc_padding, desc_buf, sizeof(desc_buf));
-		pr_info("%3d: %-*s:", curr_suite + 1, desc_padding, desc);
+		pr_info("%3d: %-*.*s:", curr_suite + 1, pad_width, term_width,
+			test_description(t, curr_test_case));
 	}
 
 	switch (result) {
 	case TEST_RUNNING:
-		color_fprintf(stderr, PERF_COLOR_YELLOW, " Running (%d active)\n", running);
+		color_fprintf(debug_file(), PERF_COLOR_YELLOW, " Running (%d active)\n", running);
 		break;
 	case TEST_OK:
 		if (test_suite__num_test_cases(t) > 1)
@@ -495,9 +570,9 @@ static int print_test_result(struct test_suite *t, int curr_suite, int curr_test
 
 		summary_tests_skipped++;
 		if (reason)
-			color_fprintf(stderr, PERF_COLOR_YELLOW, " Skip (%s)\n", reason);
+			color_fprintf(debug_file(), PERF_COLOR_YELLOW, " Skip (%s)\n", reason);
 		else
-			color_fprintf(stderr, PERF_COLOR_YELLOW, " Skip\n");
+			color_fprintf(debug_file(), PERF_COLOR_YELLOW, " Skip\n");
 	}
 		break;
 	case TEST_FAIL:
@@ -511,7 +586,7 @@ static int print_test_result(struct test_suite *t, int curr_suite, int curr_test
 			strbuf_addf_safe(&summary_failed_tests_buf, "  %3d: %s\n",
 				    curr_suite + 1,
 				    test_description(t, curr_test_case));
-		color_fprintf(stderr, PERF_COLOR_RED, " FAILED!\n");
+		color_fprintf(debug_file(), PERF_COLOR_RED, " FAILED!\n");
 		break;
 	}
 
@@ -533,8 +608,14 @@ static int print_test_result(struct test_suite *t, int curr_suite, int curr_test
 			const char *reason = skip_reason(t, curr_test_case);
 			char *escaped_reason = xml_escape(reason ? reason : "Skip");
 
-			strbuf_addf(&junit_xml_buf, "      <skipped message=\"%s\"/>\n",
-				    escaped_reason);
+			if (err_output && *err_output) {
+				strbuf_addf(&junit_xml_buf,
+					    "      <skipped message=\"%s\">\n%s\n      </skipped>\n",
+					    escaped_reason, escaped_err);
+			} else {
+				strbuf_addf(&junit_xml_buf, "      <skipped message=\"%s\"/>\n",
+					    escaped_reason);
+			}
 			free(escaped_reason);
 		}
 		strbuf_addstr(&junit_xml_buf, "    </testcase>\n");
@@ -614,6 +695,47 @@ static void print_line_highlighted(FILE *fp, const char *line, size_t len)
 }
 
 
+static bool is_blank_line(const char *line, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (!isspace((unsigned char)line[i]))
+			return false;
+	}
+	return true;
+}
+
+static bool is_stack_line(const char *line, size_t len)
+{
+	size_t i = 0;
+
+	while (i < len && isspace((unsigned char)line[i]))
+		i++;
+	return i + 1 < len && line[i] == '#' && isdigit((unsigned char)line[i + 1]);
+}
+
+static bool is_ignorable_snippet_line(const char *line, size_t len)
+{
+	return is_blank_line(line, len) || is_stack_line(line, len);
+}
+
+static bool has_non_blank_between(const char **lines, const size_t *line_lens,
+				  size_t start, size_t end)
+{
+	for (size_t j = start + 1; j < end; j++) {
+		if (!is_blank_line(lines[j], line_lens[j]))
+			return true;
+	}
+	return false;
+}
+
+static void pick_snippet_line(bool *pick, size_t idx, unsigned int *picked_count)
+{
+	if (!pick[idx] && *picked_count < failure_snippet_lines) {
+		pick[idx] = true;
+		(*picked_count)++;
+	}
+}
+
 static void print_test_failure_snippet(FILE *fp, const char *buf)
 {
 	size_t num_lines = 0;
@@ -684,43 +806,63 @@ static void print_test_failure_snippet(FILE *fp, const char *buf)
 	}
 
 	/* Pass 0: Always pick the very first line */
-	if (num_lines > 0 && picked_count < failure_snippet_lines) {
-		pick[0] = true;
-		picked_count++;
-	}
+	if (num_lines > 0)
+		pick_snippet_line(pick, 0, &picked_count);
 
 	/* Pass 1: Pick lines with failure keywords from start (Highest Priority) */
 	for (i = 0; i < num_lines && picked_count < failure_snippet_lines; i++) {
 		size_t dummy;
 
-		if (find_next_keyword(lines[i], line_lens[i], &dummy)) {
-			if (!pick[i]) {
-				pick[i] = true;
-				picked_count++;
-			}
-			/* Prioritize getting the immediate next line for context */
-			if (i + 1 < num_lines && !pick[i + 1] &&
-			    picked_count < failure_snippet_lines) {
-				pick[i + 1] = true;
-				picked_count++;
+		if (is_ignorable_snippet_line(lines[i], line_lens[i]))
+			continue;
+		if (!find_next_keyword(lines[i], line_lens[i], &dummy))
+			continue;
+
+		pick_snippet_line(pick, i, &picked_count);
+		/*
+		 * For unexpected signals, prioritize the preceding non-blank
+		 * line showing where the test had run to before the signal.
+		 */
+		if (!strncmp(lines[i], "---- unexpected signal", 22)) {
+			size_t j = i;
+
+			while (j > 0) {
+				j--;
+				if (!is_ignorable_snippet_line(lines[j], line_lens[j])) {
+					pick_snippet_line(pick, j, &picked_count);
+					break;
+				}
 			}
 		}
+		/* Prioritize getting the immediate next line for context */
+		if (i + 1 < num_lines &&
+		    !is_ignorable_snippet_line(lines[i + 1], line_lens[i + 1]))
+			pick_snippet_line(pick, i + 1, &picked_count);
 	}
 
-	/* Pass 2: Fill remaining quota from the end backwards */
+	/*
+	 * Pass 2: Fill remaining quota from the end backwards, skipping blank
+	 * and stack trace lines so trailing test progress is shown instead of
+	 * outermost stack frames like main/_start.
+	 */
 	i = num_lines;
 	while (i > 0 && picked_count < failure_snippet_lines) {
 		i--;
-		if (!pick[i]) {
-			pick[i] = true;
-			picked_count++;
-		}
+		if (!is_ignorable_snippet_line(lines[i], line_lens[i]))
+			pick_snippet_line(pick, i, &picked_count);
+	}
+
+	/* Pass 3: Fallback to top stack frames if quota remains */
+	for (i = 0; i < num_lines && picked_count < failure_snippet_lines; i++) {
+		if (!is_blank_line(lines[i], line_lens[i]))
+			pick_snippet_line(pick, i, &picked_count);
 	}
 
 	for (i = 0; i < num_lines; i++) {
 		if (!pick[i])
 			continue;
-		if (last_printed != -1 && (int)i > last_printed + 1) {
+		if (last_printed != -1 &&
+		    has_non_blank_between(lines, line_lens, last_printed, i)) {
 			if (perf_use_color_default)
 				fprintf(fp, "%s...%s\n", PERF_COLOR_BLUE, PERF_COLOR_RESET);
 			else
@@ -747,6 +889,7 @@ static void finish_test(struct child_test **child_tests, int running_test, int c
 	int ret;
 	struct timespec end_time;
 	double elapsed;
+	width = get_max_desc_width(width);
 
 	if (child_test == NULL) {
 		/* Test wasn't started. */
@@ -761,7 +904,8 @@ static void finish_test(struct child_test **child_tests, int running_test, int c
 	 * sub test names.
 	 */
 	if (test_suite__num_test_cases(t) > 1 && curr_test_case == 0)
-		pr_info("%3d: %s:\n", curr_suite + 1, test_description(t, -1));
+		pr_info("%3d: %-*.*s:\n", curr_suite + 1, width, width,
+			test_description(t, -1));
 
 	/*
 	 * Busy loop reading from the child's stdout/stderr that are set to be
@@ -969,6 +1113,8 @@ static int finish_tests_parallel(struct child_test **child_tests, size_t num_tes
 	int last_suite_printed = -1;
 	sigset_t set, oldset;
 
+	width = get_max_desc_width(width);
+
 	sigemptyset(&set);
 	sigaddset(&set, SIGINT);
 	sigaddset(&set, SIGTERM);
@@ -1037,8 +1183,11 @@ static int finish_tests_parallel(struct child_test **child_tests, size_t num_tes
 			if (next_child) {
 				if (test_suite__num_test_cases(next_child->test) > 1 &&
 				    last_suite_printed != next_child->suite_num) {
-					pr_info("%3d: %s:\n", next_child->suite_num + 1,
-						test_description(next_child->test, -1));
+					pr_info("%3d: %-*.*s:\n",
+						next_child->suite_num + 1,
+						width, width,
+						test_description(
+							next_child->test, -1));
 					last_suite_printed = next_child->suite_num;
 				}
 				print_test_result(next_child->test, next_child->suite_num,
@@ -1101,7 +1250,8 @@ static int finish_tests_parallel(struct child_test **child_tests, size_t num_tes
 
 			if (test_suite__num_test_cases(child->test) > 1 &&
 			    last_suite_printed != child->suite_num) {
-				pr_info("%3d: %s:\n", child->suite_num + 1,
+				pr_info("%3d: %-*.*s:\n", child->suite_num + 1,
+					width, width,
 					test_description(child->test, -1));
 				last_suite_printed = child->suite_num;
 			}
@@ -1225,12 +1375,12 @@ static void print_tests_summary(void)
 	pr_info("Passed subtests   : %u\n", summary_subtests_passed);
 	pr_info("Skipped tests     : %u\n", summary_tests_skipped);
 	if (summary_tests_failed > 0) {
-		color_fprintf(stderr, PERF_COLOR_RED, "Failed tests      : %u\n",
+		color_fprintf(debug_file(), PERF_COLOR_RED, "Failed tests      : %u\n",
 			      summary_tests_failed);
 		pr_info("List of failed tests:\n");
 		pr_info("%s", summary_failed_tests_buf.buf);
 	} else {
-		color_fprintf(stderr, PERF_COLOR_GREEN, "Failed tests      : 0\n");
+		color_fprintf(debug_file(), PERF_COLOR_GREEN, "Failed tests      : 0\n");
 	}
 
 	if (junit_filename) {
@@ -1348,9 +1498,13 @@ static int __cmd_test(struct test_suite **suites, int argc, const char *argv[],
 
 			if (intlist__find(skiplist, curr_suite + 1)) {
 				if (pass == 1) {
-					pr_info("%3d: %-*s:", curr_suite + 1, width,
+					int pad_width = get_max_desc_width(width);
+					int term_width = get_term_width();
+
+					pr_info("%3d: %-*.*s:", curr_suite + 1,
+						pad_width, term_width,
 						test_description(*t, -1));
-					color_fprintf(stderr, PERF_COLOR_YELLOW,
+					color_fprintf(debug_file(), PERF_COLOR_YELLOW,
 						      " Skip (user override)\n");
 					summary_tests_skipped++;
 					if (junit_filename) {
@@ -1424,14 +1578,20 @@ static int perf_test__list(FILE *fp, struct test_suite **suites, int argc, const
 		if (!perf_test__matches(test_description(*t, -1), curr_suite, argc, argv))
 			continue;
 
-		fprintf(fp, "%3d: %s\n", curr_suite + 1, test_description(*t, -1));
+		fprintf(fp, "%3d: %s", curr_suite + 1, test_description(*t, -1));
+		if (list_requisites)
+			requisites__fprintf(fp, *t, /*test_case=*/-1);
+		fprintf(fp, "\n");
 
 		if (test_suite__num_test_cases(*t) <= 1)
 			continue;
 
 		test_suite__for_each_test_case(*t, curr_test_case) {
-			fprintf(fp, "%3d.%1d: %s\n", curr_suite + 1, curr_test_case + 1,
+			fprintf(fp, "%3d.%1d: %s", curr_suite + 1, curr_test_case + 1,
 				test_description(*t, curr_test_case));
+			if (list_requisites)
+				requisites__fprintf(fp, *t, curr_test_case);
+			fprintf(fp, "\n");
 		}
 	}
 	return 0;
@@ -1633,11 +1793,30 @@ static int run_workload(const char *work, int argc, const char **argv)
 	return -1;
 }
 
+/*
+ * Owns the string test_objdump_path points at when it came from the config. It
+ * is reachable for the lifetime of the process so leak checking won't report
+ * it.
+ */
+static char *test_objdump_config_path;
+
 static int perf_test__config(const char *var, const char *value,
 			     void *data __maybe_unused)
 {
-	if (!strcmp(var, "annotate.objdump"))
-		test_objdump_path = value;
+	if (!strcmp(var, "annotate.objdump")) {
+		/*
+		 * The config, and so value, is freed by perf_config__exit()
+		 * below, take a copy that lives as long as the tests.
+		 */
+		char *dup = strdup(value);
+
+		if (!dup)
+			return -ENOMEM;
+
+		free(test_objdump_config_path);
+		test_objdump_config_path = dup;
+		test_objdump_path = dup;
+	}
 
 	return 0;
 }
@@ -1699,10 +1878,97 @@ static struct test_suite **build_suites(void)
 #undef for_each_suite
 }
 
+static bool perf_test__shares_mlock_budget(struct test_suite **suites, int argc,
+					   const char *argv[], struct intlist *skiplist)
+{
+	int sharing = 0;
+
+	/* The selection rules mirrored here are __cmd_test()'s: when they change, change both. */
+	for (int curr_suite = 0; suites[curr_suite]; curr_suite++) {
+		struct test_suite *t = suites[curr_suite];
+		int curr_test_case;
+		bool suite_matched;
+
+		if (!t->needs_mlock || intlist__find(skiplist, curr_suite + 1))
+			continue;
+
+		suite_matched = perf_test__matches(test_description(t, /*test_case=*/-1),
+						   curr_suite, argc, argv);
+		test_suite__for_each_test_case(t, curr_test_case) {
+			if (test_exclusive(t, curr_test_case))
+				continue;
+
+			if (suite_matched ||
+			    perf_test__matches(test_description(t, curr_test_case),
+					       curr_suite, argc, argv))
+				sharing += runs_per_test;
+		}
+		if (sharing > 1)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Once the per user budget set in kernel.perf_event_mlock_kb is spent, what
+ * maps on top of it is charged against RLIMIT_MEMLOCK and the mapping is
+ * refused with EPERM when that runs out too, but only for the processes the
+ * kernel is paranoid about and that have no CAP_IPC_LOCK to lift the check,
+ * see perf_mmap_calc_limits() in the kernel: used by
+ * perf_test__setup_mlock_budget() below, that has nothing to take turns on
+ * when neither applies.
+ */
+static bool perf_test__mlock_budget_exhaustible(void)
+{
+	if (perf_cap__capable(CAP_IPC_LOCK))
+		return false;
+
+	return perf_event_paranoid() > -1;
+}
+
+static void perf_test__setup_mlock_budget(struct test_suite **suites, int argc,
+					  const char *argv[], struct intlist *skiplist)
+{
+	/* Nothing can be denied the budget, nothing to take turns for. */
+	if (!perf_test__mlock_budget_exhaustible()) {
+		pr_debug("Not taking turns using the perf mlock budget: nothing can exhaust it\n");
+		return;
+	}
+
+	/* Nothing runs at the same time, nothing to share the budget with. */
+	if (sequential || !perf_test__shares_mlock_budget(suites, argc, argv, skiplist))
+		return;
+
+	mlock_budget = mmap(NULL, sizeof(*mlock_budget), PROT_READ | PROT_WRITE,
+			    MAP_SHARED | MAP_ANONYMOUS, /*fd=*/-1, /*offset=*/0);
+	if (mlock_budget == MAP_FAILED) {
+		mlock_budget = NULL;
+		pr_err("Failed to map the shared area used to take turns using the perf mlock budget\n");
+		return;
+	}
+
+	if (!mutex_init_pshared_robust(&mlock_budget->lock)) {
+		munmap(mlock_budget, sizeof(*mlock_budget));
+		mlock_budget = NULL;
+		pr_debug("Not taking turns using the perf mlock budget\n");
+	}
+}
+
+static void perf_test__teardown_mlock_budget(void)
+{
+	if (!mlock_budget)
+		return;
+
+	mutex_destroy(&mlock_budget->lock);
+	munmap(mlock_budget, sizeof(*mlock_budget));
+	mlock_budget = NULL;
+}
+
 int cmd_test(int argc, const char **argv)
 {
 	const char *test_usage[] = {
-	"perf test [<options>] [{list <test-name-fragment>|[<test-name-fragments>|<test-numbers>]}]",
+	"perf test [<options>] [{list|requisites} [<test-name-fragment>]|"
+	"[<test-name-fragments>|<test-numbers>]]",
 	NULL,
 	};
 	const char *skip = NULL;
@@ -1731,24 +1997,43 @@ int cmd_test(int argc, const char **argv)
 			  "Generate junit XML output, default test.xml", "test.xml"),
 	OPT_END()
 	};
-	const char * const test_subcommands[] = { "list", NULL };
+	const char * const test_subcommands[] = { "list", "requisites", NULL };
 	struct intlist *skiplist = NULL;
-        int ret = hists__init();
 	struct test_suite **suites;
+	int ret;
 
-        if (ret < 0)
+	ret = hists__init();
+	if (ret < 0)
                 return ret;
 
-	perf_config(perf_test__config, NULL);
+	/* Read test related config, like annotate.objdump, before isolating. */
+	ret = perf_config(perf_test__config, NULL);
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * Isolate the test suite from the user's ~/.perfconfig to ensure
+	 * behavior isn't impacted by custom variables (e.g. core.hybrid-merge).
+	 * Setting PERF_CONFIG isolates the perf commands run by the shell
+	 * tests, config_exclusive_filename does the same for this process.
+	 * Config values already read by main's perf_config are reset here, so
+	 * far only the hybrid-merge value is known to alter test output.
+	 */
+	if (setenv("PERF_CONFIG", "/dev/null", 1) < 0)
+		return -1;
+	config_exclusive_filename = "/dev/null";
+	perf_config__exit();
+	symbol_conf.hybrid_merge = false;
 
 	/* Unbuffered output */
 	setvbuf(stdout, NULL, _IONBF, 0);
 
 	argc = parse_options_subcommand(argc, argv, test_options, test_subcommands, test_usage, 0);
-	if (argc >= 1 && !strcmp(argv[0], "list")) {
+	if (argc >= 1 && (!strcmp(argv[0], "list") || !strcmp(argv[0], "requisites"))) {
 		suites = build_suites();
 		if (!suites)
 			return errno ? -errno : -ENOMEM;
+		list_requisites = !strcmp(argv[0], "requisites");
 		ret = perf_test__list(stdout, suites, argc - 1, argv + 1);
 		free(suites);
 		return ret;
@@ -1781,9 +2066,16 @@ int cmd_test(int argc, const char **argv)
 	rlimit__bump_memlock();
 
 	suites = build_suites();
-	if (!suites)
-		return errno ? -errno : -ENOMEM;
+	if (!suites) {
+		int err = errno;
+
+		intlist__delete(skiplist);
+		return err ? -err : -ENOMEM;
+	}
+	perf_test__setup_mlock_budget(suites, argc, argv, skiplist);
 	ret = __cmd_test(suites, argc, argv, skiplist);
+	perf_test__teardown_mlock_budget();
 	free(suites);
+	intlist__delete(skiplist);
 	return ret;
 }

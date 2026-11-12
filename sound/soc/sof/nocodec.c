@@ -21,17 +21,18 @@ static struct snd_soc_card sof_nocodec_card = {
 static int sof_nocodec_bes_setup(struct device *dev,
 				 struct snd_soc_dai_driver *drv,
 				 struct snd_soc_dai_link *links,
-				 int link_num, struct snd_soc_card *card)
+				 int link_num)
 {
+	struct snd_soc_card *card = &sof_nocodec_card;
 	struct snd_soc_dai_link_component *dlc;
 	int i;
 
-	if (!drv || !links || !card)
+	if (!drv || !links)
 		return -EINVAL;
 
 	/* set up BE dai_links */
 	for (i = 0; i < link_num; i++) {
-		dlc = devm_kcalloc(dev, 2, sizeof(*dlc), GFP_KERNEL);
+		dlc = devm_kzalloc_objs(dev, *dlc, 2);
 		if (!dlc)
 			return -ENOMEM;
 
@@ -67,18 +68,18 @@ static int sof_nocodec_bes_setup(struct device *dev,
 	return 0;
 }
 
-static int sof_nocodec_setup(struct device *dev,
-			     u32 num_dai_drivers,
-			     struct snd_soc_dai_driver *dai_drivers)
+static int sof_nocodec_setup(struct device *dev, struct snd_soc_acpi_mach *mach)
 {
+	u32 num_dai_drivers = mach->mach_params.num_dai_drivers;
+	struct snd_soc_dai_driver *dai_drivers = mach->mach_params.dai_drivers;
 	struct snd_soc_dai_link *links;
 
 	/* create dummy BE dai_links */
-	links = devm_kcalloc(dev, num_dai_drivers, sizeof(struct snd_soc_dai_link), GFP_KERNEL);
+	links = devm_kzalloc_objs(dev, struct snd_soc_dai_link, num_dai_drivers);
 	if (!links)
 		return -ENOMEM;
 
-	return sof_nocodec_bes_setup(dev, dai_drivers, links, num_dai_drivers, &sof_nocodec_card);
+	return sof_nocodec_bes_setup(dev, dai_drivers, links, num_dai_drivers);
 }
 
 static int sof_nocodec_probe(struct platform_device *pdev)
@@ -92,8 +93,7 @@ static int sof_nocodec_probe(struct platform_device *pdev)
 
 	snd_soc_card_set_topology_name(card, "sof");
 
-	ret = sof_nocodec_setup(card->dev, mach->mach_params.num_dai_drivers,
-				mach->mach_params.dai_drivers);
+	ret = sof_nocodec_setup(card->dev, mach);
 	if (ret < 0)
 		return ret;
 

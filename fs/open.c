@@ -36,7 +36,7 @@
 
 #include "internal.h"
 
-int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
+int do_truncate(const struct mnt_idmap *idmap, struct dentry *dentry,
 		loff_t length, unsigned int time_attrs, struct file *filp)
 {
 	int ret;
@@ -72,7 +72,7 @@ int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
 
 int vfs_truncate(const struct path *path, loff_t length)
 {
-	struct mnt_idmap *idmap;
+	const struct mnt_idmap *idmap;
 	struct inode *inode;
 	int error;
 
@@ -570,9 +570,12 @@ retry:
 
 SYSCALL_DEFINE1(fchdir, unsigned int, fd)
 {
-	CLASS(fd_raw, f)(fd);
 	int error;
 
+	if ((int)fd == FD_FAILFS_ROOT)
+		return failfs_current_chdir();
+
+	CLASS(fd_raw, f)(fd);
 	if (fd_empty(f))
 		return -EBADF;
 
@@ -612,6 +615,52 @@ dput_and_out:
 		lookup_flags |= LOOKUP_REVAL;
 		goto retry;
 	}
+	return error;
+}
+
+SYSCALL_DEFINE2(fchroot, int, fd, unsigned int, flags)
+{
+	struct path path;
+	int error;
+
+	if (flags)
+		return -EINVAL;
+
+	if (fd == FD_FAILFS_ROOT) {
+		if (!ns_capable(current_user_ns(), CAP_SYS_CHROOT)) {
+			if (!task_no_new_privs(current))
+				return -EPERM;
+			/* A shared fs_struct lets a sibling exec setuid past the check above. */
+			if (current->fs->users != 1)
+				return -EINVAL;
+			/* Moving the root to failfs lifts the old root's ".." barrier. */
+			if (current_chrooted())
+				return -EPERM;
+		}
+		failfs_get_root(&path);
+	} else {
+		CLASS(fd_raw, f)(fd);
+		if (fd_empty(f))
+			return -EBADF;
+
+		if (!d_can_lookup(fd_file(f)->f_path.dentry))
+			return -ENOTDIR;
+
+		error = file_permission(fd_file(f), MAY_EXEC | MAY_CHDIR);
+		if (error)
+			return error;
+
+		if (!ns_capable(current_user_ns(), CAP_SYS_CHROOT))
+			return -EPERM;
+
+		path = fd_file(f)->f_path;
+		path_get(&path);
+	}
+
+	error = security_path_chroot(&path);
+	if (!error)
+		set_fs_root(current->fs, &path);
+	path_put(&path);
 	return error;
 }
 
@@ -738,7 +787,7 @@ static inline bool setattr_vfsgid(struct iattr *attr, kgid_t kgid)
 
 int chown_common(const struct path *path, uid_t user, gid_t group)
 {
-	struct mnt_idmap *idmap;
+	const struct mnt_idmap *idmap;
 	struct user_namespace *fs_userns;
 	struct inode *inode = path->dentry->d_inode;
 	struct delegated_inode delegated_inode = { };
@@ -882,6 +931,11 @@ cleanup_inode:
 	return error;
 }
 
+/*
+ * Populate struct file
+ *
+ * NOTE: it assumes f_path is populated and consumes the caller's reference.
+ */
 static int do_dentry_open(struct file *f,
 			  int (*open)(struct inode *, struct file *))
 {
@@ -889,7 +943,6 @@ static int do_dentry_open(struct file *f,
 	struct inode *inode = f->f_path.dentry->d_inode;
 	int error;
 
-	path_get(&f->f_path);
 	f->f_inode = inode;
 	f->f_mapping = inode->i_mapping;
 	f->f_wb_err = filemap_sample_wb_err(f->f_mapping);
@@ -1006,6 +1059,7 @@ int finish_open(struct file *file, struct dentry *dentry,
 	BUG_ON(file->f_mode & FMODE_OPENED); /* once it's opened, it's opened */
 
 	file->__f_path.dentry = dentry;
+	path_get(&file->f_path);
 	return do_dentry_open(file, open);
 }
 EXPORT_SYMBOL(finish_open);
@@ -1049,6 +1103,7 @@ int vfs_open(const struct path *path, struct file *file)
 	int ret;
 
 	file->__f_path = *path;
+	path_get(&file->f_path);
 	ret = do_dentry_open(file, NULL);
 	if (!ret) {
 		/*
@@ -1056,6 +1111,25 @@ int vfs_open(const struct path *path, struct file *file)
 		 * fsnotify_close(), so we need fsnotify_open() here for
 		 * symmetry.
 		 */
+		fsnotify_open(file);
+	}
+	return ret;
+}
+
+/**
+ * vfs_open_consume - open the file at the given path and consume the reference
+ * @path: path to open
+ * @file: newly allocated file with f_flag initialized
+ */
+int vfs_open_consume(struct path *path, struct file *file)
+{
+	int ret;
+
+	file->__f_path = *path;
+	path->mnt = NULL;
+	path->dentry = NULL;
+	ret = do_dentry_open(file, NULL);
+	if (!ret) {
 		fsnotify_open(file);
 	}
 	return ret;
@@ -1098,6 +1172,7 @@ struct file *dentry_open_nonotify(const struct path *path, int flags,
 	}
 	return f;
 }
+EXPORT_SYMBOL_GPL(dentry_open_nonotify);
 
 /**
  * kernel_file_open - open a file for kernel internal use
@@ -1488,6 +1563,19 @@ int filp_close(struct file *filp, fl_owner_t id)
 }
 EXPORT_SYMBOL(filp_close);
 
+/* Like filp_close() but the last reference is put right here. */
+int filp_close_sync(struct file *filp, fl_owner_t id)
+{
+	int retval;
+
+	/* Kernel threads must never put their final reference here. */
+	VFS_WARN_ON_ONCE(current->flags & PF_KTHREAD);
+	retval = filp_flush(filp, id);
+	fput_close_sync(filp);
+
+	return retval;
+}
+
 /*
  * Careful here! We test whether the file pointer is NULL before
  * releasing the fd. This ensures that one clone task can't release
@@ -1502,13 +1590,11 @@ SYSCALL_DEFINE1(close, unsigned int, fd)
 	if (!file)
 		return -EBADF;
 
-	retval = filp_flush(file, current->files);
-
 	/*
 	 * We're returning to user space. Don't bother
 	 * with any delayed fput() cases.
 	 */
-	fput_close_sync(file);
+	retval = filp_close_sync(file, current->files);
 
 	if (likely(retval == 0))
 		return 0;

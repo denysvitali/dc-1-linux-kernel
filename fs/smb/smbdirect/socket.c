@@ -305,12 +305,35 @@ void __smbdirect_socket_schedule_cleanup(struct smbdirect_socket *sc,
 	 * disconnect all pending and ready sockets
 	 *
 	 * First we move ready sockets to pending again.
+	 *
+	 * Only a socket that was a listener (listen.backlog != -1) owns a
+	 * populated listen.ready/pending list.  Guarding on that also keeps
+	 * lockdep quiet: without it, the listener holds sc->listen.lock while
+	 * the loop recurses into each child psc, which takes psc->listen.lock.
+	 * Those are always different instances of the same lock class -- a
+	 * child never listens, so the nesting is strictly listener -> child
+	 * and cannot really deadlock -- but lockdep only sees the class and
+	 * reports "possible recursive locking".  A child has empty listen
+	 * lists and nothing to do here, so skipping it loses nothing, and a
+	 * pending child stays on its listener's list for the free path
+	 * (smbdirect_socket_destroy) to reap.
 	 */
-	spin_lock_irqsave(&sc->listen.lock, flags);
-	list_splice_init(&sc->listen.ready, &sc->listen.pending);
-	list_for_each_entry_safe(psc, tsc, &sc->listen.pending, accept.list)
-		smbdirect_socket_schedule_cleanup(psc, sc->first_error);
-	spin_unlock_irqrestore(&sc->listen.lock, flags);
+	if (sc->listen.backlog != -1) { /* was a listener */
+		/*
+		 * We don't move them to the orphaned list here,
+		 * each child does that itself at the end of its
+		 * smbdirect_socket_cleanup_work(), see
+		 * smbdirect_listen_orphan_socket(). Only that checks
+		 * accept.listener, which is still NULL for a child
+		 * that smbdirect_listen_connect_request() is still
+		 * setting up and will release itself on failure.
+		 */
+		spin_lock_irqsave(&sc->listen.lock, flags);
+		list_splice_init(&sc->listen.ready, &sc->listen.pending);
+		list_for_each_entry_safe(psc, tsc, &sc->listen.pending, accept.list)
+			smbdirect_socket_schedule_cleanup(psc, sc->first_error);
+		spin_unlock_irqrestore(&sc->listen.lock, flags);
+	}
 
 	switch (sc->status) {
 	case SMBDIRECT_SOCKET_RESOLVE_ADDR_FAILED:
@@ -405,12 +428,29 @@ static void smbdirect_socket_cleanup_work(struct work_struct *work)
 	 * disconnect all pending and ready sockets
 	 *
 	 * First we move ready sockets to pending again.
+	 *
+	 * Guarded on listen.backlog != -1 for the same reason as in
+	 * __smbdirect_socket_schedule_cleanup(): only a listener owns a
+	 * populated listen list, and skipping the block for a child avoids
+	 * nesting psc->listen.lock under a listener's listen.lock (different
+	 * instances of one class -- harmless, but lockdep cannot tell).
 	 */
-	spin_lock_irqsave(&sc->listen.lock, flags);
-	list_splice_init(&sc->listen.ready, &sc->listen.pending);
-	list_for_each_entry_safe(psc, tsc, &sc->listen.pending, accept.list)
-		smbdirect_socket_schedule_cleanup(psc, sc->first_error);
-	spin_unlock_irqrestore(&sc->listen.lock, flags);
+	if (sc->listen.backlog != -1) { /* was a listener */
+		/*
+		 * We don't move them to the orphaned list here,
+		 * each child does that itself at the end of its
+		 * smbdirect_socket_cleanup_work(), see
+		 * smbdirect_listen_orphan_socket(). Only that checks
+		 * accept.listener, which is still NULL for a child
+		 * that smbdirect_listen_connect_request() is still
+		 * setting up and will release itself on failure.
+		 */
+		spin_lock_irqsave(&sc->listen.lock, flags);
+		list_splice_init(&sc->listen.ready, &sc->listen.pending);
+		list_for_each_entry_safe(psc, tsc, &sc->listen.pending, accept.list)
+			smbdirect_socket_schedule_cleanup(psc, sc->first_error);
+		spin_unlock_irqrestore(&sc->listen.lock, flags);
+	}
 
 	switch (sc->status) {
 	case SMBDIRECT_SOCKET_NEGOTIATE_NEEDED:
@@ -464,6 +504,18 @@ static void smbdirect_socket_cleanup_work(struct work_struct *work)
 	 * in order to notice the broken connection.
 	 */
 	smbdirect_socket_wake_up_all(sc);
+
+	/*
+	 * If we're still on the pending or ready list
+	 * of a listener, we started the disconnect
+	 * as far as possible above, so we move ourself
+	 * to the orphaned list of the listener,
+	 * which will release us.
+	 *
+	 * This is a no-op internally if
+	 * sc->accept.listener is NULL.
+	 */
+	smbdirect_listen_orphan_socket(sc);
 }
 
 static void smbdirect_socket_destroy(struct smbdirect_socket *sc)
@@ -473,6 +525,7 @@ static void smbdirect_socket_destroy(struct smbdirect_socket *sc)
 	struct smbdirect_recv_io *recv_io;
 	struct smbdirect_recv_io *recv_tmp;
 	LIST_HEAD(all_list);
+	LIST_HEAD(pending_list);
 	unsigned long flags;
 
 	smbdirect_log_rdma_event(sc, SMBDIRECT_LOG_INFO,
@@ -488,7 +541,13 @@ static void smbdirect_socket_destroy(struct smbdirect_socket *sc)
 	if (sc->status == SMBDIRECT_SOCKET_DESTROYED)
 		return;
 
-	WARN_ONCE(sc->status != SMBDIRECT_SOCKET_DISCONNECTED,
+	/*
+	 * smbdirect_socket_destroy_sync() doesn't wait
+	 * for RDMA_CM_EVENT_DISCONNECTED, so we may still
+	 * be in SMBDIRECT_SOCKET_DISCONNECTING
+	 * (or already reached SMBDIRECT_SOCKET_DISCONNECTED)
+	 */
+	WARN_ONCE(sc->status < SMBDIRECT_SOCKET_DISCONNECTING,
 		  "status=%s first_error=%1pe",
 		  smbdirect_socket_status_string(sc->status),
 		  SMBDIRECT_DEBUG_ERR_PTR(sc->first_error));
@@ -515,9 +574,36 @@ static void smbdirect_socket_destroy(struct smbdirect_socket *sc)
 	disable_work_sync(&sc->recv_io.posted.refill_work);
 	disable_work_sync(&sc->idle.immediate_work);
 	disable_delayed_work_sync(&sc->idle.timer_work);
+	disable_work_sync(&sc->listen.purge_orphaned_work);
 
 	if (sc->rdma.cm_id)
 		rdma_lock_handler(sc->rdma.cm_id);
+
+	/*
+	 * We hold the handler lock, so the rdma event
+	 * handlers can't change the status anymore.
+	 *
+	 * If RDMA_CM_EVENT_DISCONNECTED didn't arrive yet,
+	 * we just stop waiting for it here.
+	 *
+	 * We already disabled disconnect_work above
+	 * and before we call rdma_unlock_handler below
+	 * we call smbdirect_connection_destroy_qp which
+	 * sets sc->ib.qp = NULL.
+	 *
+	 * Between rdma_unlock_handler() and
+	 * rdma_destroy_id() below there's a small
+	 * windows where RDMA_CM_EVENT_DISCONNECTED
+	 * could still arrive.
+	 *
+	 * But smbdirect_connection_rdma_event_handler
+	 * will be a noop when calling smbdirect_socket_schedule_cleanup*
+	 * ib_drain_qp() also won't be called.
+	 */
+	if (sc->status < SMBDIRECT_SOCKET_DISCONNECTED) {
+		sc->status = SMBDIRECT_SOCKET_DISCONNECTED;
+		smbdirect_socket_wake_up_all(sc);
+	}
 
 	if (sc->ib.qp) {
 		smbdirect_log_rdma_event(sc, SMBDIRECT_LOG_INFO,
@@ -530,24 +616,42 @@ static void smbdirect_socket_destroy(struct smbdirect_socket *sc)
 	 * disconnect all pending and ready sockets
 	 *
 	 * We move ready sockets to pending again.
+	 *
+	 * Capture them here -- rdma_lock_handler(sc->rdma.cm_id) is held above,
+	 * so a concurrent CM CONNECT_REQUEST cannot add more; sc->listen.lock
+	 * below only protects the list splice itself -- but DEFER releasing
+	 * them until the listener's cm_id is destroyed:
+	 *
+	 * - smbdirect_socket_release() -> smbdirect_socket_destroy() takes the
+	 *   child's own rdma_lock_handler() lock (&id_priv->handler_mutex).
+	 *   The listener's and the child's cm_id are always different
+	 *   instances, so the nesting cannot really deadlock, but lockdep only
+	 *   sees one lock class and reports "possible recursive locking".
+	 *
+	 * - rdma_destroy_id() of a child before the listener's own
+	 *   rdma_destroy_id() below lets _cma_cancel_listens() walk the freed
+	 *   child id_priv (KASAN slab-use-after-free in __mutex_lock()).
+	 *
+	 * The children are independent sockets whose teardown does not need
+	 * the listener's handler lock.
 	 */
 	spin_lock_irqsave(&sc->listen.lock, flags);
-	list_splice_tail_init(&sc->listen.ready, &all_list);
-	list_splice_tail_init(&sc->listen.pending, &all_list);
+	list_splice_tail_init(&sc->listen.ready, &pending_list);
+	list_splice_tail_init(&sc->listen.pending, &pending_list);
+	/*
+	 * purge_orphaned_work is already disabled above,
+	 * so we also need to release the orphaned sockets.
+	 *
+	 * Clearing accept.listener under listen.lock
+	 * makes us responsible for releasing them and
+	 * prevents them from moving themselves to
+	 * the orphaned list via
+	 * smbdirect_listen_orphan_socket().
+	 */
+	list_splice_tail_init(&sc->listen.orphaned, &pending_list);
+	list_for_each_entry(psc, &pending_list, accept.list)
+		WRITE_ONCE(psc->accept.listener, NULL);
 	spin_unlock_irqrestore(&sc->listen.lock, flags);
-	psockets = list_count_nodes(&all_list);
-	if (sc->listen.backlog != -1) /* was a listener */
-		smbdirect_log_rdma_event(sc, SMBDIRECT_LOG_INFO,
-			"release %zu pending sockets\n", psockets);
-	list_for_each_entry_safe(psc, tsc, &all_list, accept.list) {
-		list_del_init(&psc->accept.list);
-		psc->accept.listener = NULL;
-		smbdirect_socket_release(psc);
-	}
-	if (sc->listen.backlog != -1) /* was a listener */
-		smbdirect_log_rdma_event(sc, SMBDIRECT_LOG_INFO,
-			"released %zu pending sockets\n", psockets);
-	INIT_LIST_HEAD(&all_list);
 
 	/* It's not possible for upper layer to get to reassembly */
 	if (sc->listen.backlog == -1) /* was not a listener */
@@ -576,6 +680,25 @@ static void smbdirect_socket_destroy(struct smbdirect_socket *sc)
 		rdma_destroy_id(sc->rdma.cm_id);
 		sc->rdma.cm_id = NULL;
 	}
+
+	/*
+	 * The listener's rdma_lock_handler() lock is dropped and its cm_id is
+	 * destroyed, so it is safe to release the child sockets captured
+	 * above: each release recurses into smbdirect_socket_destroy() and
+	 * takes that child's own handler_mutex without nesting it under the
+	 * listener's, and _cma_cancel_listens() can no longer reach them.
+	 */
+	psockets = list_count_nodes(&pending_list);
+	if (sc->listen.backlog != -1) /* was a listener */
+		smbdirect_log_rdma_event(sc, SMBDIRECT_LOG_INFO,
+			"release %zu pending sockets\n", psockets);
+	list_for_each_entry_safe(psc, tsc, &pending_list, accept.list) {
+		list_del_init(&psc->accept.list);
+		smbdirect_socket_release(psc);
+	}
+	if (sc->listen.backlog != -1) /* was a listener */
+		smbdirect_log_rdma_event(sc, SMBDIRECT_LOG_INFO,
+			"released %zu pending sockets\n", psockets);
 
 	if (sc->listen.backlog == -1) /* was not a listener */
 		smbdirect_log_rdma_event(sc, SMBDIRECT_LOG_INFO,
@@ -631,17 +754,21 @@ void smbdirect_socket_destroy_sync(struct smbdirect_socket *sc)
 		"destroying rdma session\n");
 	if (sc->status < SMBDIRECT_SOCKET_DISCONNECTING)
 		smbdirect_socket_cleanup_work(&sc->disconnect_work);
-	if (sc->status < SMBDIRECT_SOCKET_DISCONNECTED) {
-		smbdirect_log_rdma_event(sc, SMBDIRECT_LOG_INFO,
-			"wait for transport being disconnected\n");
-		wait_event(sc->status_wait, sc->status == SMBDIRECT_SOCKET_DISCONNECTED);
-		smbdirect_log_rdma_event(sc, SMBDIRECT_LOG_INFO,
-			"waited for transport being disconnected\n");
-	}
 
 	/*
-	 * Once we reached SMBDIRECT_SOCKET_DISCONNECTED,
-	 * we should call smbdirect_socket_destroy()
+	 * We don't wait for RDMA_CM_EVENT_DISCONNECTED,
+	 * rdma_disconnect() was already called by
+	 * smbdirect_socket_cleanup_work() if needed
+	 * and smbdirect_socket_destroy() drains the qp,
+	 * destroys it and calls rdma_destroy_id(), which
+	 * only waits for a currently running event handler
+	 * and makes sure no further events are delivered.
+	 * The rest of the disconnect protocol is handled
+	 * by the rdma core asynchronously.
+	 *
+	 * Waiting for RDMA_CM_EVENT_DISCONNECTED could
+	 * take very long or forever, e.g. if the peer
+	 * just disappeared.
 	 */
 	smbdirect_socket_destroy(sc);
 	smbdirect_log_rdma_event(sc, SMBDIRECT_LOG_INFO,
@@ -693,7 +820,17 @@ static void smbdirect_socket_release_destroy(struct kref *kref)
 	 * in DESTROYED state, before we free the memory.
 	 */
 	smbdirect_socket_destroy_sync(sc);
-	kfree(sc);
+
+	/*
+	 * Only a listener (backlog != -1) is ever dereferenced
+	 * via sc->accept.listener under rcu_read_lock(), see
+	 * smbdirect_listen_orphan_socket(). Other sockets can be
+	 * freed immediately.
+	 */
+	if (sc->listen.backlog != -1) /* was a listener */
+		kfree_rcu(sc, refs.rcu);
+	else
+		kfree(sc);
 }
 
 void smbdirect_socket_release(struct smbdirect_socket *sc)

@@ -1379,10 +1379,7 @@ static int tas675x_mute_stream(struct snd_soc_dai *dai, int mute, int direction)
 	int ret;
 
 	if (direction == SNDRV_PCM_STREAM_CAPTURE) {
-		if (mute)
-			clear_bit(dai->id, &tas->active_capture_dais);
-		else
-			set_bit(dai->id, &tas->active_capture_dais);
+		assign_bit(dai->id, &tas->active_capture_dais, !mute);
 		return 0;
 	}
 
@@ -1391,10 +1388,7 @@ static int tas675x_mute_stream(struct snd_soc_dai *dai, int mute, int direction)
 	 * The TAS675x has two playback DAIs (main audio and LLP).
 	 * Only transition to SLEEP when ALL are muted.
 	 */
-	if (mute)
-		clear_bit(dai->id, &tas->active_playback_dais);
-	else
-		set_bit(dai->id, &tas->active_playback_dais);
+	assign_bit(dai->id, &tas->active_playback_dais, !mute);
 
 	/* Last playback stream */
 	if (mute && !READ_ONCE(tas->active_playback_dais)) {
@@ -1924,15 +1918,6 @@ static const struct reg_default tas675x_reg_defaults[] = {
 	{ TAS675X_PWM_PHASE_M_CTRL_CH2_REG, 0x00 },
 	{ TAS675X_PWM_PHASE_M_CTRL_CH3_REG, 0x00 },
 	{ TAS675X_PWM_PHASE_M_CTRL_CH4_REG, 0x00 },
-	{ TAS675X_DC_LDG_CTRL_REG,         0x00 },
-	{ TAS675X_DC_LDG_LO_CTRL_REG,      0x00 },
-	{ TAS675X_DC_LDG_TIME_CTRL_REG,    0x00 },
-	{ TAS675X_DC_LDG_SL_CH1_CH2_CTRL_REG, 0x11 },
-	{ TAS675X_DC_LDG_SL_CH3_CH4_CTRL_REG, 0x11 },
-	{ TAS675X_AC_LDG_CTRL_REG,         0x10 },
-	{ TAS675X_TWEETER_DETECT_CTRL_REG, 0x08 },
-	{ TAS675X_TWEETER_DETECT_THRESH_REG, 0x00 },
-	{ TAS675X_AC_LDG_FREQ_CTRL_REG,    0xC8 },
 	{ TAS675X_REPORT_ROUTING_1_REG,    0x00 },
 	{ TAS675X_OTSD_RECOVERY_EN_REG,    0x00 },
 	{ TAS675X_REPORT_ROUTING_2_REG,    0xA2 },
@@ -1943,6 +1928,15 @@ static const struct reg_default tas675x_reg_defaults[] = {
 	{ TAS675X_GPIO1_OUTPUT_SEL_REG,    0x00 },
 	{ TAS675X_GPIO2_OUTPUT_SEL_REG,    0x00 },
 	{ TAS675X_GPIO_CTRL_REG,           TAS675X_GPIO_CTRL_RSTVAL },
+	{ TAS675X_DC_LDG_CTRL_REG,         0x00 },
+	{ TAS675X_DC_LDG_LO_CTRL_REG,      0x00 },
+	{ TAS675X_DC_LDG_TIME_CTRL_REG,    0x00 },
+	{ TAS675X_DC_LDG_SL_CH1_CH2_CTRL_REG, 0x11 },
+	{ TAS675X_DC_LDG_SL_CH3_CH4_CTRL_REG, 0x11 },
+	{ TAS675X_AC_LDG_CTRL_REG,         0x10 },
+	{ TAS675X_TWEETER_DETECT_CTRL_REG, 0x08 },
+	{ TAS675X_TWEETER_DETECT_THRESH_REG, 0x00 },
+	{ TAS675X_AC_LDG_FREQ_CTRL_REG,    0xC8 },
 	{ TAS675X_OTW_CTRL_CH1_CH2_REG,    0x11 },
 	{ TAS675X_OTW_CTRL_CH3_CH4_REG,    0x11 },
 };
@@ -2041,7 +2035,7 @@ static int tas675x_i2c_probe(struct i2c_client *client)
 	u32 val;
 	int i, ret;
 
-	tas = devm_kzalloc(&client->dev, sizeof(*tas), GFP_KERNEL);
+	tas = devm_kzalloc_obj(&client->dev, *tas);
 	if (!tas)
 		return -ENOMEM;
 

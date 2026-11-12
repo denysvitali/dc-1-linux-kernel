@@ -25,9 +25,12 @@ struct irq_domain_ops;
 #define _LINUX
 #endif
 #include <acpi/acpi.h>
+#include <acpi/acpi_bus.h>
 #include <acpi/acpi_numa.h>
 
 #ifdef	CONFIG_ACPI
+
+DEFINE_FREE(acpi_object_free, union acpi_object *, if (_T) ACPI_FREE(_T));
 
 #include <linux/list.h>
 #include <linux/dynamic_debug.h>
@@ -35,7 +38,6 @@ struct irq_domain_ops;
 #include <linux/mutex.h>
 #include <linux/fw_table.h>
 
-#include <acpi/acpi_bus.h>
 #include <acpi/acpi_drivers.h>
 #include <acpi/acpi_io.h>
 #include <asm/acpi.h>
@@ -94,12 +96,16 @@ static inline void acpi_preset_companion(struct device *dev,
 	ACPI_COMPANION_SET(dev, acpi_find_child_device(parent, addr, false));
 }
 
+static inline void acpi_device_clear_deps(struct device *dev)
+{
+	if (has_acpi_companion(dev))
+		acpi_dev_clear_dependencies(ACPI_COMPANION(dev));
+}
+
 static inline const char *acpi_dev_name(struct acpi_device *adev)
 {
 	return dev_name(&adev->dev);
 }
-
-struct device *acpi_get_first_physical_node(struct acpi_device *adev);
 
 enum acpi_irq_model_id {
 	ACPI_IRQ_MODEL_PIC = 0,
@@ -315,6 +321,19 @@ static inline int acpi_processor_evaluate_cst(acpi_handle handle, u32 cpu,
 }
 #endif
 
+#ifdef CONFIG_ACPI_PROCESSOR_IDLE
+int acpi_processor_extract_lpi_info(acpi_handle pr_handle,
+				    struct acpi_processor_power *pr_power,
+				    bool strict);
+#else
+static inline int acpi_processor_extract_lpi_info(acpi_handle pr_handle,
+				    struct acpi_processor_power *pr_power,
+				    bool strict)
+{
+	return -ENODEV;
+}
+#endif
+
 #ifdef CONFIG_ACPI_HOTPLUG_CPU
 /* Arch dependent functions for cpu hotplug support */
 int acpi_map_cpu(acpi_handle handle, phys_cpuid_t physid, u32 acpi_id,
@@ -360,9 +379,10 @@ int acpi_gsi_to_irq (u32 gsi, unsigned int *irq);
 int acpi_isa_irq_to_gsi (unsigned isa_irq, u32 *gsi);
 
 typedef struct fwnode_handle *(*acpi_gsi_domain_disp_fn)(u32);
+typedef acpi_handle (*acpi_gsi_handle_disp_fn)(u32);
 
 void acpi_set_irq_model(enum acpi_irq_model_id model,
-			acpi_gsi_domain_disp_fn fn);
+			acpi_gsi_domain_disp_fn fn, acpi_gsi_handle_disp_fn gsi_dep_fn);
 acpi_gsi_domain_disp_fn acpi_get_gsi_dispatcher(void);
 void acpi_set_gsi_to_irq_fallback(u32 (*)(u32));
 
@@ -371,6 +391,8 @@ struct irq_domain *acpi_irq_create_hierarchy(unsigned int flags,
 					     struct fwnode_handle *fwnode,
 					     const struct irq_domain_ops *ops,
 					     void *host_data);
+
+u32 acpi_irq_add_auto_dep(acpi_handle handle);
 
 #ifdef CONFIG_X86_IO_APIC
 extern int acpi_get_override_irq(u32 gsi, int *trigger, int *polarity);
@@ -412,7 +434,7 @@ extern acpi_handle ec_get_handle(void);
 
 extern bool acpi_is_pnp_device(struct acpi_device *);
 
-#if defined(CONFIG_ACPI_WMI) || defined(CONFIG_ACPI_WMI_MODULE)
+#if IS_ENABLED(CONFIG_ACPI_WMI)
 
 typedef void (*wmi_notify_handler) (union acpi_object *data, void *context);
 
@@ -448,6 +470,7 @@ extern char *wmi_get_acpi_device_uid(const char *guid);
 #define ACPI_VIDEO_OUTPUT_SWITCHING_DMI_VIDEO		0x0800
 
 extern char acpi_video_backlight_string[];
+extern bool acpi_dev_is_video_device(struct acpi_device *adev);
 extern long acpi_is_video_device(acpi_handle handle);
 
 extern void acpi_osi_setup(char *str);
@@ -908,12 +931,9 @@ static inline void acpi_preset_companion(struct device *dev,
 {
 }
 
-static inline const char *acpi_dev_name(struct acpi_device *adev)
-{
-	return NULL;
-}
+static inline void acpi_device_clear_deps(struct device *dev) {}
 
-static inline struct device *acpi_get_first_physical_node(struct acpi_device *adev)
+static inline const char *acpi_dev_name(struct acpi_device *adev)
 {
 	return NULL;
 }
@@ -1280,34 +1300,34 @@ void __acpi_handle_debug(struct _ddebug *descriptor, acpi_handle handle, const c
 #endif
 
 /*
- * acpi_handle_<level>: Print message with ACPI prefix and object path
+ * acpi_handle_<level> - Print a message with ACPI prefix and object path
  *
- * These interfaces acquire the global namespace mutex to obtain an object
- * path.  In interrupt context, it shows the object path as <n/a>.
+ * In thread context, the global namespace mutex is acquired to obtain the
+ * object path.  In interrupt context, the object path is shown as <n/a>.
  */
 #define acpi_handle_emerg(handle, fmt, ...)				\
-	acpi_handle_printk(KERN_EMERG, handle, fmt, ##__VA_ARGS__)
+	acpi_handle_printk(KERN_EMERG, handle, dev_fmt(fmt), ##__VA_ARGS__)
 #define acpi_handle_alert(handle, fmt, ...)				\
-	acpi_handle_printk(KERN_ALERT, handle, fmt, ##__VA_ARGS__)
+	acpi_handle_printk(KERN_ALERT, handle, dev_fmt(fmt), ##__VA_ARGS__)
 #define acpi_handle_crit(handle, fmt, ...)				\
-	acpi_handle_printk(KERN_CRIT, handle, fmt, ##__VA_ARGS__)
+	acpi_handle_printk(KERN_CRIT, handle, dev_fmt(fmt), ##__VA_ARGS__)
 #define acpi_handle_err(handle, fmt, ...)				\
-	acpi_handle_printk(KERN_ERR, handle, fmt, ##__VA_ARGS__)
+	acpi_handle_printk(KERN_ERR, handle, dev_fmt(fmt), ##__VA_ARGS__)
 #define acpi_handle_warn(handle, fmt, ...)				\
-	acpi_handle_printk(KERN_WARNING, handle, fmt, ##__VA_ARGS__)
+	acpi_handle_printk(KERN_WARNING, handle, dev_fmt(fmt), ##__VA_ARGS__)
 #define acpi_handle_notice(handle, fmt, ...)				\
-	acpi_handle_printk(KERN_NOTICE, handle, fmt, ##__VA_ARGS__)
+	acpi_handle_printk(KERN_NOTICE, handle, dev_fmt(fmt), ##__VA_ARGS__)
 #define acpi_handle_info(handle, fmt, ...)				\
-	acpi_handle_printk(KERN_INFO, handle, fmt, ##__VA_ARGS__)
+	acpi_handle_printk(KERN_INFO, handle, dev_fmt(fmt), ##__VA_ARGS__)
 
 #if defined(DEBUG)
 #define acpi_handle_debug(handle, fmt, ...)				\
-	acpi_handle_printk(KERN_DEBUG, handle, fmt, ##__VA_ARGS__)
+	acpi_handle_printk(KERN_DEBUG, handle, dev_fmt(fmt), ##__VA_ARGS__)
 #else
 #if defined(CONFIG_DYNAMIC_DEBUG)
 #define acpi_handle_debug(handle, fmt, ...)				\
 	_dynamic_func_call(fmt, __acpi_handle_debug,			\
-			   handle, pr_fmt(fmt), ##__VA_ARGS__)
+			   handle, dev_fmt(fmt), ##__VA_ARGS__)
 #else
 #define acpi_handle_debug(handle, fmt, ...)				\
 ({									\
@@ -1617,6 +1637,7 @@ static inline int acpi_pptt_get_cpumask_from_cache_id(u32 cache_id,
 #endif
 
 void acpi_arch_init(void);
+void acpi_arch_late_init(void);
 
 #ifdef CONFIG_ACPI_PCC
 void acpi_init_pcc(void);

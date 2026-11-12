@@ -7,6 +7,7 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/arm-rsi-cmds.h>
 #include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
@@ -44,7 +45,6 @@
 #include <asm/cpu_ops.h>
 #include <asm/kasan.h>
 #include <asm/numa.h>
-#include <asm/rsi.h>
 #include <asm/scs.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
@@ -448,7 +448,6 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 
 	/* 24s must cover everything until slab_is_available() re-arms us. */
 	jagar_late_wdt_checkpoint(24);
-	early_ioremap_reset();
 	jagar_pstore_drop_early();
 	jagar_wdt_drop_early();
 

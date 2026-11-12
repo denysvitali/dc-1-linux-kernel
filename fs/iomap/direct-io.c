@@ -10,6 +10,7 @@
 #include <linux/iomap.h>
 #include <linux/task_io_accounting_ops.h>
 #include <linux/fserror.h>
+#include <linux/init.h>
 #include "internal.h"
 #include "trace.h"
 
@@ -75,10 +76,19 @@ static void iomap_dio_submit_bio(const struct iomap_iter *iter,
 
 	if (dio->dops && dio->dops->submit_io) {
 		dio->dops->submit_io(iter, bio, pos);
-	} else {
-		WARN_ON_ONCE(iter->iomap.flags & IOMAP_F_ANON_WRITE);
-		blk_crypto_submit_bio(bio);
+		return;
 	}
+
+	WARN_ON_ONCE(iter->iomap.flags & IOMAP_F_ANON_WRITE);
+
+	if (iter->iomap.flags & IOMAP_F_INTEGRITY) {
+		if (dio->flags & IOMAP_DIO_WRITE)
+			fs_bio_integrity_generate(bio);
+		else
+			fs_bio_integrity_alloc(bio);
+	}
+
+	blk_crypto_submit_bio(bio);
 }
 
 static inline enum fserror_type iomap_dio_err_type(const struct iomap_dio *dio)
@@ -88,9 +98,9 @@ static inline enum fserror_type iomap_dio_err_type(const struct iomap_dio *dio)
 	return FSERR_DIRECTIO_READ;
 }
 
-static inline bool should_report_dio_fserror(const struct iomap_dio *dio)
+static inline bool should_report_dio_fserror(int error)
 {
-	switch (dio->error) {
+	switch (error) {
 	case 0:
 	case -EAGAIN:
 	case -ENOTBLK:
@@ -110,7 +120,7 @@ ssize_t iomap_dio_complete(struct iomap_dio *dio)
 
 	if (dops && dops->end_io)
 		ret = dops->end_io(iocb, dio->size, ret, dio->flags);
-	if (should_report_dio_fserror(dio))
+	if (should_report_dio_fserror(dio->error))
 		fserror_report_io(file_inode(iocb->ki_filp),
 				  iomap_dio_err_type(dio), offset, dio->size,
 				  dio->error, GFP_NOFS);
@@ -245,8 +255,7 @@ static void __iomap_dio_bio_end_io(struct bio *bio, bool inline_completion)
 		fs_bio_integrity_free(bio);
 
 	if (dio->flags & IOMAP_DIO_BOUNCE) {
-		bio_iov_iter_unbounce(bio, !!dio->error,
-				dio->flags & IOMAP_DIO_USER_BACKED);
+		bio_free_folios(bio);
 		bio_put(bio);
 	} else if (dio->flags & IOMAP_DIO_USER_BACKED) {
 		bio_check_pages_dirty(bio);
@@ -295,7 +304,7 @@ u32 iomap_finish_ioend_direct(struct iomap_ioend *ioend)
 	return vec_count;
 }
 
-static int iomap_dio_zero(const struct iomap_iter *iter, struct iomap_dio *dio,
+static void iomap_dio_zero(const struct iomap_iter *iter, struct iomap_dio *dio,
 		loff_t pos, unsigned len)
 {
 	struct inode *inode = file_inode(dio->iocb->ki_filp);
@@ -304,14 +313,14 @@ static int iomap_dio_zero(const struct iomap_iter *iter, struct iomap_dio *dio,
 	int nr_vecs = max(1, i_blocksize(inode) / folio_size(zero_folio));
 
 	if (!len)
-		return 0;
+		return;
 
 	/*
 	 * This limit shall never be reached as most filesystems have a
 	 * maximum blocksize of 64k.
 	 */
 	if (WARN_ON_ONCE(nr_vecs > BIO_MAX_VECS))
-		return -EINVAL;
+		return;
 
 	bio = iomap_dio_alloc_bio(iter, dio, nr_vecs,
 				  REQ_OP_WRITE | REQ_SYNC | REQ_IDLE);
@@ -327,14 +336,13 @@ static int iomap_dio_zero(const struct iomap_iter *iter, struct iomap_dio *dio,
 		len -= io_len;
 	}
 	iomap_dio_submit_bio(iter, dio, bio, pos);
-
-	return 0;
 }
 
 static ssize_t iomap_dio_bio_iter_one(struct iomap_iter *iter,
 		struct iomap_dio *dio, loff_t pos, unsigned int alignment,
 		blk_opf_t op)
 {
+	unsigned int maxsize = iomap_max_bio_size(&iter->iomap);
 	unsigned int nr_vecs;
 	struct bio *bio;
 	ssize_t ret;
@@ -352,13 +360,12 @@ static ssize_t iomap_dio_bio_iter_one(struct iomap_iter *iter,
 	bio->bi_private = dio;
 	bio->bi_end_io = iomap_dio_bio_end_io;
 
-
 	if (dio->flags & IOMAP_DIO_BOUNCE)
-		ret = bio_iov_iter_bounce(bio, dio->submit.iter,
-				iomap_max_bio_size(&iter->iomap), alignment);
+		ret = bio_iov_iter_bounce_write(bio, dio->submit.iter, maxsize,
+				alignment);
 	else
-		ret = bio_iov_iter_get_pages(bio, dio->submit.iter,
-					     alignment - 1);
+		ret = bio_iov_iter_get_pages(bio, dio->submit.iter, maxsize,
+				bdev_dma_alignment(bio->bi_bdev), alignment - 1);
 	if (unlikely(ret))
 		goto out_put_bio;
 	ret = bio->bi_iter.bi_size;
@@ -370,13 +377,6 @@ static ssize_t iomap_dio_bio_iter_one(struct iomap_iter *iter,
 	if ((op & REQ_ATOMIC) && WARN_ON_ONCE(ret != iomap_length(iter))) {
 		ret = -EINVAL;
 		goto out_bio_release_pages;
-	}
-
-	if (iter->iomap.flags & IOMAP_F_INTEGRITY) {
-		if (dio->flags & IOMAP_DIO_WRITE)
-			fs_bio_integrity_generate(bio);
-		else
-			fs_bio_integrity_alloc(bio);
 	}
 
 	if (dio->flags & IOMAP_DIO_WRITE)
@@ -395,12 +395,20 @@ static ssize_t iomap_dio_bio_iter_one(struct iomap_iter *iter,
 
 out_bio_release_pages:
 	if (dio->flags & IOMAP_DIO_BOUNCE)
-		bio_iov_iter_unbounce(bio, true, false);
+		bio_free_folios(bio);
 	else
 		bio_release_pages(bio, false);
 out_put_bio:
 	bio_put(bio);
 	return ret;
+}
+
+static inline unsigned int iomap_dio_alignment(struct inode *inode,
+		struct block_device *bdev, unsigned int dio_flags)
+{
+	if (dio_flags & IOMAP_DIO_FSBLOCK_ALIGNED)
+		return i_blocksize(inode);
+	return bdev_logical_block_size(bdev);
 }
 
 static int iomap_dio_bio_iter(struct iomap_iter *iter, struct iomap_dio *dio)
@@ -421,10 +429,7 @@ static int iomap_dio_bio_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 	 * File systems that write out of place and always allocate new blocks
 	 * need each bio to be block aligned as that's the unit of allocation.
 	 */
-	if (dio->flags & IOMAP_DIO_FSBLOCK_ALIGNED)
-		alignment = fs_block_size;
-	else
-		alignment = bdev_logical_block_size(iomap->bdev);
+	alignment = iomap_dio_alignment(inode, iomap->bdev, dio->flags);
 
 	if ((pos | length) & (alignment - 1))
 		return -EINVAL;
@@ -498,7 +503,7 @@ static int iomap_dio_bio_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 		 * We can only do inline completion for pure overwrites that
 		 * don't require additional I/O at completion time.
 		 *
-		 * This rules out writes that need zeroing or metdata updates to
+		 * This rules out writes that need zeroing or metadata updates to
 		 * convert unwritten or shared extents.
 		 *
 		 * Writes that extend i_size are also not supported, but this is
@@ -534,10 +539,7 @@ static int iomap_dio_bio_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 	if (need_zeroout) {
 		/* zero out from the start of the block to the write offset */
 		pad = pos & (fs_block_size - 1);
-
-		ret = iomap_dio_zero(iter, dio, pos - pad, pad);
-		if (ret)
-			goto out;
+		iomap_dio_zero(iter, dio, pos - pad, pad);
 	}
 
 	do {
@@ -575,8 +577,7 @@ static int iomap_dio_bio_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 		/* zero out from the end of the write to the end of the block */
 		pad = pos & (fs_block_size - 1);
 		if (pad)
-			ret = iomap_dio_zero(iter, dio, pos,
-					     fs_block_size - pad);
+			iomap_dio_zero(iter, dio, pos, fs_block_size - pad);
 	}
 out:
 	/* Undo iter limitation to current extent */
@@ -588,12 +589,25 @@ out:
 
 static int iomap_dio_hole_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 {
-	loff_t length = iov_iter_zero(iomap_length(iter), dio->submit.iter);
+	loff_t copied = iov_iter_zero(iomap_length(iter), dio->submit.iter);
 
-	dio->size += length;
-	if (!length)
+	if (dio->flags & IOMAP_DIO_FSBLOCK_ALIGNED) {
+		loff_t aligned_copied = round_down(copied,
+						   i_blocksize(iter->inode));
+
+		/*
+		 * For fs passing IOMAP_DIO_FSBLOCK_ALIGNED flag, if fs block
+		 * size is larger than page size, page fault failure
+		 * can cause @copied to be page aligned but not fs block
+		 * aligned.
+		 */
+		iov_iter_revert(dio->submit.iter, copied - aligned_copied);
+		copied = aligned_copied;
+	}
+	dio->size += copied;
+	if (!copied)
 		return -EFAULT;
-	return iomap_iter_advance(iter, length);
+	return iomap_iter_advance(iter, copied);
 }
 
 static int iomap_dio_inline_iter(struct iomap_iter *iomi, struct iomap_dio *dio)
@@ -907,3 +921,158 @@ iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 	return iomap_dio_complete(dio);
 }
 EXPORT_SYMBOL_GPL(iomap_dio_rw);
+
+struct iomap_dio_simple {
+	struct kiocb		*iocb;
+	size_t			size;
+	unsigned int		dio_flags;
+	/*
+	 * Align @bio to a cacheline boundary so that, combined with the
+	 * front_pad passed to bioset_init(), the bio sits at the start of
+	 * a cacheline in memory returned by the (HWCACHE-aligned) bio
+	 * slab.  This keeps the hot fields block layer touches on submit
+	 * and completion (bi_iter, bi_status, ...) within a single line.
+	 */
+	struct bio		bio ____cacheline_aligned_in_smp;
+};
+
+static struct bio_set iomap_dio_simple_pool;
+
+static ssize_t iomap_dio_simple_complete(struct iomap_dio_simple *sr)
+{
+	struct bio *bio = &sr->bio;
+	struct kiocb *iocb = sr->iocb;
+	struct inode *inode = file_inode(iocb->ki_filp);
+	ssize_t ret;
+
+	if (unlikely(bio->bi_status)) {
+		ret = blk_status_to_errno(bio->bi_status);
+		if (should_report_dio_fserror(ret))
+			fserror_report_io(inode, FSERR_DIRECTIO_READ,
+					  iocb->ki_pos, sr->size, ret,
+					  GFP_NOFS);
+	} else {
+		ret = sr->size;
+		iocb->ki_pos += ret;
+	}
+
+	if (sr->dio_flags & IOMAP_DIO_USER_BACKED) {
+		bio_check_pages_dirty(bio);
+	} else {
+		bio_release_pages(bio, false);
+		bio_put(bio);
+	}
+	inode_dio_end(inode);
+	trace_iomap_dio_complete(iocb, ret < 0 ? ret : 0, ret);
+	return ret;
+}
+
+static void iomap_dio_simple_end_io(struct bio *bio)
+{
+	struct iomap_dio_simple *sr =
+		container_of(bio, struct iomap_dio_simple, bio);
+	struct kiocb *iocb = sr->iocb;
+
+	if (unlikely(bio->bi_status) && bio_complete_in_task(bio))
+		return;
+	WRITE_ONCE(iocb->private, NULL);
+	iocb->ki_complete(iocb, iomap_dio_simple_complete(sr));
+}
+
+ssize_t __iomap_dio_read_simple(struct kiocb *iocb, struct iov_iter *iter,
+		struct iomap_iter *iomi)
+{
+	gfp_t gfp = (iomi->flags & IOMAP_NOWAIT) ? GFP_NOWAIT : GFP_KERNEL;
+	struct iomap_dio_simple *sr;
+	unsigned int alignment;
+	struct bio *bio;
+	ssize_t ret;
+
+	if (iomi->iomap.type != IOMAP_MAPPED ||
+	    iomi->iomap.offset + iomi->iomap.length < iomi->pos + iomi->len ||
+	    (iomi->iomap.flags & IOMAP_F_INTEGRITY)) {
+		ret = -ENOTBLK;
+		goto out_dio_end;
+	}
+
+	alignment = iomap_dio_alignment(iomi->inode, iomi->iomap.bdev, 0);
+	if ((iomi->pos | iomi->len) & (alignment - 1)) {
+		ret = -EINVAL;
+		goto out_dio_end;
+	}
+
+	if (unlikely(!iomi->inode->i_sb->s_dio_done_wq &&
+			!is_sync_kiocb(iocb))) {
+		ret = sb_init_dio_done_wq(iomi->inode->i_sb);
+		if (ret < 0)
+			goto out_dio_end;
+	}
+
+	trace_iomap_dio_rw_begin(iocb, iter, 0, 0);
+
+	bio = bio_alloc_bioset(iomi->iomap.bdev,
+			       bio_iov_vecs_to_alloc(iter, BIO_MAX_VECS),
+			       REQ_OP_READ, gfp, &iomap_dio_simple_pool);
+	if (!bio) {
+		ret = -EAGAIN;
+		goto out_dio_end;
+	}
+	sr = container_of(bio, struct iomap_dio_simple, bio);
+	sr->iocb = iocb;
+	sr->dio_flags = 0;
+
+	bio->bi_iter.bi_sector = iomap_sector(&iomi->iomap, iomi->pos);
+	bio->bi_ioprio = iocb->ki_ioprio;
+
+	ret = bio_iov_iter_get_pages(bio, iter, BIO_MAX_SIZE,
+			bdev_dma_alignment(bio->bi_bdev),
+			alignment - 1);
+	if (unlikely(ret))
+		goto out_bio_put;
+
+	if (bio->bi_iter.bi_size != iomi->len) {
+		iov_iter_revert(iter, bio->bi_iter.bi_size);
+		ret = -ENOTBLK;
+		goto out_bio_release_pages;
+	}
+
+	sr->size = bio->bi_iter.bi_size;
+	if (user_backed_iter(iter)) {
+		bio_set_pages_dirty(bio);
+		sr->dio_flags |= IOMAP_DIO_USER_BACKED;
+	}
+
+	if (iocb->ki_flags & IOCB_NOWAIT)
+		bio->bi_opf |= REQ_NOWAIT;
+
+	if (is_sync_kiocb(iocb)) {
+		submit_bio_wait(bio);
+		return iomap_dio_simple_complete(sr);
+	}
+
+	if ((iocb->ki_flags & IOCB_HIPRI)) {
+		bio->bi_opf |= REQ_POLLED;
+		WRITE_ONCE(iocb->private, bio);
+	}
+	bio->bi_end_io = iomap_dio_simple_end_io;
+	submit_bio(bio);
+	trace_iomap_dio_rw_queued(iomi->inode, iocb->ki_pos, iomi->len);
+	return -EIOCBQUEUED;
+
+out_bio_release_pages:
+	bio_release_pages(bio, false);
+out_bio_put:
+	bio_put(bio);
+out_dio_end:
+	inode_dio_end(iomi->inode);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(__iomap_dio_read_simple);
+
+static int __init iomap_dio_init(void)
+{
+	return bioset_init(&iomap_dio_simple_pool, 4,
+			   offsetof(struct iomap_dio_simple, bio),
+			   BIOSET_NEED_BVECS | BIOSET_PERCPU_CACHE);
+}
+fs_initcall(iomap_dio_init);

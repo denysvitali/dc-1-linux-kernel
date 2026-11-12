@@ -29,6 +29,7 @@
 #include "notif.h"
 #include "scan.h"
 #include "rx.h"
+#include "tx.h"
 #include "thermal.h"
 #include "low_latency.h"
 #include "constants.h"
@@ -172,7 +173,6 @@
  * @debug_max_sleep: maximum sleep time in D3 (for debug purposes)
  * @led: the led device
  * @mcc_src: the source id of the MCC, comes from the firmware
- * @bios_enable_puncturing: is puncturing enabled by bios
  * @fw_id_to_ba: maps a fw (BA) id to a corresponding Block Ack session data.
  * @num_rx_ba_sessions: tracks the number of active Rx Block Ack (BA) sessions.
  *	the driver ensures that new BA sessions are blocked once the maximum
@@ -197,6 +197,7 @@
  *	being IBSS manager for that time and needing to respond to probe
  *	requests
  * @ptp_data: data of the PTP clock
+ * @tx_gp2: gp2 timestamping state for TX commands
  * @time_sync: time sync data.
  * @ftm_initiator: FTM initiator data
  * @nan_device_vif: points to the NAN device vif if exists
@@ -279,7 +280,6 @@ struct iwl_mld {
 	struct led_classdev led;
 #endif
 	enum iwl_mcc_source mcc_src;
-	bool bios_enable_puncturing;
 
 	struct iwl_mld_baid_data __rcu *fw_id_to_ba[IWL_MAX_BAID];
 	u8 num_rx_ba_sessions;
@@ -307,6 +307,8 @@ struct iwl_mld {
 #endif
 
 	struct ptp_data ptp_data;
+
+	struct iwl_mld_tx_gp2 tx_gp2;
 
 	struct iwl_mld_time_sync_data __rcu *time_sync;
 
@@ -573,6 +575,8 @@ iwl_mld_fw_id_to_link_conf(struct iwl_mld *mld, u8 fw_link_id)
 }
 
 #define MSEC_TO_TU(_msec)	((_msec) * 1000 / 1024)
+
+int iwl_mld_get_systime(struct iwl_mld *mld, u32 *gp2);
 
 void iwl_mld_add_vif_debugfs(struct ieee80211_hw *hw,
 			     struct ieee80211_vif *vif);

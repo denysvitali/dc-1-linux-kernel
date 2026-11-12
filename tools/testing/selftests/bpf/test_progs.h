@@ -105,6 +105,7 @@ struct test_env {
 	struct test_selector tmon_selector;
 	bool verifier_stats;
 	bool debug;
+	bool error_summary;
 	enum verbosity verbosity;
 
 	bool jit_enabled;
@@ -123,7 +124,7 @@ struct test_env {
 
 	int succ_cnt; /* successful tests */
 	int sub_succ_cnt; /* successful sub-tests */
-	int fail_cnt; /* total failed tests + sub-tests */
+	int fail_cnt; /* failed tests */
 	int skip_cnt; /* skipped tests */
 	int not_built_cnt; /* tests not built */
 
@@ -347,6 +348,9 @@ void hexdump(const char *prefix, const void *buf, size_t len);
 	      (name), ___substr, ___str);				\
 	___ok;								\
 })
+
+#define ASSERT_TEXT_EQ(actual, expected, name) \
+	ASSERT_TRUE(compare_text_to_expected(actual, expected) == 0, name)
 
 #define ASSERT_MEMEQ(actual, expected, len, name) ({			\
 	static int duration = 0;					\

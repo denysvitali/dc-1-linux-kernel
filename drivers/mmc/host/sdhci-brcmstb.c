@@ -430,7 +430,7 @@ static u32 sdhci_brcmstb_cqhci_irq(struct sdhci_host *host, u32 intmask)
 	if (!sdhci_cqe_irq(host, intmask, &cmd_error, &data_error))
 		return intmask;
 
-	cqhci_irq(host->mmc, intmask, cmd_error, data_error);
+	cqhci_irq(host->mmc, cmd_error, data_error);
 
 	return 0;
 }
@@ -451,8 +451,7 @@ static int sdhci_brcmstb_add_host(struct sdhci_host *host,
 	if (ret)
 		return ret;
 
-	cq_host = devm_kzalloc(mmc_dev(host->mmc),
-			       sizeof(*cq_host), GFP_KERNEL);
+	cq_host = devm_kzalloc_obj(mmc_dev(host->mmc), *cq_host);
 	if (!cq_host) {
 		ret = -ENOMEM;
 		goto cleanup;

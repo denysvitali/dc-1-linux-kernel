@@ -159,8 +159,8 @@ static void iwl_mld_mu_mimo_iface_iterator(void *_data, u8 *mac,
 		 * action frame, so no conversion is needed.
 		 */
 		ieee80211_update_mu_groups(vif, link_id,
-					   (u8 *)&notif->membership_status,
-					   (u8 *)&notif->user_position);
+					   (const u8 *)&notif->membership_status,
+					   (const u8 *)&notif->user_position);
 	}
 }
 
@@ -292,13 +292,15 @@ CMD_VERSIONS(scan_start_notif,
 CMD_VERSIONS(scan_complete_notif,
 	     CMD_VER_ENTRY(1, iwl_umac_scan_complete))
 CMD_VERSIONS(scan_iter_complete_notif,
-	     CMD_VER_ENTRY(2, iwl_umac_scan_iter_complete_notif))
+	     CMD_VER_ENTRY(2, iwl_umac_scan_iter_complete_notif_v2)
+	     CMD_VER_ENTRY(3, iwl_umac_scan_iter_complete_notif))
 CMD_VERSIONS(channel_survey_notif,
 	     CMD_VER_ENTRY(1, iwl_umac_scan_channel_survey_notif))
 CMD_VERSIONS(mfuart_notif,
 	     CMD_VER_ENTRY(2, iwl_mfuart_load_notif))
 CMD_VERSIONS(update_mcc,
-	     CMD_VER_ENTRY(1, iwl_mcc_chub_notif))
+	     CMD_VER_ENTRY(1, iwl_mcc_chub_notif)
+	     CMD_VER_ENTRY(2, iwl_mcc_chub_notif))
 CMD_VERSIONS(session_prot_notif,
 	     CMD_VER_ENTRY(3, iwl_session_prot_notif))
 CMD_VERSIONS(missed_beacon_notif,
@@ -328,7 +330,8 @@ CMD_VERSIONS(datapath_monitor_notif,
 	     CMD_VER_ENTRY(1, iwl_datapath_monitor_notif))
 CMD_VERSIONS(stats_oper_notif,
 	     CMD_VER_ENTRY(3, iwl_system_statistics_notif_oper_v3)
-	     CMD_VER_ENTRY(4, iwl_system_statistics_notif_oper))
+	     CMD_VER_ENTRY(4, iwl_system_statistics_notif_oper_v4)
+	     CMD_VER_ENTRY(5, iwl_system_statistics_notif_oper))
 CMD_VERSIONS(stats_oper_part1_notif,
 	     CMD_VER_ENTRY(4, iwl_system_statistics_part1_notif_oper))
 CMD_VERSIONS(bt_coex_notif,
@@ -517,7 +520,7 @@ iwl_mld_notif_is_valid(struct iwl_mld *mld, struct iwl_rx_packet *pkt,
 			    handler->cmd_id, notif_ver,
 			    handler->sizes[handler->n_sizes - 1].ver);
 
-	return size < handler->sizes[handler->n_sizes - 1].size;
+	return false;
 }
 
 struct iwl_async_handler_entry {

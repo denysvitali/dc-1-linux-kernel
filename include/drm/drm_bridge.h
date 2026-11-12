@@ -40,9 +40,9 @@ struct drm_bridge;
 struct drm_bridge_timings;
 struct drm_connector;
 struct drm_display_info;
+struct drm_edid;
 struct drm_minor;
 struct drm_panel;
-struct edid;
 struct hdmi_codec_daifmt;
 struct hdmi_codec_params;
 struct i2c_adapter;
@@ -173,52 +173,6 @@ struct drm_bridge_funcs {
 	bool (*mode_fixup)(struct drm_bridge *bridge,
 			   const struct drm_display_mode *mode,
 			   struct drm_display_mode *adjusted_mode);
-	/**
-	 * @disable:
-	 *
-	 * This callback should disable the bridge. It is called right before
-	 * the preceding element in the display pipe is disabled. If the
-	 * preceding element is a bridge this means it's called before that
-	 * bridge's @disable vfunc. If the preceding element is a &drm_encoder
-	 * it's called right before the &drm_encoder_helper_funcs.disable,
-	 * &drm_encoder_helper_funcs.prepare or &drm_encoder_helper_funcs.dpms
-	 * hook.
-	 *
-	 * The bridge can assume that the display pipe (i.e. clocks and timing
-	 * signals) feeding it is still running when this callback is called.
-	 *
-	 * The @disable callback is optional.
-	 *
-	 * NOTE:
-	 *
-	 * This is deprecated, do not use!
-	 * New drivers shall use &drm_bridge_funcs.atomic_disable.
-	 */
-	void (*disable)(struct drm_bridge *bridge);
-
-	/**
-	 * @post_disable:
-	 *
-	 * This callback should disable the bridge. It is called right after the
-	 * preceding element in the display pipe is disabled. If the preceding
-	 * element is a bridge this means it's called after that bridge's
-	 * @post_disable function. If the preceding element is a &drm_encoder
-	 * it's called right after the encoder's
-	 * &drm_encoder_helper_funcs.disable, &drm_encoder_helper_funcs.prepare
-	 * or &drm_encoder_helper_funcs.dpms hook.
-	 *
-	 * The bridge must assume that the display pipe (i.e. clocks and timing
-	 * signals) feeding it is no longer running when this callback is
-	 * called.
-	 *
-	 * The @post_disable callback is optional.
-	 *
-	 * NOTE:
-	 *
-	 * This is deprecated, do not use!
-	 * New drivers shall use &drm_bridge_funcs.atomic_post_disable.
-	 */
-	void (*post_disable)(struct drm_bridge *bridge);
 
 	/**
 	 * @mode_set:
@@ -249,55 +203,6 @@ struct drm_bridge_funcs {
 	void (*mode_set)(struct drm_bridge *bridge,
 			 const struct drm_display_mode *mode,
 			 const struct drm_display_mode *adjusted_mode);
-	/**
-	 * @pre_enable:
-	 *
-	 * This callback should enable the bridge. It is called right before
-	 * the preceding element in the display pipe is enabled. If the
-	 * preceding element is a bridge this means it's called before that
-	 * bridge's @pre_enable function. If the preceding element is a
-	 * &drm_encoder it's called right before the encoder's
-	 * &drm_encoder_helper_funcs.enable, &drm_encoder_helper_funcs.commit or
-	 * &drm_encoder_helper_funcs.dpms hook.
-	 *
-	 * The display pipe (i.e. clocks and timing signals) feeding this bridge
-	 * will not yet be running when this callback is called. The bridge must
-	 * not enable the display link feeding the next bridge in the chain (if
-	 * there is one) when this callback is called.
-	 *
-	 * The @pre_enable callback is optional.
-	 *
-	 * NOTE:
-	 *
-	 * This is deprecated, do not use!
-	 * New drivers shall use &drm_bridge_funcs.atomic_pre_enable.
-	 */
-	void (*pre_enable)(struct drm_bridge *bridge);
-
-	/**
-	 * @enable:
-	 *
-	 * This callback should enable the bridge. It is called right after
-	 * the preceding element in the display pipe is enabled. If the
-	 * preceding element is a bridge this means it's called after that
-	 * bridge's @enable function. If the preceding element is a
-	 * &drm_encoder it's called right after the encoder's
-	 * &drm_encoder_helper_funcs.enable, &drm_encoder_helper_funcs.commit or
-	 * &drm_encoder_helper_funcs.dpms hook.
-	 *
-	 * The bridge can assume that the display pipe (i.e. clocks and timing
-	 * signals) feeding it is running when this callback is called. This
-	 * callback must enable the display link feeding the next bridge in the
-	 * chain if there is one.
-	 *
-	 * The @enable callback is optional.
-	 *
-	 * NOTE:
-	 *
-	 * This is deprecated, do not use!
-	 * New drivers shall use &drm_bridge_funcs.atomic_enable.
-	 */
-	void (*enable)(struct drm_bridge *bridge);
 
 	/**
 	 * @atomic_pre_enable:
@@ -504,31 +409,20 @@ struct drm_bridge_funcs {
 			    struct drm_connector_state *conn_state);
 
 	/**
-	 * @atomic_reset:
+	 * @atomic_create_state:
 	 *
-	 * Reset the bridge to a predefined state (or retrieve its current
-	 * state) and return a &drm_bridge_state object matching this state.
-	 * This function is called at attach time.
-	 *
-	 * The atomic_reset hook is mandatory if the bridge implements any of
-	 * the atomic hooks, and should be left unassigned otherwise. For
-	 * bridges that don't subclass &drm_bridge_state, the
-	 * drm_atomic_helper_bridge_reset() helper function shall be used to
-	 * implement this hook.
-	 *
-	 * Note that the atomic_reset() semantics is not exactly matching the
-	 * reset() semantics found on other components (connector, plane, ...).
-	 *
-	 * 1. The reset operation happens when the bridge is attached, not when
-	 *    drm_mode_config_reset() is called
-	 * 2. It's meant to be used exclusively on bridges that have been
-	 *    converted to the ATOMIC API
+	 * Allocate a pristine, initialized, state for the bridge
+	 * object and return it. This callback must have no side
+	 * effects: in particular, the returned state must not be
+	 * assigned to the object's state pointer and it must not affect
+	 * the hardware state.
 	 *
 	 * RETURNS:
-	 * A valid drm_bridge_state object in case of success, an ERR_PTR()
-	 * giving the reason of the failure otherwise.
+	 *
+	 * A new, pristine, bridge state instance or an error pointer
+	 * on failure.
 	 */
-	struct drm_bridge_state *(*atomic_reset)(struct drm_bridge *bridge);
+	struct drm_bridge_state *(*atomic_create_state)(struct drm_bridge *bridge);
 
 	/**
 	 * @detect:
@@ -666,6 +560,41 @@ struct drm_bridge_funcs {
 	(*hdmi_tmds_char_rate_valid)(const struct drm_bridge *bridge,
 				     const struct drm_display_mode *mode,
 				     unsigned long long tmds_rate);
+
+	/**
+	 * @hdmi_scrambler_enable:
+	 *
+	 * Enable source-side scrambling and the high TMDS clock ratio for the
+	 * mode currently being applied.
+	 *
+	 * This only programs the source side. Sink-side SCDC configuration is
+	 * handled by the HDMI connector helpers.
+	 *
+	 * Mandatory for bridges that set the DRM_BRIDGE_OP_HDMI flag in their
+	 * &drm_bridge->ops and advertise HDMI_VERSION_2_0 or later via
+	 * &drm_bridge->supported_hdmi_ver; unused otherwise.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise.
+	 */
+	int (*hdmi_scrambler_enable)(struct drm_bridge *bridge);
+
+	/**
+	 * @hdmi_scrambler_disable:
+	 *
+	 * Disable source-side scrambling and the high TMDS clock ratio.
+	 *
+	 * This only programs the source side. Sink-side SCDC configuration is
+	 * handled by the HDMI connector helpers.
+	 *
+	 * Mandatory for bridges that set the DRM_BRIDGE_OP_HDMI flag in their
+	 * &drm_bridge->ops and advertise HDMI_VERSION_2_0 or later via
+	 * &drm_bridge->supported_hdmi_ver; unused otherwise.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise.
+	 */
+	int (*hdmi_scrambler_disable)(struct drm_bridge *bridge);
 
 	/**
 	 * @hdmi_clear_avi_infoframe:
@@ -1188,11 +1117,25 @@ struct drm_bridge {
 	const char *product;
 
 	/**
+	 * @supported_hdmi_ver: HDMI version the bridge is conformant with.
+	 * This is only relevant if @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	enum hdmi_version supported_hdmi_ver;
+
+	/**
 	 * @supported_formats: Bitmask of @drm_output_color_format listing
 	 * supported output formats. This is only relevant if
 	 * @DRM_BRIDGE_OP_HDMI is set.
 	 */
 	unsigned int supported_formats;
+
+	/**
+	 * @max_tmds_char_rate: Maximum TMDS character rate, in Hz, the HDMI
+	 * bridge supports. A value of 0 means the core should use the default
+	 * limit implied by @supported_hdmi_ver. This is only relevant if
+	 * @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	unsigned long long max_tmds_char_rate;
 
 	/**
 	 * @max_bpc: Maximum bits per char the HDMI bridge supports. Allowed
@@ -1256,6 +1199,10 @@ struct drm_bridge {
 	 * @hpd_mutex: Protects the @hpd_cb and @hpd_data fields.
 	 */
 	struct mutex hpd_mutex;
+	/**
+	 * @hpd_state_mutex: Protects the HPD en/disablement state for the bridge.
+	 */
+	struct mutex hpd_state_mutex;
 	/**
 	 * @hpd_cb: Hot plug detection callback, registered with
 	 * drm_bridge_hpd_enable().
@@ -1366,14 +1313,6 @@ drm_bridge_get_current_state(struct drm_bridge *bridge)
 	if (!bridge)
 		return NULL;
 
-	/*
-	 * Only atomic bridges will have bridge->base initialized by
-	 * drm_atomic_private_obj_init(), so we need to make sure we're
-	 * working with one before we try to use the lock.
-	 */
-	if (!bridge->funcs || !bridge->funcs->atomic_reset)
-		return NULL;
-
 	drm_modeset_lock_assert_held(&bridge->base.lock);
 
 	if (!bridge->base.state)
@@ -1481,9 +1420,9 @@ static inline struct drm_bridge *__drm_for_each_bridge_in_chain_next(struct drm_
 DEFINE_FREE(__drm_for_each_bridge_in_chain_cleanup, struct drm_bridge *,
 	if (_T) { mutex_unlock(&_T->encoder->bridge_chain_mutex); drm_bridge_put(_T); })
 
-/* Internal to drm_for_each_bridge_in_chain_scoped() */
+/* Internal to drm_for_each_bridge_in_chain() */
 static inline struct drm_bridge *
-__drm_for_each_bridge_in_chain_scoped_start(struct drm_encoder *encoder)
+__drm_for_each_bridge_in_chain_start(struct drm_encoder *encoder)
 {
 	mutex_lock(&encoder->bridge_chain_mutex);
 
@@ -1496,8 +1435,7 @@ __drm_for_each_bridge_in_chain_scoped_start(struct drm_encoder *encoder)
 }
 
 /**
- * drm_for_each_bridge_in_chain_scoped - iterate over all bridges attached
- *                                       to an encoder
+ * drm_for_each_bridge_in_chain - iterate over all bridges attached to an encoder
  * @encoder: the encoder to iterate bridges on
  * @bridge: a bridge pointer updated to point to the current bridge at each
  *	    iteration
@@ -1507,9 +1445,9 @@ __drm_for_each_bridge_in_chain_scoped_start(struct drm_encoder *encoder)
  * Automatically gets/puts the bridge reference while iterating and locks
  * the encoder chain mutex to prevent chain modifications while iterating.
  */
-#define drm_for_each_bridge_in_chain_scoped(encoder, bridge)				\
+#define drm_for_each_bridge_in_chain(encoder, bridge)					\
 	for (struct drm_bridge *bridge __free(__drm_for_each_bridge_in_chain_cleanup) =	\
-		__drm_for_each_bridge_in_chain_scoped_start((encoder));			\
+		__drm_for_each_bridge_in_chain_start((encoder));			\
 	     bridge;									\
 	     bridge = __drm_for_each_bridge_in_chain_next(bridge))			\
 
@@ -1583,60 +1521,6 @@ void drm_bridge_hpd_enable(struct drm_bridge *bridge,
 void drm_bridge_hpd_disable(struct drm_bridge *bridge);
 void drm_bridge_hpd_notify(struct drm_bridge *bridge,
 			   enum drm_connector_status status);
-
-#ifdef CONFIG_DRM_PANEL_BRIDGE
-bool drm_bridge_is_panel(const struct drm_bridge *bridge);
-struct drm_bridge *drm_panel_bridge_add(struct drm_panel *panel);
-struct drm_bridge *drm_panel_bridge_add_typed(struct drm_panel *panel,
-					      u32 connector_type);
-void drm_panel_bridge_remove(struct drm_bridge *bridge);
-int drm_panel_bridge_set_orientation(struct drm_connector *connector,
-				     struct drm_bridge *bridge);
-struct drm_bridge *devm_drm_panel_bridge_add(struct device *dev,
-					     struct drm_panel *panel);
-struct drm_bridge *devm_drm_panel_bridge_add_typed(struct device *dev,
-						   struct drm_panel *panel,
-						   u32 connector_type);
-struct drm_bridge *drmm_panel_bridge_add(struct drm_device *drm,
-					     struct drm_panel *panel);
-struct drm_connector *drm_panel_bridge_connector(struct drm_bridge *bridge);
-#else
-static inline bool drm_bridge_is_panel(const struct drm_bridge *bridge)
-{
-	return false;
-}
-
-static inline int drm_panel_bridge_set_orientation(struct drm_connector *connector,
-						   struct drm_bridge *bridge)
-{
-	return -EINVAL;
-}
-#endif
-
-#if defined(CONFIG_OF) && defined(CONFIG_DRM_PANEL_BRIDGE)
-struct drm_bridge *devm_drm_of_get_bridge(struct device *dev, struct device_node *node,
-					  u32 port, u32 endpoint);
-struct drm_bridge *drmm_of_get_bridge(struct drm_device *drm, struct device_node *node,
-					  u32 port, u32 endpoint);
-#else
-static inline struct drm_bridge *devm_drm_of_get_bridge(struct device *dev,
-							struct device_node *node,
-							u32 port,
-							u32 endpoint)
-{
-	return ERR_PTR(-ENODEV);
-}
-
-static inline struct drm_bridge *drmm_of_get_bridge(struct drm_device *drm,
-						     struct device_node *node,
-						     u32 port,
-						     u32 endpoint)
-{
-	return ERR_PTR(-ENODEV);
-}
-#endif
-
-void devm_drm_put_bridge(struct device *dev, struct drm_bridge *bridge);
 
 void drm_bridge_debugfs_params(struct dentry *root);
 void drm_bridge_debugfs_encoder_params(struct dentry *root, struct drm_encoder *encoder);

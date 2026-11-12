@@ -14,6 +14,7 @@
 #include "debug.h"
 #include "ntfs.h"
 #include "ntfs_fs.h"
+#include <trace/events/ntfs3.h>
 
 /* Convert little endian UTF-16 to NLS string. */
 int ntfs_utf16_to_nls(struct ntfs_sb_info *sbi, const __le16 *name, u32 len,
@@ -25,10 +26,18 @@ int ntfs_utf16_to_nls(struct ntfs_sb_info *sbi, const __le16 *name, u32 len,
 
 	static_assert(sizeof(wchar_t) == sizeof(__le16));
 
+	if (buf_len <= 0)
+		return -EINVAL;
+
+	buf_len -= 1;
+
 	if (!nls) {
 		/* UTF-16 -> UTF-8 */
 		ret = utf16s_to_utf8s((wchar_t *)name, len, UTF16_LITTLE_ENDIAN,
 				      buf, buf_len);
+        if (ret >= buf_len) {
+            ret = buf_len-1;
+        }
 		buf[ret] = '\0';
 		return ret;
 	}
@@ -179,60 +188,102 @@ int ntfs_nls_to_utf16(struct ntfs_sb_info *sbi, const u8 *name, u32 name_len,
 		      struct cpu_str *uni, u32 max_ulen,
 		      enum utf16_endian endian)
 {
-	int ret, slen;
+	int ret, slen, i;
 	const u8 *end;
-	struct nls_table *nls = sbi->options->nls;
+	struct ntfs_mount_options *opts;
+	struct nls_table *nls;
+	bool ads;
 	u16 *uname = uni->name;
 
 	static_assert(sizeof(wchar_t) == sizeof(u16));
 
+	/* ntfs_fs_reconfigure() may replace the options, but not ->nls */
+	rcu_read_lock();
+	opts = READ_ONCE(sbi->options);
+	nls = opts->nls;
+	ads = opts->ads;
+	rcu_read_unlock();
+
 	if (!nls) {
 		/* utf8 -> utf16 */
 		ret = _utf8s_to_utf16s(name, name_len, endian, uname, max_ulen);
-		uni->len = ret;
-		return ret;
-	}
+	} else {
+		for (ret = 0, end = name + name_len; name < end;
+		     ret++, name += slen) {
+			if (ret >= max_ulen)
+				return -ENAMETOOLONG;
 
-	for (ret = 0, end = name + name_len; name < end; ret++, name += slen) {
-		if (ret >= max_ulen)
-			return -ENAMETOOLONG;
-
-		slen = nls->char2uni(name, end - name, uname + ret);
-		if (!slen)
-			return -EINVAL;
-		if (slen < 0)
-			return slen;
-	}
+			slen = nls->char2uni(name, end - name, uname + ret);
+			if (!slen)
+				return -EINVAL;
+			if (slen < 0)
+				return slen;
+		}
 
 #ifdef __BIG_ENDIAN
-	if (endian == UTF16_LITTLE_ENDIAN) {
-		int i = ret;
+		if (endian == UTF16_LITTLE_ENDIAN) {
+			i = ret;
 
-		while (i--) {
-			__cpu_to_le16s(uname);
-			uname++;
+			while (i--) {
+				__cpu_to_le16s(uname);
+				uname++;
+			}
 		}
-	}
 #else
-	if (endian == UTF16_BIG_ENDIAN) {
-		int i = ret;
+		if (endian == UTF16_BIG_ENDIAN) {
+			i = ret;
 
-		while (i--) {
-			__cpu_to_be16s(uname);
-			uname++;
+			while (i--) {
+				__cpu_to_be16s(uname);
+				uname++;
+			}
 		}
-	}
 #endif
+	}
 
 	uni->len = ret;
+	uni->ads_len = 0;
+	if (ret > 0 && ads) {
+		uname = uni->name;
+		/* Find delimiter in range [1 : ret-2). */
+		for (i = 1; i + 1 < ret; i++) {
+			if (uname[i] == ':') {
+				uni->ads_len = ret - i - 1;
+				uni->len = i;
+				uname[i] = 0;
+				ret = i;
+
+				uname += i + 1;
+				i = uni->ads_len;
+				/* Return ADS name as little endian. Always */
+#ifdef __BIG_ENDIAN
+				if (endian == UTF16_LITTLE_ENDIAN) {
+					while (i--) {
+						__cpu_to_le16s(uname);
+						uname++;
+					}
+				}
+#else
+				if (endian == UTF16_BIG_ENDIAN) {
+					while (i--) {
+						__cpu_to_be16s(uname);
+						uname++;
+					}
+				}
+#endif
+				break;
+			}
+		}
+	}
+
 	return ret;
 }
 
 /*
  * dir_search_u - Helper function.
  */
-struct inode *dir_search_u(struct inode *dir, const struct cpu_str *uni,
-			   struct ntfs_fnd *fnd)
+struct inode *dir_search_flags(struct inode *dir, const struct cpu_str *uni,
+			       struct ntfs_fnd *fnd, u32 flags)
 {
 	int err = 0;
 	struct super_block *sb = dir->i_sb;
@@ -242,6 +293,8 @@ struct inode *dir_search_u(struct inode *dir, const struct cpu_str *uni,
 	int diff;
 	struct inode *inode = NULL;
 	struct ntfs_fnd *fnd_a = NULL;
+
+	trace_ntfs3_dir_search_u(dir, uni ? uni->len : 0);
 
 	if (!fnd) {
 		fnd_a = fnd_get();
@@ -262,7 +315,7 @@ struct inode *dir_search_u(struct inode *dir, const struct cpu_str *uni,
 		goto out;
 	}
 
-	inode = ntfs_iget5(sb, &e->ref, uni);
+	inode = ntfs_iget5_flags(sb, &e->ref, uni, flags);
 	if (!IS_ERR(inode) && is_bad_inode(inode)) {
 		iput(inode);
 		err = -EINVAL;
@@ -273,6 +326,12 @@ out:
 	return err == -ENOENT ? NULL : err ? ERR_PTR(err) : inode;
 }
 
+static inline bool de_fname_fits(const struct NTFS_DE *e, u32 e_size,
+				 const struct ATTR_FILE_NAME *fname)
+{
+	return sizeof(struct NTFS_DE) + fname_full_size(fname) <= e_size;
+}
+
 /*
  * returns false if 'ctx' if full
  */
@@ -281,7 +340,7 @@ static inline bool ntfs_dir_emit(struct ntfs_sb_info *sbi,
 				 u8 *name, struct dir_context *ctx)
 {
 	const struct ATTR_FILE_NAME *fname;
-	unsigned long ino;
+	u64 ino;
 	int name_len;
 	u32 dt_type;
 
@@ -305,15 +364,13 @@ static inline bool ntfs_dir_emit(struct ntfs_sb_info *sbi,
 	if (sbi->options->nohidden && (fname->dup.fa & FILE_ATTRIBUTE_HIDDEN))
 		return true;
 
-	if (sizeof(struct NTFS_DE) +
-	    offsetof(struct ATTR_FILE_NAME, name) +
-	    fname->name_len * sizeof(short) > le16_to_cpu(e->size))
+	if (!de_fname_fits(e, le16_to_cpu(e->size), fname))
 		return true;
 
 	name_len = ntfs_utf16_to_nls(sbi, fname->name, fname->name_len, name,
 				     PATH_MAX);
 	if (name_len <= 0) {
-		ntfs_warn(sbi->sb, "failed to convert name for inode %lx.",
+		ntfs_warn(sbi->sb, "failed to convert name for inode %llx.",
 			  ino);
 		return true;
 	}
@@ -474,23 +531,6 @@ static int ntfs_readdir(struct file *file, struct dir_context *ctx)
 	if (!name)
 		return -ENOMEM;
 
-	if (!ni->mi_loaded && ni->attr_list.size) {
-		/*
-		 * Directory inode is locked for read.
-		 * Load all subrecords to avoid 'write' access to 'ni' during
-		 * directory reading.
-		 */
-		ni_lock(ni);
-		if (!ni->mi_loaded && ni->attr_list.size) {
-			err = ni_load_all_mi(ni);
-			if (!err)
-				ni->mi_loaded = true;
-		}
-		ni_unlock(ni);
-		if (err)
-			goto out;
-	}
-
 	/*
 	 * Keep directory metadata stable for the whole walk. Loading subrecords
 	 * once is not enough if concurrent writeback can still compact ATTR_LIST
@@ -498,21 +538,43 @@ static int ntfs_readdir(struct file *file, struct dir_context *ctx)
 	 */
 	ni_lock(ni);
 
+	if (!ni->mi_loaded && ni->attr_list.size) {
+		/*
+		 * Directory inode is locked for read.
+		 * Load all subrecords to avoid 'write' access to 'ni' during
+		 * directory reading.
+		 */
+		err = ni_load_all_mi(ni);
+		if (err)
+			goto out;
+		ni->mi_loaded = true;
+	}
+
 	root = indx_get_root(&ni->dir, ni, NULL, NULL);
 	if (!root) {
 		err = -EINVAL;
-		goto out_unlock;
+		goto out;
 	}
 
 	if (pos >= sbi->record_size) {
 		bit = (pos - sbi->record_size) >> index_bits;
 	} else {
 		/*
+		 * Release ni_lock before dir_emit (which may fault into
+		 * user pages).  root->ihdr lives in the main MFT record
+		 * whose lifetime is bound to the inode, and i_rwsem shared
+		 * prevents concurrent directory modifications.
+		 */
+		ni_unlock(ni);
+
+		/*
 		 * Add each name from root in 'ctx'.
 		 */
 		err = ntfs_read_hdr(sbi, ni, &root->ihdr, 0, pos, name, ctx);
 		if (err)
-			goto out_unlock;
+			goto out;
+
+		ni_lock(ni);
 		bit = 0;
 	}
 
@@ -523,7 +585,7 @@ static int ntfs_readdir(struct file *file, struct dir_context *ctx)
 		/* Get the next used index. */
 		err = indx_used_bit(&ni->dir, ni, &bit);
 		if (err)
-			goto out_unlock;
+			goto out;
 
 		if (bit == MINUS_ONE_T) {
 			/* no more used indexes. end of dir. */
@@ -533,13 +595,19 @@ static int ntfs_readdir(struct file *file, struct dir_context *ctx)
 		if (bit >= max_bit) {
 			/* Corrupted directory. */
 			err = -EINVAL;
-			goto out_unlock;
+			goto out;
 		}
 
 		err = indx_read_ra(&ni->dir, ni, bit << ni->dir.idx2vbn_bits,
 				   &node, &file->f_ra);
 		if (err)
-			goto out_unlock;
+			goto out;
+
+		/*
+		 * node->index is a kmalloc'd buffer, safe after ni_unlock.
+		 * Release lock before dir_emit to avoid lock-order issues.
+		 */
+		ni_unlock(ni);
 
 		/*
 		 * Add each name from index in 'ctx'.
@@ -548,13 +616,14 @@ static int ntfs_readdir(struct file *file, struct dir_context *ctx)
 				    ((u64)bit << index_bits) + sbi->record_size,
 				    pos, name, ctx);
 		if (err)
-			goto out_unlock;
+			goto out;
+
+		ni_lock(ni);
 	}
 
-out_unlock:
+out:
 	ni_unlock(ni);
 
-out:
 	kfree(name);
 	put_indx_node(node);
 
@@ -574,6 +643,23 @@ out:
 	}
 
 	return err;
+}
+
+/*
+ * Return fname when @e passes the same checks as ntfs_dir_emit() before
+ * exposing an entry (valid key, non-DOS, fname fits in e->size).
+ */
+static inline const struct ATTR_FILE_NAME *
+de_countable_fname(const struct NTFS_DE *e, u32 e_size)
+{
+	const struct ATTR_FILE_NAME *fname;
+
+	fname = de_get_fname(e);
+	if (!fname || fname->type == FILE_NAME_DOS ||
+	    !de_fname_fits(e, e_size, fname))
+		return NULL;
+
+	return fname;
 }
 
 static int ntfs_dir_count(struct inode *dir, bool *is_empty, size_t *dirs,
@@ -615,11 +701,8 @@ static int ntfs_dir_count(struct inode *dir, bool *is_empty, size_t *dirs,
 			if (de_is_last(e))
 				break;
 
-			fname = de_get_fname(e);
+			fname = de_countable_fname(e, e_size);
 			if (!fname)
-				continue;
-
-			if (fname->type == FILE_NAME_DOS)
 				continue;
 
 			if (is_empty) {

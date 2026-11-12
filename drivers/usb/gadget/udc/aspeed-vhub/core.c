@@ -267,6 +267,9 @@ static void ast_vhub_remove(struct platform_device *pdev)
 	for (i = 0; i < vhub->max_ports; i++)
 		ast_vhub_del_dev(&vhub->ports[i].dev);
 
+	/* Final drain; the worker takes vhub->lock, so stay outside of it */
+	cancel_work_sync(&vhub->wake_work);
+
 	spin_lock_irqsave(&vhub->lock, flags);
 
 	/* Mask & ack all interrupts  */
@@ -303,7 +306,7 @@ static int ast_vhub_probe(struct platform_device *pdev)
 	int i, rc = 0;
 	const struct device_node *np = pdev->dev.of_node;
 
-	vhub = devm_kzalloc(&pdev->dev, sizeof(*vhub), GFP_KERNEL);
+	vhub = devm_kzalloc_obj(&pdev->dev, *vhub);
 	if (!vhub)
 		return -ENOMEM;
 
@@ -312,8 +315,8 @@ static int ast_vhub_probe(struct platform_device *pdev)
 	if (rc < 0)
 		vhub->max_ports = AST_VHUB_NUM_PORTS;
 
-	vhub->ports = devm_kcalloc(&pdev->dev, vhub->max_ports,
-				   sizeof(*vhub->ports), GFP_KERNEL);
+	vhub->ports = devm_kzalloc_objs(&pdev->dev, *vhub->ports,
+					vhub->max_ports);
 	if (!vhub->ports)
 		return -ENOMEM;
 
@@ -322,12 +325,12 @@ static int ast_vhub_probe(struct platform_device *pdev)
 	if (rc < 0)
 		vhub->max_epns = AST_VHUB_NUM_GEN_EPs;
 
-	vhub->epns = devm_kcalloc(&pdev->dev, vhub->max_epns,
-				  sizeof(*vhub->epns), GFP_KERNEL);
+	vhub->epns = devm_kzalloc_objs(&pdev->dev, *vhub->epns, vhub->max_epns);
 	if (!vhub->epns)
 		return -ENOMEM;
 
 	spin_lock_init(&vhub->lock);
+	INIT_WORK(&vhub->wake_work, ast_vhub_wake_work);
 	vhub->pdev = pdev;
 	vhub->port_irq_mask = GENMASK(VHUB_IRQ_DEV1_BIT + vhub->max_ports - 1,
 				      VHUB_IRQ_DEV1_BIT);
@@ -379,10 +382,8 @@ static int ast_vhub_probe(struct platform_device *pdev)
 	}
 	rc = devm_request_irq(&pdev->dev, vhub->irq, ast_vhub_irq, 0,
 			      KBUILD_MODNAME, vhub);
-	if (rc) {
-		dev_err(&pdev->dev, "Failed to request interrupt\n");
+	if (rc)
 		goto err;
-	}
 
 	dma_mask_ptr = (u64 *)of_device_get_match_data(&pdev->dev);
 	if (dma_mask_ptr) {

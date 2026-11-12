@@ -40,6 +40,7 @@ properties:
       - description: K3 AM62L3 SoC and Boards
         items:
           - enum:
+              - beagle,am62l3-beaglebadge
               - ti,am62l3-evm
           - const: ti,am62l3
 
@@ -102,6 +103,12 @@ properties:
           - enum:
               - tq,am625-tqma6254-mba62xx # MBa62xx base board
           - const: tq,am625-tqma6254
+          - const: ti,am625
+
+      - description: K3 AM625 SoC Variscite SOM and Carrier Boards
+        items:
+          - const: variscite,var-som-am62-symphony
+          - const: variscite,var-som-am62
           - const: ti,am625
 
       - description: K3 AM62P5 SoC Toradex Verdin Modules and Carrier Boards
@@ -220,6 +227,13 @@ properties:
           - enum:
               - beagle,am67a-beagley-ai
               - ti,j722s-evm
+          - const: ti,j722s
+
+      - description: K3 AM67 SoC PHYTEC phyBOARD-Rigel
+        items:
+          - enum:
+              - phytec,am6754-phyboard-rigel
+          - const: phytec,am67-phycore-som
           - const: ti,j722s
 
       - description: K3 J742S2 SoC

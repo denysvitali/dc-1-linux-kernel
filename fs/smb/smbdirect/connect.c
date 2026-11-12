@@ -182,8 +182,9 @@ static int smbdirect_connect_rdma_connect(struct smbdirect_socket *sc)
 	if (sc->ib.dev->attrs.kernel_cap_flags & IBK_SG_GAPS_REG)
 		sc->mr_io.type = IB_MR_TYPE_SG_GAPS;
 
-	sp->responder_resources = min_t(u8, sp->responder_resources,
-					sc->ib.dev->attrs.max_qp_rd_atom);
+	sp->responder_resources = min3(sp->responder_resources,
+				       sc->ib.dev->attrs.max_qp_rd_atom,
+				       U8_MAX);
 	smbdirect_log_rdma_mr(sc, SMBDIRECT_LOG_INFO,
 		"responder_resources=%d\n",
 		sp->responder_resources);
@@ -580,7 +581,7 @@ static void smbdirect_connect_negotiate_recv_done(struct ib_cq *cq, struct ib_wc
 	struct smbdirect_socket *sc = recv_io->socket;
 	unsigned long flags;
 
-	if (unlikely(wc->status != IB_WC_SUCCESS || WARN_ON_ONCE(wc->opcode != IB_WC_RECV))) {
+	if (unlikely(wc->status != IB_WC_SUCCESS || wc->opcode != IB_WC_RECV)) {
 		if (wc->status != IB_WC_WR_FLUSH_ERR)
 			smbdirect_log_rdma_recv(sc, SMBDIRECT_LOG_ERR,
 				"wc->status=%s (%d) wc->opcode=%d\n",

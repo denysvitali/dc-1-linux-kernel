@@ -96,6 +96,24 @@ __naked void pseudo_btf_id_log_masks_address(void)
 	: __clobber_all);
 }
 
+static int pseudo_func_callback(__u32 index, void *ctx)
+{
+	return 0;
+}
+
+SEC("socket")
+__description("unpriv: pseudo function policy diagnostic")
+__success __failure_unpriv
+__msg_unpriv("loading/calling other bpf or kernel functions")
+__not_msg_unpriv("BPF-to-BPF function call")
+__msg_unpriv("policy check failed for BPF function reference")
+__msg_unpriv("avoid BPF function references in unprivileged")
+int unpriv_pseudo_func_policy(void *ctx)
+{
+	bpf_loop(1, pseudo_func_callback, NULL, 0);
+	return 0;
+}
+
 SEC("socket")
 __description("unpriv: return pointer")
 __success __failure_unpriv __msg_unpriv("R0 leaks addr")
@@ -1014,6 +1032,43 @@ __naked void stack_write_nospec_slot_index(void)
 	*(u32 *)(r10 - 4) = r0;			\
 	*(u32 *)(r10 - 8) = r0;			\
 	exit;					\
+"	::: __clobber_all);
+}
+
+__noinline int nospec_global_func(int x)
+{
+	return x + 1;
+}
+
+__used __naked static void nospec_call_subprog(void)
+{
+	asm volatile ("					\
+	call %[bpf_get_prandom_u32];			\
+	r0 &= 0xff;					\
+	r1 = 0;						\
+	if r0 < 0x100 goto l0_%=;			\
+	/* executed only speculatively */		\
+	r1 = r10;					\
+l0_%=:	call nospec_global_func;			\
+	exit;						\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/* nospec_global_func is placed in front of nospec_call_subprog */
+SEC("socket")
+__description("unpriv: nospec in front of a call")
+__success __success_unpriv
+__caps_unpriv(CAP_BPF)
+__retval(1)
+__naked void nospec_backward_call(void)
+{
+	asm volatile ("					\
+	r1 = 0;						\
+	call nospec_global_func;			\
+	call nospec_call_subprog;			\
+	exit;						\
 "	::: __clobber_all);
 }
 

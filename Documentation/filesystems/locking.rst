@@ -27,7 +27,7 @@ prototypes::
 	int (*d_init)(struct dentry *);
 	void (*d_release)(struct dentry *);
 	void (*d_iput)(struct dentry *, struct inode *);
-	char *(*d_dname)((struct dentry *dentry, char *buffer, int buflen);
+	char *(*d_dname)(struct dentry *dentry, char *buffer, int buflen);
 	struct vfsmount *(*d_automount)(struct path *path);
 	int (*d_manage)(const struct path *, bool);
 	struct dentry *(*d_real)(struct dentry *, enum d_real_type type);
@@ -61,23 +61,23 @@ inode_operations
 
 prototypes::
 
-	int (*create) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t, bool);
+	int (*create) (const struct mnt_idmap *, struct inode *,struct dentry *,umode_t);
 	struct dentry * (*lookup) (struct inode *,struct dentry *, unsigned int);
 	int (*link) (struct dentry *,struct inode *,struct dentry *);
 	int (*unlink) (struct inode *,struct dentry *);
-	int (*symlink) (struct mnt_idmap *, struct inode *,struct dentry *,const char *);
-	struct dentry *(*mkdir) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t);
+	int (*symlink) (const struct mnt_idmap *, struct inode *,struct dentry *,const char *);
+	struct dentry *(*mkdir) (const struct mnt_idmap *, struct inode *,struct dentry *,umode_t);
 	int (*rmdir) (struct inode *,struct dentry *);
-	int (*mknod) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t,dev_t);
-	int (*rename) (struct mnt_idmap *, struct inode *, struct dentry *,
+	int (*mknod) (const struct mnt_idmap *, struct inode *,struct dentry *,umode_t,dev_t);
+	int (*rename) (const struct mnt_idmap *, struct inode *, struct dentry *,
 			struct inode *, struct dentry *, unsigned int);
 	int (*readlink) (struct dentry *, char __user *,int);
 	const char *(*get_link) (struct dentry *, struct inode *, struct delayed_call *);
 	void (*truncate) (struct inode *);
-	int (*permission) (struct mnt_idmap *, struct inode *, int, unsigned int);
+	int (*permission) (const struct mnt_idmap *, struct inode *, int, unsigned int);
 	struct posix_acl * (*get_inode_acl)(struct inode *, int, bool);
-	int (*setattr) (struct mnt_idmap *, struct dentry *, struct iattr *);
-	int (*getattr) (struct mnt_idmap *, const struct path *, struct kstat *, u32, unsigned int);
+	int (*setattr) (const struct mnt_idmap *, struct dentry *, struct iattr *);
+	int (*getattr) (const struct mnt_idmap *, const struct path *, struct kstat *, u32, unsigned int);
 	ssize_t (*listxattr) (struct dentry *, char *, size_t);
 	int (*fiemap)(struct inode *, struct fiemap_extent_info *, u64 start, u64 len);
 	void (*update_time)(struct inode *inode, enum fs_update_time type,
@@ -86,12 +86,12 @@ prototypes::
 	int (*atomic_open)(struct inode *, struct dentry *,
 				struct file *, unsigned open_flag,
 				umode_t create_mode);
-	int (*tmpfile) (struct mnt_idmap *, struct inode *,
+	int (*tmpfile) (const struct mnt_idmap *, struct inode *,
 			struct file *, umode_t);
-	int (*fileattr_set)(struct mnt_idmap *idmap,
+	int (*fileattr_set)(const struct mnt_idmap *idmap,
 			    struct dentry *dentry, struct file_kattr *fa);
 	int (*fileattr_get)(struct dentry *dentry, struct file_kattr *fa);
-	struct posix_acl * (*get_acl)(struct mnt_idmap *, struct dentry *, int);
+	struct posix_acl * (*get_acl)(const struct mnt_idmap *, struct dentry *, int);
 	struct offset_ctx *(*get_offset_ctx)(struct inode *inode);
 
 locking rules:
@@ -148,7 +148,7 @@ prototypes::
 		   struct inode *inode, const char *name, void *buffer,
 		   size_t size);
 	int (*set)(const struct xattr_handler *handler,
-                   struct mnt_idmap *idmap,
+                   const struct mnt_idmap *idmap,
                    struct dentry *dentry, struct inode *inode, const char *name,
                    const void *buffer, size_t size, int flags);
 
@@ -266,7 +266,6 @@ prototypes::
 	int (*error_remove_folio)(struct address_space *, struct folio *);
 	int (*swap_activate)(struct swap_info_struct *sis, struct file *f, sector_t *span)
 	int (*swap_deactivate)(struct file *);
-	int (*swap_rw)(struct kiocb *iocb, struct iov_iter *iter);
 
 locking rules:
 	All except dirty_folio and free_folio may block
@@ -291,7 +290,6 @@ is_partially_uptodate:	yes
 error_remove_folio:	yes
 swap_activate:		no
 swap_deactivate:	no
-swap_rw:		yes, unlocks
 ======================	======================== =========	===============
 
 ->write_begin(), ->write_end() and ->read_folio() may be called from
@@ -355,13 +353,11 @@ should perform any validation and preparation necessary to ensure that
 writes can be performed with minimal memory allocation.  It should call
 add_swap_extent(), or the helper iomap_swapfile_activate(), and return
 the number of extents added.  If IO should be submitted through
-->swap_rw(), it should set SWP_FS_OPS, otherwise IO will be submitted
-directly to the block device ``sis->bdev``.
+the file system it should call swap_fs_activate, otherwise IO will be
+submitted directly to the block device ``sis->bdev``.
 
 ->swap_deactivate() will be called in the sys_swapoff()
 path after ->swap_activate() returned success.
-
-->swap_rw will be called for swap IO if SWP_FS_OPS was set by ->swap_activate().
 
 file_lock_operations
 ====================

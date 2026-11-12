@@ -276,7 +276,7 @@ static int fw_change(struct net *net, struct sk_buff *in_skb,
 		if (f->id != handle && handle)
 			return -EINVAL;
 
-		fnew = kzalloc_obj(struct fw_filter);
+		fnew = kzalloc_obj(struct fw_filter, GFP_KERNEL_ACCOUNT);
 		if (!fnew)
 			return -ENOBUFS;
 
@@ -330,7 +330,7 @@ static int fw_change(struct net *net, struct sk_buff *in_skb,
 		rcu_assign_pointer(tp->root, head);
 	}
 
-	f = kzalloc_obj(struct fw_filter);
+	f = kzalloc_obj(struct fw_filter, GFP_KERNEL_ACCOUNT);
 	if (f == NULL)
 		return -ENOBUFS;
 
@@ -414,7 +414,8 @@ static int fw_dump(struct net *net, struct tcf_proto *tp, void *fh,
 	if (tcf_exts_dump(skb, &f->exts) < 0)
 		goto nla_put_failure;
 
-	nla_nest_end(skb, nest);
+	if (nla_nest_end_safe(skb, nest) < 0)
+		goto nla_put_failure;
 
 	if (tcf_exts_dump_stats(skb, &f->exts) < 0)
 		goto nla_put_failure;

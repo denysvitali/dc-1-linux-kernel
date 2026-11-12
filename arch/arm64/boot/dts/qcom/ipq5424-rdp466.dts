@@ -86,8 +86,6 @@
 	pinctrl-0 = <&pcie2_default_state>;
 	pinctrl-names = "default";
 
-	perst-gpios = <&tlmm 31 GPIO_ACTIVE_LOW>;
-
 	status = "okay";
 };
 
@@ -95,17 +93,23 @@
 	status = "okay";
 };
 
+&pcie2_port0 {
+	reset-gpios = <&tlmm 31 GPIO_ACTIVE_LOW>;
+};
+
 &pcie3 {
 	pinctrl-0 = <&pcie3_default_state>;
 	pinctrl-names = "default";
-
-	perst-gpios = <&tlmm 34 GPIO_ACTIVE_LOW>;
 
 	status = "okay";
 };
 
 &pcie3_phy {
 	status = "okay";
+};
+
+&pcie3_port0 {
+	reset-gpios = <&tlmm 34 GPIO_ACTIVE_LOW>;
 };
 
 &qusb_phy_0 {
@@ -257,6 +261,8 @@
 		nand-ecc-engine = <&qpic_nand>;
 		nand-ecc-strength = <4>;
 		nand-ecc-step-size = <512>;
+		spi-rx-bus-width = <4>;
+		spi-tx-bus-width = <4>;
 	};
 };
 

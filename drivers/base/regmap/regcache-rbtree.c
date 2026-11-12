@@ -16,7 +16,7 @@
 
 static int regcache_rbtree_write(struct regmap *map, unsigned int reg,
 				 unsigned int value);
-static int regcache_rbtree_exit(struct regmap *map);
+static void regcache_rbtree_exit(struct regmap *map);
 
 struct regcache_rbtree_node {
 	/* block of adjacent registers */
@@ -141,7 +141,7 @@ static int rbtree_show(struct seq_file *s, void *ignored)
 	int registers = 0;
 	int this_registers, average;
 
-	map->lock(map->lock_arg);
+	guard(regmap)(map);
 
 	mem_size = sizeof(*rbtree_ctx);
 
@@ -167,8 +167,6 @@ static int rbtree_show(struct seq_file *s, void *ignored)
 
 	seq_printf(s, "%d nodes, %d registers, average %d registers, used %zu bytes\n",
 		   nodes, registers, average, mem_size);
-
-	map->unlock(map->lock_arg);
 
 	return 0;
 }
@@ -196,7 +194,7 @@ static int regcache_rbtree_init(struct regmap *map)
 	return 0;
 }
 
-static int regcache_rbtree_exit(struct regmap *map)
+static void regcache_rbtree_exit(struct regmap *map)
 {
 	struct rb_node *next;
 	struct regcache_rbtree_ctx *rbtree_ctx;
@@ -205,7 +203,7 @@ static int regcache_rbtree_exit(struct regmap *map)
 	/* if we've already been called then just return */
 	rbtree_ctx = map->cache;
 	if (!rbtree_ctx)
-		return 0;
+		return;
 
 	/* free up the rbtree */
 	next = rb_first(&rbtree_ctx->root);
@@ -221,8 +219,6 @@ static int regcache_rbtree_exit(struct regmap *map)
 	/* release the resources */
 	kfree(map->cache);
 	map->cache = NULL;
-
-	return 0;
 }
 
 static int regcache_rbtree_populate(struct regmap *map)
@@ -350,9 +346,9 @@ regcache_rbtree_node_alloc(struct regmap *map, unsigned int reg)
 	if (!rbnode->block)
 		goto err_free;
 
-	rbnode->cache_present = kcalloc(BITS_TO_LONGS(rbnode->blklen),
-					sizeof(*rbnode->cache_present),
-					map->alloc_flags);
+	rbnode->cache_present = kzalloc_objs(*rbnode->cache_present,
+					     BITS_TO_LONGS(rbnode->blklen),
+					     map->alloc_flags);
 	if (!rbnode->cache_present)
 		goto err_free_block;
 

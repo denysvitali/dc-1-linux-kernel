@@ -86,7 +86,7 @@ MODULE_ALIAS("mmc:block");
 static DEFINE_MUTEX(block_mutex);
 
 /*
- * The defaults come from config options but can be overriden by module
+ * The defaults come from config options but can be overridden by module
  * or bootarg options.
  */
 static int perdev_minors = CONFIG_MMC_BLOCK_MINORS;
@@ -3336,6 +3336,11 @@ static struct mmc_driver mmc_driver = {
 static int __init mmc_blk_init(void)
 {
 	int res;
+
+	if (perdev_minors <= 0) {
+		pr_err("mmcblk: invalid minors per device: %d\n", perdev_minors);
+		return -EINVAL;
+	}
 
 	res  = bus_register(&mmc_rpmb_bus_type);
 	if (res < 0) {

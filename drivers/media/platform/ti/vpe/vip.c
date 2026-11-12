@@ -815,6 +815,22 @@ static void clear_irqs(struct vip_dev *dev, int irq_num, int list_num)
 	vpdma_clear_list_stat(dev->shared->vpdma, irq_num, dev->slice_id);
 }
 
+/*
+ * Quiesce recovery work and per-list IRQs before releasing stream resources.
+ * disable_work_sync() prevents the overflow handler from requeueing recovery
+ * work. Mask and synchronize IRQs afterwards because a running worker may
+ * have re-enabled them before exiting.
+ */
+static void vip_quiesce_stream(struct vip_stream *stream)
+{
+	struct vip_dev *dev = stream->port->dev;
+
+	disable_work_sync(&stream->recovery_work);
+	disable_irqs(dev, dev->slice_id, stream->list_num);
+	clear_irqs(dev, dev->slice_id, stream->list_num);
+	synchronize_irq(dev->irq);
+}
+
 static void populate_desc_list(struct vip_stream *stream)
 {
 	struct vip_port *port = stream->port;
@@ -1732,7 +1748,7 @@ static int vip_s_fmt_vid_cap(struct file *file, void *priv,
 
 	sfmt.which = V4L2_SUBDEV_FORMAT_ACTIVE;
 	sfmt.pad = 0;
-	ret = v4l2_subdev_call(port->subdev, pad, set_fmt, NULL, &sfmt);
+	ret = v4l2_subdev_call(port->subdev, pad, set_fmt, NULL, NULL, &sfmt);
 	if (ret) {
 		v4l2_dbg(1, debug, &dev->v4l2_dev, "set_fmt failed in subdev\n");
 		return ret;
@@ -2429,6 +2445,7 @@ static int vip_start_streaming(struct vb2_queue *vq, unsigned int count)
 		goto err;
 
 	stream->num_recovery = 0;
+	enable_work(&stream->recovery_work);
 
 	clear_irqs(dev, dev->slice_id, stream->list_num);
 	enable_irqs(dev, dev->slice_id, stream->list_num);
@@ -2453,12 +2470,16 @@ static void vip_stop_streaming(struct vb2_queue *vq)
 	struct vip_dev *dev = port->dev;
 	int ret;
 
+	/*
+	 * A running recovery worker may re-enable the parser, so quiesce it
+	 * and its IRQ handler before stopping the parser or releasing the
+	 * descriptor list.
+	 */
+	vip_quiesce_stream(stream);
+
 	vip_parser_stop_imm(port, true);
 	vip_enable_parser(port, false);
 	unset_fmt_params(stream);
-
-	disable_irqs(dev, dev->slice_id, stream->list_num);
-	clear_irqs(dev, dev->slice_id, stream->list_num);
 
 	if (port->subdev) {
 		ret = v4l2_subdev_call(port->subdev, video, s_stream, 0);
@@ -2599,7 +2620,7 @@ static int vip_init_port(struct vip_port *port)
 		mbus_fmt->code = fmt->code;
 		sd_fmt.which = V4L2_SUBDEV_FORMAT_ACTIVE;
 		sd_fmt.pad = 0;
-		ret = v4l2_subdev_call(port->subdev, pad, set_fmt,
+		ret = v4l2_subdev_call(port->subdev, pad, set_fmt, NULL,
 				       NULL, &sd_fmt);
 		if (ret)
 			v4l2_dbg(1, debug, &dev->v4l2_dev, "init_port set_fmt failed in subdev: (%d)\n",
@@ -3075,6 +3096,8 @@ static int alloc_stream(struct vip_port *port, int stream_id, int vfl_type)
 		goto do_free_hwlist;
 
 	INIT_WORK(&stream->recovery_work, vip_overflow_recovery_work);
+	/* Start disabled; vip_start_streaming() enables it before IRQs. */
+	disable_work(&stream->recovery_work);
 
 	INIT_LIST_HEAD(&stream->vidq);
 
@@ -3140,6 +3163,13 @@ static void free_stream(struct vip_stream *stream)
 		return;
 
 	dev = stream->port->dev;
+	/*
+	 * Quiesce the IRQ handler and recovery worker, then drop the stream
+	 * from cap_streams[], before releasing stream-owned resources.
+	 */
+	vip_quiesce_stream(stream);
+	stream->port->cap_streams[stream->stream_id] = NULL;
+
 	/* Free up the Drop queue */
 	list_for_each_safe(pos, q, &stream->dropq) {
 		buf = list_entry(pos,
@@ -3151,7 +3181,6 @@ static void free_stream(struct vip_stream *stream)
 
 	video_unregister_device(stream->vfd);
 	vpdma_hwlist_release(dev->shared->vpdma, stream->list_num);
-	stream->port->cap_streams[stream->stream_id] = NULL;
 	kfree(stream);
 }
 
@@ -3219,7 +3248,7 @@ static int alloc_port(struct vip_dev *dev, int id)
 	if (dev->ports[id])
 		return -EINVAL;
 
-	port = devm_kzalloc(&dev->pdev->dev, sizeof(*port), GFP_KERNEL);
+	port = devm_kzalloc_obj(&dev->pdev->dev, *port);
 	if (!port)
 		return -ENOMEM;
 
@@ -3395,7 +3424,7 @@ static int vip_probe_complete(struct platform_device *pdev)
 	int ret, i, slice_id, port_id, p;
 
 	/* Allocate ctrl before using it */
-	ctrl = devm_kzalloc(&pdev->dev, sizeof(*ctrl), GFP_KERNEL);
+	ctrl = devm_kzalloc_obj(&pdev->dev, *ctrl);
 	if (!ctrl)
 		return -ENOMEM;
 
@@ -3462,7 +3491,7 @@ static int vip_probe_slice(struct platform_device *pdev, int slice)
 	struct csc_data *csc;
 	int ret;
 
-	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
+	dev = devm_kzalloc_obj(&pdev->dev, *dev);
 	if (!dev)
 		return -ENOMEM;
 
@@ -3489,7 +3518,7 @@ static int vip_probe_slice(struct platform_device *pdev, int slice)
 	vip_top_reset(dev);
 	vip_set_slice_path(dev, VIP_MULTI_CHANNEL_DATA_SELECT, 1);
 
-	parser = devm_kzalloc(&pdev->dev, sizeof(*dev->parser), GFP_KERNEL);
+	parser = devm_kzalloc_obj(&pdev->dev, *dev->parser);
 	if (!parser)
 		return -ENOMEM;
 
@@ -3501,7 +3530,7 @@ static int vip_probe_slice(struct platform_device *pdev, int slice)
 	dev->parser = parser;
 
 	dev->sc_assigned = VIP_NOT_ASSIGNED;
-	sc = devm_kzalloc(&pdev->dev, sizeof(*dev->sc), GFP_KERNEL);
+	sc = devm_kzalloc_obj(&pdev->dev, *dev->sc);
 	if (!sc)
 		return -ENOMEM;
 
@@ -3513,7 +3542,7 @@ static int vip_probe_slice(struct platform_device *pdev, int slice)
 	dev->sc = sc;
 
 	dev->csc_assigned = VIP_NOT_ASSIGNED;
-	csc = devm_kzalloc(&pdev->dev, sizeof(*dev->csc), GFP_KERNEL);
+	csc = devm_kzalloc_obj(&pdev->dev, *dev->csc);
 	if (!csc)
 		return -ENOMEM;
 
@@ -3546,7 +3575,7 @@ static int vip_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	shared = devm_kzalloc(&pdev->dev, sizeof(*shared), GFP_KERNEL);
+	shared = devm_kzalloc_obj(&pdev->dev, *shared);
 	if (!shared)
 		return -ENOMEM;
 

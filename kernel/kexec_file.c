@@ -27,6 +27,7 @@
 #include <linux/syscalls.h>
 #include <linux/vmalloc.h>
 #include <linux/dma-map-ops.h>
+#include <linux/kexec_handover.h>
 #include "kexec_internal.h"
 
 #ifdef CONFIG_KEXEC_SIG
@@ -67,17 +68,19 @@ int kexec_image_probe_default(struct kimage *image, void *buf,
 			      unsigned long buf_len)
 {
 	const struct kexec_file_ops * const *fops;
-	int ret = -ENOEXEC;
 
 	for (fops = &kexec_file_loaders[0]; *fops && (*fops)->probe; ++fops) {
-		ret = (*fops)->probe(buf, buf_len);
-		if (!ret) {
+		int err = (*fops)->probe(buf, buf_len);
+
+		if (!err) {
 			image->fops = *fops;
-			return ret;
+			return 0;
 		}
+		if (err != -ENOEXEC)
+			return err;
 	}
 
-	return ret;
+	return -ENOEXEC;
 }
 
 static void *kexec_image_load_default(struct kimage *image)
@@ -474,6 +477,7 @@ static int locate_mem_hole_top_down(unsigned long start, unsigned long end,
 {
 	struct kimage *image = kbuf->image;
 	unsigned long temp_start, temp_end;
+	phys_addr_t poison;
 
 	temp_end = min(end, kbuf->buf_max);
 	temp_start = temp_end - kbuf->memsz + 1;
@@ -483,7 +487,9 @@ static int locate_mem_hole_top_down(unsigned long start, unsigned long end,
 		/* align down start */
 		temp_start = ALIGN_DOWN(temp_start, kbuf->buf_align);
 
-		if (temp_start < start || temp_start < kbuf->buf_min)
+		/* A candidate above the range means the walk wrapped around */
+		if (temp_start < start || temp_start < kbuf->buf_min ||
+		    temp_start > end)
 			return 0;
 
 		temp_end = temp_start + kbuf->memsz - 1;
@@ -503,6 +509,13 @@ static int locate_mem_hole_top_down(unsigned long start, unsigned long end,
 			continue;
 		}
 
+		poison = range_first_hwpoison(temp_start, kbuf->memsz);
+		if (poison != PHYS_ADDR_MAX) {
+			/* we hit a poisoned page */
+			temp_start = poison - kbuf->memsz;
+			continue;
+		}
+
 		/* We found a suitable memory range */
 		break;
 	} while (1);
@@ -519,6 +532,7 @@ static int locate_mem_hole_bottom_up(unsigned long start, unsigned long end,
 {
 	struct kimage *image = kbuf->image;
 	unsigned long temp_start, temp_end;
+	phys_addr_t poison;
 
 	temp_start = max(start, kbuf->buf_min);
 
@@ -542,6 +556,13 @@ static int locate_mem_hole_bottom_up(unsigned long start, unsigned long end,
 		/* Make sure this does not conflict with exclude range */
 		if (arch_check_excluded_range(image, temp_start, temp_end)) {
 			temp_start = temp_start + PAGE_SIZE;
+			continue;
+		}
+
+		poison = range_last_hwpoison(temp_start, kbuf->memsz);
+		if (poison != PHYS_ADDR_MAX) {
+			/* we hit a poisoned page */
+			temp_start = poison + PAGE_SIZE;
 			continue;
 		}
 
@@ -721,8 +742,8 @@ int kexec_locate_mem_hole(struct kexec_buf *kbuf)
 		return 0;
 
 	/*
-	 * If KHO is active, only use KHO scratch memory. All other memory
-	 * could potentially be handed over.
+	 * If KHO is active, only use KHO bootmem. All other memory could
+	 * potentially be handed over.
 	 */
 	ret = kho_locate_mem_hole(kbuf, locate_mem_hole_callback);
 	if (ret <= 0)
@@ -783,7 +804,7 @@ int kexec_add_buffer(struct kexec_buf *kbuf)
 	kbuf->cma = NULL;
 
 	/* Walk the RAM ranges and allocate a suitable range for the buffer */
-	ret = arch_kexec_locate_mem_hole(kbuf);
+	ret = kexec_locate_mem_hole(kbuf);
 	if (ret)
 		return ret;
 
@@ -796,6 +817,16 @@ int kexec_add_buffer(struct kexec_buf *kbuf)
 	kbuf->image->segment_cma[kbuf->image->nr_segments] = kbuf->cma;
 	kbuf->image->nr_segments++;
 	return 0;
+}
+
+static bool kexec_only_cma_segments(struct kimage *image)
+{
+	for (int i = 0; i < image->nr_segments; i++) {
+		if (!image->segment_cma[i])
+			return false;
+	}
+
+	return true;
 }
 
 /* Calculate and store the digest of segments */
@@ -821,6 +852,21 @@ static int kexec_calculate_store_digests(struct kimage *image)
 		return -ENOMEM;
 
 	sha256_init(&sctx);
+
+	/*
+	 * If KHO is enabled, the destinations are located in KHO scratch.
+	 * KHO scratch can only contain early boot allocations and movable
+	 * allocations. That means there is no risk of memory corruption by
+	 * uncancelled DMA.
+	 *
+	 * If all segments were loaded into contiguous memory, there will be no
+	 * relocations at all, so also no risk of corruption.
+	 */
+	if (image->type != KEXEC_TYPE_CRASH &&
+	    (kho_is_enabled() || kexec_only_cma_segments(image))) {
+		pr_debug("disabling checksum verification in purgatory\n");
+		goto skip_checksum;
+	}
 
 	for (j = i = 0; i < image->nr_segments; i++) {
 		struct kexec_segment *ksegment;
@@ -867,6 +913,7 @@ static int kexec_calculate_store_digests(struct kimage *image)
 		j++;
 	}
 
+skip_checksum:
 	sha256_final(&sctx, digest);
 
 	ret = kexec_purgatory_get_set_symbol(image, "purgatory_sha_regions",

@@ -528,6 +528,13 @@ static void mqueue_evict_inode(struct inode *inode)
 		list_add_tail(&msg->m_list, &tmp_msg);
 	kfree(info->node_cache);
 	spin_unlock(&info->lock);
+	/*
+	 * A shared file table can let the notification owner exit without
+	 * running ->flush(). No users of the inode remain during eviction, so
+	 * tear down any stale notification after dropping info->lock because
+	 * netlink_sendskb() may release the final socket reference.
+	 */
+	remove_notification(info);
 
 	list_for_each_entry_safe(msg, nmsg, &tmp_msg, m_list) {
 		list_del(&msg->m_list);
@@ -607,8 +614,8 @@ out_unlock:
 	return error;
 }
 
-static int mqueue_create(struct mnt_idmap *idmap, struct inode *dir,
-			 struct dentry *dentry, umode_t mode, bool excl)
+static int mqueue_create(const struct mnt_idmap *idmap, struct inode *dir,
+			 struct dentry *dentry, umode_t mode)
 {
 	return mqueue_create_attr(dentry, mode, NULL);
 }
@@ -790,7 +797,6 @@ static void __do_notify(struct mqueue_inode_info *info)
 			struct kernel_siginfo sig_i;
 			struct task_struct *task;
 
-			/* do_mq_notify() accepts sigev_signo == 0, why?? */
 			if (!info->notify.sigev_signo)
 				break;
 
@@ -1281,9 +1287,9 @@ static int do_mq_notify(mqd_t mqdes, const struct sigevent *notification)
 			     notification->sigev_notify != SIGEV_THREAD))
 			return -EINVAL;
 		if (notification->sigev_notify == SIGEV_SIGNAL &&
-			!valid_signal(notification->sigev_signo)) {
+		    (!notification->sigev_signo ||
+		     !valid_signal(notification->sigev_signo)))
 			return -EINVAL;
-		}
 		if (notification->sigev_notify == SIGEV_THREAD) {
 			long timeo;
 

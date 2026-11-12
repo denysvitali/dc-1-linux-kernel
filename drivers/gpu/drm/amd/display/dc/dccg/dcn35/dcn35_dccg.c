@@ -572,7 +572,7 @@ static void dccg35_set_hdmistreamclk_src_new(
 	case 0:
 		REG_UPDATE_2(HDMISTREAMCLK_CNTL, HDMISTREAMCLK0_EN,
 					 (src == HDMI_STREAM_REFCLK) ? 0 : 1,
-					 DPSTREAMCLK0_SRC_SEL,
+					 HDMISTREAMCLK0_SRC_SEL,
 					 (src == HDMI_STREAM_REFCLK) ? 0 : src);
 		break;
 	default:
@@ -1654,13 +1654,14 @@ void dccg35_set_dpstreamclk_root_clock_gating(struct dccg *dccg, int dp_hpo_inst
 
 
 
-static void dccg35_set_hdmistreamclk(
+void dccg35_set_hdmistreamclk(
 		struct dccg *dccg,
 		enum streamclk_source src,
 		uint32_t otg_inst)
 {
 	struct dcn_dccg *dccg_dcn = TO_DCN_DCCG(dccg);
 
+	dccg35_set_hdmistreamclk_rcg(dccg, 0, false);
 	/* set the dtbclk_p source */
 	dccg35_set_dtbclk_p_src(dccg, src, otg_inst);
 
@@ -1680,8 +1681,11 @@ void dccg35_set_hdmistreamclk_root_clock_gating(struct dccg *dccg, bool enable)
 {
 	struct dcn_dccg *dccg_dcn = TO_DCN_DCCG(dccg);
 
-	if (dccg->ctx->dc->debug.root_clock_optimization.bits.hdmistream)
-		REG_UPDATE(DCCG_GATE_DISABLE_CNTL6, HDMISTREAMCLK0_ROOT_GATE_DISABLE, enable ? 1 : 0);
+	if (!dccg->ctx->dc->debug.root_clock_optimization.bits.hdmistream && !enable) {
+		DC_LOG_DEBUG("%s: HDMISTREAMCLK0_ROOT_GATE DISABLE = 0 bypassed", __func__);
+		return;
+	}
+	REG_UPDATE(DCCG_GATE_DISABLE_CNTL6, HDMISTREAMCLK0_ROOT_GATE_DISABLE, enable ? 1 : 0);
 
 	DC_LOG_DEBUG("%s: HDMISTREAMCLK0_ROOT_GATE_DISABLE = %d\n", __func__, enable ? 1 : 0);
 }
@@ -2800,6 +2804,7 @@ struct dccg *dccg35_create(
 	base->ctx = ctx;
 	base->funcs = &dccg35_funcs;
 
+	base->inst = 0;
 	dccg_dcn->regs = regs;
 	dccg_dcn->dccg_shift = dccg_shift;
 	dccg_dcn->dccg_mask = dccg_mask;

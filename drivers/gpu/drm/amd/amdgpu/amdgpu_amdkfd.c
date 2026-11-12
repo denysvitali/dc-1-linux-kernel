@@ -39,6 +39,7 @@
 #if IS_ENABLED(CONFIG_HSA_AMD)
 #include "kfd_priv.h"
 #endif
+#include "kfd_svm.h"
 
 /* Total memory size in system memory and all GPU VRAM. Used to
  * estimate worst case amount of memory to reserve for page tables
@@ -177,9 +178,7 @@ void amdgpu_amdkfd_device_init(struct amdgpu_device *adev)
 
 	if (adev->kfd.dev) {
 		struct kgd2kfd_shared_resources gpu_resources = {
-			.compute_vmid_bitmap =
-				((1 << AMDGPU_NUM_VMID) - 1) -
-				((1 << adev->vm_manager.first_kfd_vmid) - 1),
+			.compute_vmid_bitmap = adev->vm_manager.vmid_uq_mask_gfxhub,
 			.num_pipe_per_mec = adev->gfx.mec.num_pipe_per_mec,
 			.num_queue_per_pipe = adev->gfx.mec.num_queue_per_pipe,
 			.gpuvm_size = min(adev->vm_manager.max_pfn
@@ -242,6 +241,25 @@ void amdgpu_amdkfd_device_fini_sw(struct amdgpu_device *adev)
 		adev->kfd.dev = NULL;
 		amdgpu_amdkfd_total_mem_size -= adev->gmc.real_vram_size;
 	}
+}
+
+int amdgpu_amdkfd_prepare_partition_switch(struct amdgpu_device *adev)
+{
+	struct kfd_dev *kfd = adev->kfd.dev;
+	int r;
+
+	if (!kfd)
+		return 0;
+	r = kgd2kfd_check_and_lock_kfd(kfd);
+	if (r)
+		return r;
+
+	adev->kfd.init_complete = false;
+	kgd2kfd_device_fini(kfd);
+	adev->kfd.dev = NULL;
+	amdgpu_amdkfd_total_mem_size -= adev->gmc.real_vram_size;
+
+	return 0;
 }
 
 void amdgpu_amdkfd_interrupt(struct amdgpu_device *adev,
@@ -329,7 +347,7 @@ void amdgpu_amdkfd_clear_kfd_mapping(struct amdgpu_device *adev)
 	struct kfd_dev *kfd = adev->kfd.dev;
 	unsigned int i;
 
-	if (!kfd)
+	if (!kfd || !kfd->init_complete)
 		return;
 
 	for (i = 0; i < kfd->num_nodes; i++) {
@@ -597,14 +615,18 @@ int amdgpu_amdkfd_get_dmabuf_info(struct amdgpu_device *adev, int dma_buf_fd,
 		/* first get metadata_size by buffer = NULL */
 		r = amdgpu_bo_get_metadata(bo, NULL, 0,
 					   metadata_size, NULL);
+		if (r)
+			goto out_put;
 
 		/* user buf_size is bigger than bo metadata_size
 		 * allocate a buf at kernel space and copy */
 		if (*metadata_size <= buffer_size) {
 			*metadata_buffer = kzalloc(*metadata_size, GFP_KERNEL);
 
-			if (!*metadata_buffer)
-				return -ENOMEM;
+			if (!*metadata_buffer) {
+				r = -ENOMEM;
+				goto out_put;
+			}
 
 			r = amdgpu_bo_get_metadata(bo, *metadata_buffer, *metadata_size,
 						   NULL, &metadata_flags);
@@ -711,7 +733,8 @@ int amdgpu_amdkfd_submit_ib(struct amdgpu_device *adev,
 		goto err;
 	}
 
-	ret = amdgpu_job_alloc(adev, NULL, NULL, NULL, 1, &job, 0);
+	ret = amdgpu_job_alloc(adev, NULL, NULL, NULL, 1, 0, GFP_KERNEL,
+			       &job);
 	if (ret)
 		goto err;
 
@@ -725,7 +748,7 @@ int amdgpu_amdkfd_submit_ib(struct amdgpu_device *adev,
 	job->vmid = vmid;
 	job->num_ibs = 1;
 
-	ret = amdgpu_ib_schedule(ring, 1, ib, job, &f);
+	ret = amdgpu_ib_schedule(ring, job, &f);
 
 	if (ret) {
 		drm_err(adev_to_drm(adev), "failed to schedule IB.\n");
@@ -745,9 +768,8 @@ err:
 void amdgpu_amdkfd_set_compute_idle(struct amdgpu_device *adev, bool idle)
 {
 	enum amd_powergating_state state = idle ? AMD_PG_STATE_GATE : AMD_PG_STATE_UNGATE;
-	if ((IP_VERSION_MAJ(amdgpu_ip_version(adev, GC_HWIP, 0)) == 11 &&
-	    ((adev->mes.kiq_version & AMDGPU_MES_VERSION_MASK) <= 64)) ||
-		(IP_VERSION_MAJ(amdgpu_ip_version(adev, GC_HWIP, 0)) == 12)) {
+	if (IP_VERSION_MAJ(amdgpu_ip_version(adev, GC_HWIP, 0)) == 11 &&
+	    ((adev->mes.kiq_version & AMDGPU_MES_VERSION_MASK) <= 64)) {
 		pr_debug("GFXOFF is %s\n", idle ? "enabled" : "disabled");
 		amdgpu_gfx_off_ctrl(adev, idle);
 	} else if ((IP_VERSION_MAJ(amdgpu_ip_version(adev, GC_HWIP, 0)) == 9) &&
@@ -813,16 +835,6 @@ int amdgpu_amdkfd_send_close_event_drain_irq(struct amdgpu_device *adev,
 	amdgpu_amdkfd_interrupt(adev, payload);
 
 	return 0;
-}
-
-int amdgpu_amdkfd_check_and_lock_kfd(struct amdgpu_device *adev)
-{
-	return kgd2kfd_check_and_lock_kfd(adev->kfd.dev);
-}
-
-void amdgpu_amdkfd_unlock_kfd(struct amdgpu_device *adev)
-{
-	kgd2kfd_unlock_kfd(adev->kfd.dev);
 }
 
 
@@ -956,4 +968,18 @@ int amdgpu_amdkfd_config_sq_perfmon(struct amdgpu_device *adev, uint32_t xcp_id,
 					reg_override_enable, perfmon_override_enable);
 
 	return r;
+}
+
+/* Reset an MES queue */
+int amdgpu_amdkfd_reset_mes_queue(struct amdgpu_device *adev,
+				  uint32_t node_id,
+				  int queue_type,
+				  int pipe, int queue,
+				  unsigned int db)
+{
+	if (!adev->kfd.init_complete)
+		return 0;
+
+	return kgd2kfd_reset_mes_queue(adev->kfd.dev, node_id, queue_type,
+				       pipe, queue, db);
 }

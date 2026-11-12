@@ -684,6 +684,9 @@ static int prestera_fw_hdr_parse(struct prestera_fw *fw)
 	struct prestera_fw_header *hdr;
 	u32 magic;
 
+	if (fw->bin->size < sizeof(*hdr))
+		return -EINVAL;
+
 	hdr = (struct prestera_fw_header *)fw->bin->data;
 
 	magic = be32_to_cpu(hdr->magic_number);
@@ -879,7 +882,7 @@ static int prestera_pci_probe(struct pci_dev *pdev,
 
 	pci_set_master(pdev);
 
-	fw = devm_kzalloc(&pdev->dev, sizeof(*fw), GFP_KERNEL);
+	fw = devm_kzalloc_obj(&pdev->dev, *fw);
 	if (!fw) {
 		err = -ENOMEM;
 		goto err_pci_dev_alloc;

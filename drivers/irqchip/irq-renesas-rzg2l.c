@@ -161,7 +161,7 @@ static void rzg2l_clear_irq_int(struct rzg2l_irqc_priv *priv, unsigned int hwirq
 	 * falling/rising-edge.
 	 */
 	if ((iscr & bit) && (iitsr & IITSR_IITSEL_MASK(hw_irq))) {
-		writel_relaxed(iscr & ~bit, priv->base + ISCR);
+		writel_relaxed(~bit, priv->base + ISCR);
 		/*
 		 * Enforce that the posted write is flushed to prevent that the
 		 * just handled interrupt is raised again.
@@ -177,7 +177,7 @@ static void rzg2l_clear_tint_int(struct rzg2l_irqc_priv *priv, unsigned int hwir
 
 	reg = readl_relaxed(priv->base + TSCR);
 	if (reg & bit) {
-		writel_relaxed(reg & ~bit, priv->base + TSCR);
+		writel_relaxed(~bit, priv->base + TSCR);
 		/*
 		 * Enforce that the posted write is flushed to prevent that the
 		 * just handled interrupt is raised again.
@@ -838,7 +838,7 @@ static int rzg2l_irqc_common_probe(struct platform_device *pdev, struct device_n
 	if (!parent_domain)
 		return dev_err_probe(dev, -ENODEV, "cannot find parent domain\n");
 
-	rzg2l_irqc_data = devm_kzalloc(dev, sizeof(*rzg2l_irqc_data), GFP_KERNEL);
+	rzg2l_irqc_data = devm_kzalloc_obj(dev, *rzg2l_irqc_data);
 	if (!rzg2l_irqc_data)
 		return -ENOMEM;
 
@@ -851,8 +851,9 @@ static int rzg2l_irqc_common_probe(struct platform_device *pdev, struct device_n
 
 	rzg2l_irqc_data->info = info;
 
-	rzg2l_irqc_data->fwspec = devm_kcalloc(&pdev->dev, info.num_irq,
-					       sizeof(*rzg2l_irqc_data->fwspec), GFP_KERNEL);
+	rzg2l_irqc_data->fwspec = devm_kzalloc_objs(&pdev->dev,
+						    *rzg2l_irqc_data->fwspec,
+						    info.num_irq);
 	if (!rzg2l_irqc_data->fwspec)
 		return -ENOMEM;
 

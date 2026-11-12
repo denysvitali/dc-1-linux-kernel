@@ -47,6 +47,61 @@ typedef struct sockopt {
 	int optlen;
 } sockopt_t;
 
+int sockptr_to_sockopt(sockopt_t *opt, sockptr_t optval, sockptr_t optlen,
+		       struct kvec *kvec);
+
+/*
+ * Initialize a user-backed sockopt_t from the (optval, optlen) __user pair of
+ * a getsockopt() callback. Used by transitional __user getsockopt wrappers
+ * while the proto-layer callbacks are converted to take a sockopt_t; the
+ * caller writes opt->optlen back to the user optlen after the callback.
+ */
+static inline int sockopt_init_user(sockopt_t *opt, char __user *optval,
+				    int __user *optlen)
+{
+	int len;
+
+	if (get_user(len, optlen))
+		return -EFAULT;
+	if (len < 0)
+		return -EINVAL;
+
+	iov_iter_ubuf(&opt->iter_out, ITER_DEST, optval, len);
+	iov_iter_ubuf(&opt->iter_in, ITER_SOURCE, optval, len);
+	opt->optlen = len;
+
+	return 0;
+}
+
+/*
+ * Grow optval to @size, for the options whose reply is sized by a count the
+ * caller left in optval rather than by optlen. Those write past optlen today
+ * and userspace relies on it.
+ *
+ * Call it before writing through opt->iter_out: it re-anchors the iterator at
+ * the head of optval. Only a user buffer can be longer than the optlen the
+ * caller declared, so a kernel-backed optval is refused with -EINVAL.
+ */
+static inline int sockopt_expand_out(sockopt_t *opt, size_t size)
+{
+	if (size <= (size_t)opt->optlen)
+		return 0;
+
+	if (size > INT_MAX)
+		return -EINVAL;
+
+	/* Re-anchoring reads iter_out.ubuf, so the iterator has to be a user
+	 * buffer that nothing has written through yet.
+	 */
+	if (WARN_ON_ONCE(!iter_is_ubuf(&opt->iter_out) ||
+			 iov_iter_count(&opt->iter_out) != (size_t)opt->optlen))
+		return -EINVAL;
+
+	iov_iter_ubuf(&opt->iter_out, ITER_DEST, opt->iter_out.ubuf, size);
+
+	return 0;
+}
+
 struct poll_table_struct;
 struct pipe_inode_info;
 struct inode;
@@ -143,7 +198,7 @@ struct socket {
 
 	struct file		*file;
 	struct sock		*sk;
-	const struct proto_ops	*ops; /* Might change with IPV6_ADDRFORM or MPTCP. */
+	const struct proto_ops	*ops; /* Might change with MPTCP. */
 
 	struct socket_wq	wq;
 };
@@ -285,6 +340,7 @@ int sock_recvmsg(struct socket *sock, struct msghdr *msg, int flags);
 struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname);
 struct socket *sockfd_lookup(int fd, int *err);
 struct socket *sock_from_file(struct file *file);
+int sock_read_xattr(struct socket *sock, const char *name, void *value, size_t size);
 #define		     sockfd_put(sock) fput(sock->file)
 int net_ratelimit(void);
 

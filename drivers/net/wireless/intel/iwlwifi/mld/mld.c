@@ -35,6 +35,17 @@ MODULE_IMPORT_NS("IWLWIFI");
 
 static const struct iwl_op_mode_ops iwl_mld_ops;
 
+int iwl_mld_get_systime(struct iwl_mld *mld, u32 *gp2)
+{
+	*gp2 = iwl_trans_read_prph(mld->trans,
+			     mld->trans->mac_cfg->base->gp2_reg_addr);
+
+	if (*gp2 == 0x5a5a5a5a)
+		return -EINVAL;
+
+	return 0;
+}
+
 static int __init iwl_mld_init(void)
 {
 	int ret = iwl_opmode_register("iwlmld", &iwl_mld_ops);
@@ -212,6 +223,7 @@ static const struct iwl_hcmd_names iwl_mld_reg_and_nvm_names[] = {
 	HCMD_NAME(TAS_CONFIG),
 	HCMD_NAME(SAR_OFFSET_MAPPING_TABLE_CMD),
 	HCMD_NAME(MCC_ALLOWED_AP_TYPE_CMD),
+	HCMD_NAME(PNVM_INIT_COMPLETE_NTFY),
 };
 
 /* Please keep this array *SORTED* by hex value.
@@ -418,13 +430,13 @@ iwl_op_mode_mld_start(struct iwl_trans *trans, const struct iwl_rf_cfg *cfg,
 	iwl_mld_construct_fw_runtime(mld, trans, fw, dbgfs_dir);
 
 	iwl_mld_get_bios_tables(mld);
-	iwl_uefi_get_sgom_table(trans, &mld->fwrt);
-	mld->bios_enable_puncturing = iwl_uefi_get_puncturing(&mld->fwrt);
 
 	iwl_mld_hw_set_regulatory(mld);
 
 	/* Configure transport layer with the opmode specific params */
 	iwl_mld_configure_trans(op_mode);
+
+	iwl_mld_tx_gp2_init(mld);
 
 	/* needed for regulatory init */
 	rtnl_lock();
@@ -446,6 +458,8 @@ iwl_op_mode_mld_start(struct iwl_trans *trans, const struct iwl_rf_cfg *cfg,
 	}
 
 	if (ret) {
+		/* wiphy memory is about to be freed, we should cancel any pending work */
+		wiphy_work_cancel(mld->wiphy, &mld->async_handlers_wk);
 		wiphy_unlock(mld->wiphy);
 		rtnl_unlock();
 		goto err;
@@ -511,6 +525,7 @@ iwl_op_mode_mld_stop(struct iwl_op_mode *op_mode)
 	iwl_mld_thermal_exit(mld);
 
 	wiphy_lock(mld->wiphy);
+	wiphy_work_cancel(mld->wiphy, &mld->async_handlers_wk);
 	iwl_mld_low_latency_stop(mld);
 	iwl_mld_deinit_time_sync(mld);
 	wiphy_unlock(mld->wiphy);
@@ -618,6 +633,13 @@ static void iwl_mld_read_error_recovery_buffer(struct iwl_mld *mld)
 	/* no recovery buffer size defined in a TLV */
 	if (!src_size)
 		return;
+
+	/*
+	 * If we have a the recovery buffer from a previous (failing) recovery -
+	 * free it here
+	 */
+	kfree(mld->error_recovery_buf);
+	mld->error_recovery_buf = NULL;
 
 	recovery_buf = kzalloc(src_size, GFP_ATOMIC);
 	if (!recovery_buf)
@@ -745,6 +767,7 @@ static void iwl_mld_device_powered_off(struct iwl_op_mode *op_mode)
 
 	wiphy_lock(mld->wiphy);
 	iwl_mld_stop_fw(mld);
+	iwl_mld_restart_cleanup(mld);
 	mld->fw_status.in_d3 = false;
 	wiphy_unlock(mld->wiphy);
 }

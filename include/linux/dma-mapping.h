@@ -104,6 +104,14 @@
 #define DMA_ATTR_CC_SHARED	(1UL << 13)
 
 /*
+ * __DMA_ATTR_ALLOC_CC_SHARED: Internal DMA-mapping attribute used by
+ * allocation paths that create shared (decrypted) backing pages for
+ * confidential computing guests. Drivers must not pass this attribute to
+ * dma_alloc_attrs().
+ */
+#define __DMA_ATTR_ALLOC_CC_SHARED	(1UL << 14)
+
+/*
  * A dma_addr_t can hold any valid DMA or bus address for the platform.  It can
  * be given to a device to use as a DMA source or target.  It is specific to a
  * given device and there may be a translation between the CPU physical address
@@ -199,7 +207,7 @@ int dma_set_coherent_mask(struct device *dev, u64 mask);
 u64 dma_get_required_mask(struct device *dev);
 bool dma_addressing_limited(struct device *dev);
 size_t dma_max_mapping_size(struct device *dev);
-size_t dma_opt_mapping_size(struct device *dev);
+size_t dma_max_opt_mapping_size(struct device *dev);
 unsigned long dma_get_merge_boundary(struct device *dev);
 struct sg_table *dma_alloc_noncontiguous(struct device *dev, size_t size,
 		enum dma_data_direction dir, gfp_t gfp, unsigned long attrs);
@@ -318,7 +326,7 @@ static inline size_t dma_max_mapping_size(struct device *dev)
 {
 	return 0;
 }
-static inline size_t dma_opt_mapping_size(struct device *dev)
+static inline size_t dma_max_opt_mapping_size(struct device *dev)
 {
 	return 0;
 }

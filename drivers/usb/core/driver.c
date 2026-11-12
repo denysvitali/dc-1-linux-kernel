@@ -228,14 +228,16 @@ static void usb_free_dynids(struct usb_driver *usb_drv)
 }
 
 static const struct usb_device_id *usb_match_dynamic_id(struct usb_interface *intf,
-							const struct usb_driver *drv)
+							const struct usb_driver *drv,
+							struct usb_device_id *id_copy)
 {
 	struct usb_dynid *dynid;
 
 	guard(mutex)(&usb_dynids_lock);
 	list_for_each_entry(dynid, &drv->dynids.list, node) {
 		if (usb_match_one_id(intf, &dynid->id)) {
-			return &dynid->id;
+			*id_copy = dynid->id;
+			return id_copy;
 		}
 	}
 	return NULL;
@@ -321,6 +323,7 @@ static int usb_probe_interface(struct device *dev)
 	struct usb_interface *intf = to_usb_interface(dev);
 	struct usb_device *udev = interface_to_usbdev(intf);
 	const struct usb_device_id *id;
+	struct usb_device_id id_copy;
 	int error = -ENODEV;
 	int lpm_disable_error = -ENODEV;
 
@@ -340,7 +343,7 @@ static int usb_probe_interface(struct device *dev)
 		return error;
 	}
 
-	id = usb_match_dynamic_id(intf, driver);
+	id = usb_match_dynamic_id(intf, driver, &id_copy);
 	if (!id)
 		id = usb_match_id(intf, driver->id_table);
 	if (!id)
@@ -407,7 +410,6 @@ static int usb_probe_interface(struct device *dev)
 	return error;
 
  err:
-	usb_set_intfdata(intf, NULL);
 	intf->needs_remote_wakeup = 0;
 	intf->condition = USB_INTERFACE_UNBOUND;
 
@@ -494,7 +496,6 @@ static int usb_unbind_interface(struct device *dev)
 	} else {
 		intf->needs_altsetting0 = 1;
 	}
-	usb_set_intfdata(intf, NULL);
 
 	intf->condition = USB_INTERFACE_UNBOUND;
 	intf->needs_remote_wakeup = 0;
@@ -641,6 +642,7 @@ void usb_driver_release_interface(struct usb_driver *driver,
 	} else {
 		device_lock(dev);
 		usb_unbind_interface(dev);
+		dev_set_drvdata(dev, NULL);
 		dev->driver = NULL;
 		device_unlock(dev);
 	}
@@ -892,6 +894,7 @@ static int usb_device_match(struct device *dev, const struct device_driver *drv)
 		struct usb_interface *intf;
 		const struct usb_driver *usb_drv;
 		const struct usb_device_id *id;
+		struct usb_device_id id_copy;
 
 		/* device drivers never match interfaces */
 		if (is_usb_device_driver(drv))
@@ -904,7 +907,7 @@ static int usb_device_match(struct device *dev, const struct device_driver *drv)
 		if (id)
 			return 1;
 
-		id = usb_match_dynamic_id(intf, usb_drv);
+		id = usb_match_dynamic_id(intf, usb_drv, &id_copy);
 		if (id)
 			return 1;
 	}
@@ -980,9 +983,10 @@ bool is_usb_device_driver(const struct device_driver *drv)
 }
 
 /**
- * usb_register_device_driver - register a USB device (not interface) driver
+ * __usb_register_device_driver - register a USB device (not interface) driver
  * @new_udriver: USB operations for the device driver
  * @owner: module owner of this driver.
+ * @mod_name: module name string
  *
  * Registers a USB device driver with the USB core.  The list of
  * unattached devices will be rescanned whenever a new driver is
@@ -990,8 +994,8 @@ bool is_usb_device_driver(const struct device_driver *drv)
  *
  * Return: A negative error code on failure and 0 on success.
  */
-int usb_register_device_driver(struct usb_device_driver *new_udriver,
-		struct module *owner)
+int __usb_register_device_driver(struct usb_device_driver *new_udriver,
+		struct module *owner, const char *mod_name)
 {
 	int retval = 0;
 
@@ -1003,6 +1007,7 @@ int usb_register_device_driver(struct usb_device_driver *new_udriver,
 	new_udriver->driver.probe = usb_probe_device;
 	new_udriver->driver.remove = usb_unbind_device;
 	new_udriver->driver.owner = owner;
+	new_udriver->driver.mod_name = mod_name;
 	new_udriver->driver.dev_groups = new_udriver->dev_groups;
 
 	retval = driver_register(&new_udriver->driver);
@@ -1023,7 +1028,7 @@ int usb_register_device_driver(struct usb_device_driver *new_udriver,
 
 	return retval;
 }
-EXPORT_SYMBOL_GPL(usb_register_device_driver);
+EXPORT_SYMBOL_GPL(__usb_register_device_driver);
 
 /**
  * usb_deregister_device_driver - unregister a USB device (not interface) driver
@@ -2077,5 +2082,4 @@ const struct bus_type usb_bus_type = {
 	.name =		"usb",
 	.match =	usb_device_match,
 	.uevent =	usb_uevent,
-	.need_parent_lock =	true,
 };

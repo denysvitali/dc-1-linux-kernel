@@ -20,6 +20,7 @@
 #include <linux/8250_pci.h>
 #include <linux/bitops.h>
 #include <linux/bitfield.h>
+#include <linux/err.h>
 
 #include <asm/byteorder.h>
 #include <asm/io.h>
@@ -76,25 +77,6 @@
 #define PCI_DEVICE_ID_WCHIC_CH384_4S	0x3470
 #define PCI_DEVICE_ID_WCHIC_CH384_8S	0x3853
 
-#define PCI_DEVICE_ID_MOXA_CP102E	0x1024
-#define PCI_DEVICE_ID_MOXA_CP102EL	0x1025
-#define PCI_DEVICE_ID_MOXA_CP102N	0x1027
-#define PCI_DEVICE_ID_MOXA_CP104EL_A	0x1045
-#define PCI_DEVICE_ID_MOXA_CP104N	0x1046
-#define PCI_DEVICE_ID_MOXA_CP112N	0x1121
-#define PCI_DEVICE_ID_MOXA_CP114EL	0x1144
-#define PCI_DEVICE_ID_MOXA_CP114N	0x1145
-#define PCI_DEVICE_ID_MOXA_CP116E_A_A	0x1160
-#define PCI_DEVICE_ID_MOXA_CP116E_A_B	0x1161
-#define PCI_DEVICE_ID_MOXA_CP118EL_A	0x1182
-#define PCI_DEVICE_ID_MOXA_CP118E_A_I	0x1183
-#define PCI_DEVICE_ID_MOXA_CP132EL	0x1322
-#define PCI_DEVICE_ID_MOXA_CP132N	0x1323
-#define PCI_DEVICE_ID_MOXA_CP134EL_A	0x1342
-#define PCI_DEVICE_ID_MOXA_CP134N	0x1343
-#define PCI_DEVICE_ID_MOXA_CP138E_A	0x1381
-#define PCI_DEVICE_ID_MOXA_CP168EL_A	0x1683
-
 #define PCI_DEVICE_ID_ADDIDATA_CPCI7500        0x7003
 #define PCI_DEVICE_ID_ADDIDATA_CPCI7500_NG     0x7024
 #define PCI_DEVICE_ID_ADDIDATA_CPCI7420_NG     0x7025
@@ -135,7 +117,7 @@ struct serial_private {
 	unsigned int		nr;
 	struct pci_serial_quirk	*quirk;
 	const struct pciserial_board *board;
-	int			line[];
+	struct uart_8250_port	*uport[];
 };
 
 #define PCI_DEVICE_ID_HPE_PCI_SERIAL	0x37e
@@ -1777,7 +1759,7 @@ static int pci_fintek_f815xxa_setup(struct serial_private *priv,
 	struct pci_dev *pdev = priv->dev;
 	struct f815xxa_data *data;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&pdev->dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1998,138 +1980,6 @@ pci_sunix_setup(struct serial_private *priv,
 		idx = div_s64_rem(idx, 4, &offset);
 		offset = idx * 64 + offset * board->uart_offset;
 	}
-
-	return setup_port(priv, port, bar, offset, 0);
-}
-
-#define MOXA_PUART_GPIO_EN	0x09
-#define MOXA_PUART_GPIO_OUT	0x0A
-
-#define MOXA_GPIO_PIN2	BIT(2)
-
-#define MOXA_RS232	0x00
-#define MOXA_RS422	0x01
-#define MOXA_RS485_4W	0x0B
-#define MOXA_RS485_2W	0x0F
-#define MOXA_UIR_OFFSET	0x04
-#define MOXA_EVEN_RS_MASK	GENMASK(3, 0)
-#define MOXA_ODD_RS_MASK	GENMASK(7, 4)
-
-enum {
-	MOXA_SUPP_RS232 = BIT(0),
-	MOXA_SUPP_RS422 = BIT(1),
-	MOXA_SUPP_RS485 = BIT(2),
-};
-
-static unsigned short moxa_get_nports(unsigned short device)
-{
-	switch (device) {
-	case PCI_DEVICE_ID_MOXA_CP116E_A_A:
-	case PCI_DEVICE_ID_MOXA_CP116E_A_B:
-		return 8;
-	}
-
-	return FIELD_GET(0x00F0, device);
-}
-
-static bool pci_moxa_is_mini_pcie(unsigned short device)
-{
-	if (device == PCI_DEVICE_ID_MOXA_CP102N	||
-	    device == PCI_DEVICE_ID_MOXA_CP104N	||
-	    device == PCI_DEVICE_ID_MOXA_CP112N	||
-	    device == PCI_DEVICE_ID_MOXA_CP114N ||
-	    device == PCI_DEVICE_ID_MOXA_CP132N ||
-	    device == PCI_DEVICE_ID_MOXA_CP134N)
-		return true;
-
-	return false;
-}
-
-static unsigned int pci_moxa_supported_rs(struct pci_dev *dev)
-{
-	switch (dev->device & 0x0F00) {
-	case 0x0000:
-	case 0x0600:
-		return MOXA_SUPP_RS232;
-	case 0x0100:
-		return MOXA_SUPP_RS232 | MOXA_SUPP_RS422 | MOXA_SUPP_RS485;
-	case 0x0300:
-		return MOXA_SUPP_RS422 | MOXA_SUPP_RS485;
-	}
-	return 0;
-}
-
-static int pci_moxa_set_interface(const struct pci_dev *dev,
-				  unsigned int port_idx,
-				  u8 mode)
-{
-	resource_size_t iobar_addr = pci_resource_start(dev, 2);
-	resource_size_t UIR_addr = iobar_addr + MOXA_UIR_OFFSET + port_idx / 2;
-	u8 val;
-
-	val = inb(UIR_addr);
-
-	if (port_idx % 2) {
-		val &= ~MOXA_ODD_RS_MASK;
-		val |= FIELD_PREP(MOXA_ODD_RS_MASK, mode);
-	} else {
-		val &= ~MOXA_EVEN_RS_MASK;
-		val |= FIELD_PREP(MOXA_EVEN_RS_MASK, mode);
-	}
-	outb(val, UIR_addr);
-
-	return 0;
-}
-
-static int pci_moxa_init(struct pci_dev *dev)
-{
-	unsigned short device = dev->device;
-	resource_size_t iobar_addr = pci_resource_start(dev, 2);
-	unsigned int i, num_ports = moxa_get_nports(device);
-	u8 val, init_mode = MOXA_RS232;
-
-	if (!IS_ENABLED(CONFIG_HAS_IOPORT))
-		return serial_8250_warn_need_ioport(dev);
-
-	if (!(pci_moxa_supported_rs(dev) & MOXA_SUPP_RS232)) {
-		init_mode = MOXA_RS422;
-	}
-	for (i = 0; i < num_ports; ++i)
-		pci_moxa_set_interface(dev, i, init_mode);
-
-	/*
-	 * Enable hardware buffer to prevent break signal output when system boots up.
-	 * This hardware buffer is only supported on Mini PCIe series.
-	 */
-	if (pci_moxa_is_mini_pcie(device)) {
-		/* Set GPIO direction */
-		val = inb(iobar_addr + MOXA_PUART_GPIO_EN);
-		val |= MOXA_GPIO_PIN2;
-		outb(val, iobar_addr + MOXA_PUART_GPIO_EN);
-		/* Enable low GPIO */
-		val = inb(iobar_addr + MOXA_PUART_GPIO_OUT);
-		val &= ~MOXA_GPIO_PIN2;
-		outb(val, iobar_addr + MOXA_PUART_GPIO_OUT);
-	}
-
-	return num_ports;
-}
-
-static int
-pci_moxa_setup(struct serial_private *priv,
-		const struct pciserial_board *board,
-		struct uart_8250_port *port, int idx)
-{
-	unsigned int bar = FL_GET_BASE(board->flags);
-	int offset;
-
-	if (!IS_ENABLED(CONFIG_HAS_IOPORT))
-		return serial_8250_warn_need_ioport(priv->dev);
-
-	if (board->num_ports == 4 && idx == 3)
-		offset = 7 * board->uart_offset;
-	else
-		offset = idx * board->uart_offset;
 
 	return setup_port(priv, port, bar, offset, 0);
 }
@@ -2996,17 +2846,6 @@ static struct pci_serial_quirk pci_serial_quirks[] = {
 		.setup		= pci_fintek_setup,
 		.init		= pci_fintek_init,
 	},
-	/*
-	 * MOXA
-	 */
-	{
-		.vendor		= PCI_VENDOR_ID_MOXA,
-		.device		= PCI_ANY_ID,
-		.subvendor	= PCI_ANY_ID,
-		.subdevice	= PCI_ANY_ID,
-		.init		= pci_moxa_init,
-		.setup		= pci_moxa_setup,
-	},
 	{
 		.vendor		= 0x1c29,
 		.device		= 0x1204,
@@ -3225,9 +3064,6 @@ enum pci_board_num_t {
 	pbn_titan_2_4000000,
 	pbn_titan_4_4000000,
 	pbn_titan_8_4000000,
-	pbn_moxa_2,
-	pbn_moxa_4,
-	pbn_moxa_8,
 };
 
 /*
@@ -4005,24 +3841,6 @@ static struct pciserial_board pci_boards[] = {
 		.uart_offset	= 0x200,
 		.first_offset	= 0x1000,
 	},
-	[pbn_moxa_2] = {
-		.flags		= FL_BASE1,
-		.num_ports      = 2,
-		.base_baud      = 921600,
-		.uart_offset	= 0x200,
-	},
-	[pbn_moxa_4] = {
-		.flags		= FL_BASE1,
-		.num_ports      = 4,
-		.base_baud      = 921600,
-		.uart_offset	= 0x200,
-	},
-	[pbn_moxa_8] = {
-		.flags		= FL_BASE1,
-		.num_ports      = 8,
-		.base_baud      = 921600,
-		.uart_offset	= 0x200,
-	},
 };
 
 #define REPORT_CONFIG(option) \
@@ -4075,6 +3893,9 @@ static const struct pci_device_id blacklist[] = {
 	/* Pericom devices */
 	{ PCI_VDEVICE(PERICOM, PCI_ANY_ID), .driver_data = REPORT_8250_CONFIG(PERICOM), },
 	{ PCI_VDEVICE(ACCESSIO, PCI_ANY_ID), .driver_data = REPORT_8250_CONFIG(PERICOM), },
+
+	/* Moxa devices */
+	{ PCI_VDEVICE(MOXA, PCI_ANY_ID), .driver_data = REPORT_8250_CONFIG(MOXA), },
 
 	/* End of the black list */
 	{ }
@@ -4208,7 +4029,7 @@ pciserial_init_ports(struct pci_dev *dev, const struct pciserial_board *board)
 			nr_ports = rc;
 	}
 
-	priv = kzalloc_flex(*priv, line, nr_ports);
+	priv = kzalloc_flex(*priv, uport, nr_ports);
 	if (!priv) {
 		priv = ERR_PTR(-ENOMEM);
 		goto err_deinit;
@@ -4251,12 +4072,12 @@ pciserial_init_ports(struct pci_dev *dev, const struct pciserial_board *board)
 		pci_dbg(dev, "Setup PCI port: port %lx, irq %d, type %d\n",
 			uart.port.iobase, uart.port.irq, uart.port.iotype);
 
-		priv->line[i] = serial8250_register_8250_port(&uart);
-		if (priv->line[i] < 0) {
+		priv->uport[i] = serial8250_register_8250_port(&uart);
+		if (IS_ERR(priv->uport[i])) {
 			pci_err(dev,
-				"Couldn't register serial port %lx, irq %d, type %d, error %d\n",
+				"Couldn't register serial port %lx, irq %d, type %d, error %pe\n",
 				uart.port.iobase, uart.port.irq,
-				uart.port.iotype, priv->line[i]);
+				uart.port.iotype, priv->uport[i]);
 			break;
 		}
 	}
@@ -4278,7 +4099,7 @@ static void pciserial_detach_ports(struct serial_private *priv)
 	int i;
 
 	for (i = 0; i < priv->nr; i++)
-		serial8250_unregister_port(priv->line[i]);
+		serial8250_unregister_port(priv->uport[i]);
 
 	/*
 	 * Find the exit quirks.
@@ -4300,8 +4121,7 @@ void pciserial_suspend_ports(struct serial_private *priv)
 	int i;
 
 	for (i = 0; i < priv->nr; i++)
-		if (priv->line[i] >= 0)
-			serial8250_suspend_port(priv->line[i]);
+		serial8250_suspend_port(priv->uport[i]);
 
 	/*
 	 * Ensure that every init quirk is properly torn down
@@ -4322,8 +4142,7 @@ void pciserial_resume_ports(struct serial_private *priv)
 		priv->quirk->init(priv->dev);
 
 	for (i = 0; i < priv->nr; i++)
-		if (priv->line[i] >= 0)
-			serial8250_resume_port(priv->line[i]);
+		serial8250_resume_port(priv->uport[i]);
 }
 EXPORT_SYMBOL_GPL(pciserial_resume_ports);
 
@@ -5948,65 +5767,6 @@ static const struct pci_device_id serial_pci_tbl[] = {
 	}, {
 		PCI_VDEVICE(NI, PCI_DEVICE_ID_NI_PCI8432_2324),
 		.driver_data = pbn_ni8430_4,
-	},
-
-	/*
-	 * MOXA
-	 */
-	{
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP102E),
-		.driver_data = pbn_moxa_2,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP102EL),
-		.driver_data = pbn_moxa_2,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP102N),
-		.driver_data = pbn_moxa_2,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP104EL_A),
-		.driver_data = pbn_moxa_4,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP104N),
-		.driver_data = pbn_moxa_4,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP112N),
-		.driver_data = pbn_moxa_2,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP114EL),
-		.driver_data = pbn_moxa_4,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP114N),
-		.driver_data = pbn_moxa_4,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP116E_A_A),
-		.driver_data = pbn_moxa_8,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP116E_A_B),
-		.driver_data = pbn_moxa_8,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP118EL_A),
-		.driver_data = pbn_moxa_8,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP118E_A_I),
-		.driver_data = pbn_moxa_8,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP132EL),
-		.driver_data = pbn_moxa_2,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP132N),
-		.driver_data = pbn_moxa_2,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP134EL_A),
-		.driver_data = pbn_moxa_4,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP134N),
-		.driver_data = pbn_moxa_4,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP138E_A),
-		.driver_data = pbn_moxa_8,
-	}, {
-		PCI_VDEVICE(MOXA, PCI_DEVICE_ID_MOXA_CP168EL_A),
-		.driver_data = pbn_moxa_8,
 	},
 
 	/*

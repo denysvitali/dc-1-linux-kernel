@@ -105,6 +105,7 @@ struct gaokun_ucsi {
 	struct notifier_block nb;
 	u16 version;
 	u8 num_ports;
+	bool registered;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -412,8 +413,7 @@ static int gaokun_ucsi_ports_init(struct gaokun_ucsi *uec)
 
 	gaokun_ec_ucsi_get_reg(uec->ec, &ureg);
 	num_ports = ureg.num_ports;
-	uec->ports = devm_kcalloc(dev, num_ports, sizeof(*uec->ports),
-				  GFP_KERNEL);
+	uec->ports = devm_kzalloc_objs(dev, *uec->ports, num_ports);
 	if (!uec->ports)
 		return -ENOMEM;
 
@@ -482,8 +482,13 @@ static void gaokun_ucsi_register_worker(struct work_struct *work)
 	}
 
 	ret = ucsi_register(ucsi);
-	if (ret)
+	if (ret) {
 		dev_err_probe(ucsi->dev, ret, "ucsi register failed\n");
+		gaokun_ec_unregister_notify(uec->ec, &uec->nb);
+		return;
+	}
+
+	uec->registered = true;
 }
 
 static int gaokun_ucsi_probe(struct auxiliary_device *adev,
@@ -494,7 +499,7 @@ static int gaokun_ucsi_probe(struct auxiliary_device *adev,
 	struct gaokun_ucsi *uec;
 	int ret;
 
-	uec = devm_kzalloc(dev, sizeof(*uec), GFP_KERNEL);
+	uec = devm_kzalloc_obj(dev, *uec);
 	if (!uec)
 		return -ENOMEM;
 
@@ -528,8 +533,11 @@ static void gaokun_ucsi_remove(struct auxiliary_device *adev)
 	int i;
 
 	disable_delayed_work_sync(&uec->work);
-	gaokun_ec_unregister_notify(uec->ec, &uec->nb);
-	ucsi_unregister(uec->ucsi);
+	if (uec->registered) {
+		gaokun_ec_unregister_notify(uec->ec, &uec->nb);
+		ucsi_unregister(uec->ucsi);
+	}
+
 	for (i = 0; i < uec->num_ports; ++i)
 		typec_mux_put(uec->ports[i].typec_mux);
 

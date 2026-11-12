@@ -396,7 +396,7 @@ static int mctp_frag_queue(struct mctp_sk_key *key, struct sk_buff *skb)
 		 * this will free the skb; callers can no longer access it
 		 * safely.
 		 */
-		key->reasm_head = skb_unshare(skb, GFP_ATOMIC);
+		key->reasm_head = skb_unclone_full(skb, GFP_ATOMIC);
 		if (!key->reasm_head)
 			return -ENOMEM;
 
@@ -552,8 +552,16 @@ static int mctp_dst_input(struct mctp_dst *dst, struct sk_buff *skb)
 			 * can do is drop.
 			 */
 			rc = mctp_key_add(key, msk);
-			if (!rc)
+			if (!rc) {
 				trace_mctp_key_acquire(key);
+			} else {
+				/* key_add failed: the key is not observable by
+				 * any cleanup path, so free the fragment we
+				 * just queued on it to avoid leaking the skb.
+				 */
+				kfree_skb(key->reasm_head);
+				key->reasm_head = NULL;
+			}
 
 			/* we don't need to release key->lock on exit, so
 			 * clean up here and suppress the unlock via
@@ -825,7 +833,7 @@ static struct mctp_sk_key *mctp_lookup_prealloc_tag(struct mctp_sock *msk,
 
 	spin_lock_irqsave(&mns->keys_lock, flags);
 
-	hlist_for_each_entry(tmp, &mns->keys, hlist) {
+	hlist_for_each_entry(tmp, &msk->keys, sklist) {
 		if (tmp->net != netid)
 			continue;
 
@@ -998,14 +1006,29 @@ int mctp_route_lookup(struct net *net, unsigned int dnet,
 			mtu = mtu ?: rt->mtu;
 
 		if (rt->dst_type == MCTP_ROUTE_DIRECT) {
-			mctp_eid_t saddr = mctp_dev_saddr(rt->dev);
+			mctp_eid_t saddr;
+
+			/* rt->dev may be going away concurrently: its last
+			 * reference is dropped in mctp_dev_put(), which frees
+			 * mdev->addrs that mctp_dev_saddr() reads, and
+			 * mctp_dst_from_route() takes a reference on it.  Pin
+			 * it before use, and skip a device that is already
+			 * dead rather than resurrecting it.
+			 */
+			if (!refcount_inc_not_zero(&rt->dev->refs))
+				break;
+
+			saddr = mctp_dev_saddr(rt->dev);
 
 			/* cannot do gateway-ed routes without a src  */
-			if (saddr == MCTP_ADDR_NULL && depth != 0)
+			if (saddr == MCTP_ADDR_NULL && depth != 0) {
+				mctp_dev_put(rt->dev);
 				break;
+			}
 
 			if (dst)
 				mctp_dst_from_route(dst, daddr, saddr, mtu, rt);
+			mctp_dev_put(rt->dev);
 			rc = 0;
 			break;
 

@@ -265,15 +265,15 @@ int btrfs_find_orphan_roots(struct btrfs_fs_info *fs_info)
 			if (IS_ERR(trans)) {
 				ret = PTR_ERR(trans);
 				btrfs_err(fs_info,
-			  "failed to join transaction to delete orphan item: %d",
-					  ret);
+			  "failed to join transaction to delete orphan item: %pe",
+					  ERR_PTR(ret));
 				return ret;
 			}
 			ret = btrfs_del_orphan_item(trans, tree_root, root_objectid);
 			btrfs_end_transaction(trans);
 			if (ret) {
 				btrfs_err(fs_info,
-				  "failed to delete root orphan item: %d", ret);
+				  "failed to delete root orphan item: %pe", ERR_PTR(ret));
 				return ret;
 			}
 			continue;
@@ -510,8 +510,7 @@ int btrfs_subvolume_reserve_metadata(struct btrfs_root *root,
 	num_bytes = btrfs_calc_insert_metadata_size(fs_info, items);
 	rsv->space_info = btrfs_find_space_info(fs_info,
 					    BTRFS_BLOCK_GROUP_METADATA);
-	ret = btrfs_block_rsv_add(fs_info, rsv, num_bytes,
-				  BTRFS_RESERVE_FLUSH_ALL);
+	ret = btrfs_block_rsv_add(rsv, num_bytes, BTRFS_RESERVE_FLUSH_ALL);
 
 	if (ret == -ENOSPC && use_global_rsv)
 		ret = btrfs_block_rsv_migrate(global_rsv, rsv, num_bytes, true);

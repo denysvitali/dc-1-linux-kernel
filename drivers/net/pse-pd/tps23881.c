@@ -1445,7 +1445,7 @@ static int tps23881_i2c_probe(struct i2c_client *client)
 	if (!info)
 		return -EINVAL;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -1520,11 +1520,7 @@ static int tps23881_i2c_probe(struct i2c_client *client)
 				     "failed to register PSE controller\n");
 	}
 
-	ret = tps23881_setup_irq(priv, client->irq);
-	if (ret)
-		return ret;
-
-	return ret;
+	return tps23881_setup_irq(priv, client->irq);
 }
 
 static const struct i2c_device_id tps23881_id[] = {

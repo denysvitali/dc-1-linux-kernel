@@ -631,8 +631,8 @@ static struct scpi_dvfs_info *scpi_dvfs_get_info(u8 domain)
 	if (ret)
 		return ERR_PTR(ret);
 
-	if (!buf.opp_count)
-		return ERR_PTR(-ENOENT);
+	if (!buf.opp_count || buf.opp_count > MAX_DVFS_OPPS)
+		return ERR_PTR(-EINVAL);
 
 	info = kmalloc_obj(*info);
 	if (!info)
@@ -661,12 +661,15 @@ static struct scpi_dvfs_info *scpi_dvfs_get_info(u8 domain)
 static int scpi_dev_domain_id(struct device *dev)
 {
 	struct of_phandle_args clkspec;
+	int domain;
 
 	if (of_parse_phandle_with_args(dev->of_node, "clocks", "#clock-cells",
 				       0, &clkspec))
 		return -EINVAL;
 
-	return clkspec.args[0];
+	domain = clkspec.args[0];
+	of_node_put(clkspec.np);
+	return domain;
 }
 
 static struct scpi_dvfs_info *scpi_dvfs_info(struct device *dev)
@@ -886,7 +889,7 @@ static int scpi_alloc_xfer_list(struct device *dev, struct scpi_chan *ch)
 	int i;
 	struct scpi_xfer *xfers;
 
-	xfers = devm_kcalloc(dev, MAX_SCPI_XFERS, sizeof(*xfers), GFP_KERNEL);
+	xfers = devm_kzalloc_objs(dev, *xfers, MAX_SCPI_XFERS);
 	if (!xfers)
 		return -ENOMEM;
 
@@ -915,7 +918,7 @@ static int scpi_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	struct scpi_drvinfo *scpi_drvinfo;
 
-	scpi_drvinfo = devm_kzalloc(dev, sizeof(*scpi_drvinfo), GFP_KERNEL);
+	scpi_drvinfo = devm_kzalloc_obj(dev, *scpi_drvinfo);
 	if (!scpi_drvinfo)
 		return -ENOMEM;
 
@@ -928,7 +931,7 @@ static int scpi_probe(struct platform_device *pdev)
 	}
 
 	scpi_drvinfo->channels =
-		devm_kcalloc(dev, count, sizeof(struct scpi_chan), GFP_KERNEL);
+		devm_kzalloc_objs(dev, struct scpi_chan, count);
 	if (!scpi_drvinfo->channels)
 		return -ENOMEM;
 

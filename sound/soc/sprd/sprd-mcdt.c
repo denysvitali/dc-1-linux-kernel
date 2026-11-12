@@ -913,7 +913,7 @@ static int sprd_mcdt_probe(struct platform_device *pdev)
 	struct resource *res;
 	int ret, irq;
 
-	mcdt = devm_kzalloc(&pdev->dev, sizeof(*mcdt), GFP_KERNEL);
+	mcdt = devm_kzalloc_obj(&pdev->dev, *mcdt);
 	if (!mcdt)
 		return -ENOMEM;
 
@@ -931,10 +931,8 @@ static int sprd_mcdt_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(&pdev->dev, irq, sprd_mcdt_irq_handler,
 			       0, "sprd-mcdt", mcdt);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to request MCDT IRQ\n");
+	if (ret)
 		return ret;
-	}
 
 	sprd_mcdt_init_chans(mcdt, res);
 

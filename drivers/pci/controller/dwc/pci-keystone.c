@@ -24,6 +24,7 @@
 #include <linux/of_pci.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/resource.h>
 #include <linux/signal.h>
@@ -129,7 +130,6 @@ struct keystone_pcie {
 	int			num_lanes;
 	u32			num_viewport;
 	struct phy		**phy;
-	struct device_link	**link;
 	struct			device_node *msi_intc_np;
 	struct irq_domain	*intx_irq_domain;
 	struct device_node	*np;
@@ -309,7 +309,7 @@ static int ks_pcie_msi_host_init(struct dw_pcie_rp *pp)
 	dw_pcie_writel_dbi(pci, PCI_BASE_ADDRESS_0, ks_pcie->app.start);
 
 	pp->msi_irq_chip = &ks_pcie_msi_irq_chip;
-	return dw_pcie_allocate_domains(pp);
+	return dw_pcie_allocate_msi_domains(pp);
 }
 
 static void ks_pcie_handle_intx_irq(struct keystone_pcie *ks_pcie,
@@ -497,8 +497,8 @@ static bool ks_pcie_link_up(struct dw_pcie *pci)
 {
 	u32 val;
 
-	val = dw_pcie_readl_dbi(pci, PCIE_PORT_DEBUG0);
-	return (val & PORT_LOGIC_LTSSM_STATE_MASK) == PORT_LOGIC_LTSSM_STATE_L0;
+	val = dw_pcie_readl_dbi(pci, PORT_LINK_DEBUG0);
+	return (val & PORT_LINK_DEBUG0_LTSSM_MASK) == DW_PCIE_LTSSM_L0;
 }
 
 static void ks_pcie_stop_link(struct dw_pcie *pci)
@@ -633,7 +633,7 @@ static void ks_pcie_msi_irq_handler(struct irq_desc *desc)
 
 		vector = offset + (pos << 3);
 		dev_dbg(dev, "irq: bit %d, vector %d\n", pos, vector);
-		generic_handle_domain_irq(pp->irq_domain, vector);
+		generic_handle_domain_irq(pp->msi_irq_domain, vector);
 	}
 
 	chained_irq_exit(chip, desc);
@@ -876,7 +876,7 @@ static const struct dw_pcie_ops ks_pcie_dw_pcie_ops = {
 	.write_dbi2 = ks_pcie_am654_write_dbi2,
 };
 
-static void ks_pcie_am654_ep_init(struct dw_pcie_ep *ep)
+static int ks_pcie_am654_ep_init(struct dw_pcie_ep *ep)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	int flags;
@@ -885,6 +885,8 @@ static void ks_pcie_am654_ep_init(struct dw_pcie_ep *ep)
 	flags = PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_32;
 	dw_pcie_writel_dbi2(pci, PCI_BASE_ADDRESS_0, APP_ADDR_SPACE_0 - 1);
 	dw_pcie_writel_dbi(pci, PCI_BASE_ADDRESS_0, flags);
+
+	return 0;
 }
 
 static void ks_pcie_am654_raise_intx_irq(struct keystone_pcie *ks_pcie)
@@ -1129,7 +1131,6 @@ static int ks_pcie_probe(struct platform_device *pdev)
 	enum dw_pcie_device_mode mode;
 	struct dw_pcie *pci;
 	struct keystone_pcie *ks_pcie;
-	struct device_link **link;
 	struct gpio_desc *gpiod;
 	struct resource *res;
 	void __iomem *base;
@@ -1151,11 +1152,11 @@ static int ks_pcie_probe(struct platform_device *pdev)
 	ep_ops = data->ep_ops;
 	mode = data->mode;
 
-	ks_pcie = devm_kzalloc(dev, sizeof(*ks_pcie), GFP_KERNEL);
+	ks_pcie = devm_kzalloc_obj(dev, *ks_pcie);
 	if (!ks_pcie)
 		return -ENOMEM;
 
-	pci = devm_kzalloc(dev, sizeof(*pci), GFP_KERNEL);
+	pci = devm_kzalloc_obj(dev, *pci);
 	if (!pci)
 		return -ENOMEM;
 
@@ -1196,12 +1197,8 @@ static int ks_pcie_probe(struct platform_device *pdev)
 	if (ret)
 		num_lanes = 1;
 
-	phy = devm_kcalloc(dev, num_lanes, sizeof(*phy), GFP_KERNEL);
+	phy = devm_kzalloc_objs(dev, *phy, num_lanes);
 	if (!phy)
-		return -ENOMEM;
-
-	link = devm_kcalloc(dev, num_lanes, sizeof(*link), GFP_KERNEL);
-	if (!link)
 		return -ENOMEM;
 
 	for (i = 0; i < num_lanes; i++) {
@@ -1209,22 +1206,12 @@ static int ks_pcie_probe(struct platform_device *pdev)
 		phy[i] = devm_phy_optional_get(dev, name);
 		if (IS_ERR(phy[i])) {
 			ret = PTR_ERR(phy[i]);
-			goto err_link;
-		}
-
-		if (!phy[i])
-			continue;
-
-		link[i] = device_link_add(dev, &phy[i]->dev, DL_FLAG_STATELESS);
-		if (!link[i]) {
-			ret = -EINVAL;
-			goto err_link;
+			goto err;
 		}
 	}
 
 	ks_pcie->np = np;
 	ks_pcie->pci = pci;
-	ks_pcie->link = link;
 	ks_pcie->num_lanes = num_lanes;
 	ks_pcie->phy = phy;
 
@@ -1234,7 +1221,7 @@ static int ks_pcie_probe(struct platform_device *pdev)
 		ret = PTR_ERR(gpiod);
 		if (ret != -EPROBE_DEFER)
 			dev_err(dev, "Failed to get reset GPIO\n");
-		goto err_link;
+		goto err;
 	}
 
 	/* Obtain references to the PHYs */
@@ -1249,7 +1236,7 @@ static int ks_pcie_probe(struct platform_device *pdev)
 
 	if (ret) {
 		dev_err(dev, "failed to enable phy\n");
-		goto err_link;
+		goto err;
 	}
 
 	platform_set_drvdata(pdev, ks_pcie);
@@ -1336,25 +1323,18 @@ err_get_sync:
 	pm_runtime_disable(dev);
 	ks_pcie_disable_phy(ks_pcie);
 
-err_link:
-	while (--i >= 0 && link[i])
-		device_link_del(link[i]);
-
+err:
 	return ret;
 }
 
 static void ks_pcie_remove(struct platform_device *pdev)
 {
 	struct keystone_pcie *ks_pcie = platform_get_drvdata(pdev);
-	struct device_link **link = ks_pcie->link;
-	int num_lanes = ks_pcie->num_lanes;
 	struct device *dev = &pdev->dev;
 
 	pm_runtime_put(dev);
 	pm_runtime_disable(dev);
 	ks_pcie_disable_phy(ks_pcie);
-	while (num_lanes--)
-		device_link_del(link[num_lanes]);
 }
 
 static struct platform_driver ks_pcie_driver = {
@@ -1389,13 +1369,17 @@ static int ks_pcie_fault(unsigned long addr, unsigned int fsr,
 
 static int __init ks_pcie_init(void)
 {
+	struct device_node *np;
 	/*
 	 * PCIe access errors that result into OCP errors are caught by ARM as
 	 * "External aborts"
 	 */
-	if (of_find_matching_node(NULL, ks_pcie_of_match))
+	np = of_find_matching_node(NULL, ks_pcie_of_match);
+	if (np) {
+		of_node_put(np);
 		hook_fault_code(17, ks_pcie_fault, SIGBUS, 0,
 				"Asynchronous external abort");
+	}
 
 	return platform_driver_register(&ks_pcie_driver);
 }

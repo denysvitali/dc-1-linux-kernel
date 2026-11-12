@@ -570,7 +570,7 @@ static int ionic_qcq_alloc(struct ionic_lif *lif, unsigned int type,
 
 	*qcq = NULL;
 
-	new = devm_kzalloc(dev, sizeof(*new), GFP_KERNEL);
+	new = devm_kzalloc_obj(dev, *new);
 	if (!new) {
 		netdev_err(lif->netdev, "Cannot allocate queue structure\n");
 		err = -ENOMEM;
@@ -792,21 +792,21 @@ static int ionic_qcqs_alloc(struct ionic_lif *lif)
 	}
 
 	err = -ENOMEM;
-	lif->txqcqs = devm_kcalloc(dev, lif->ionic->ntxqs_per_lif,
-				   sizeof(*lif->txqcqs), GFP_KERNEL);
+	lif->txqcqs = devm_kzalloc_objs(dev, *lif->txqcqs,
+					lif->ionic->ntxqs_per_lif);
 	if (!lif->txqcqs)
 		goto err_out;
-	lif->rxqcqs = devm_kcalloc(dev, lif->ionic->nrxqs_per_lif,
-				   sizeof(*lif->rxqcqs), GFP_KERNEL);
+	lif->rxqcqs = devm_kzalloc_objs(dev, *lif->rxqcqs,
+					lif->ionic->nrxqs_per_lif);
 	if (!lif->rxqcqs)
 		goto err_out;
 
-	lif->txqstats = devm_kcalloc(dev, lif->ionic->ntxqs_per_lif + 1,
-				     sizeof(*lif->txqstats), GFP_KERNEL);
+	lif->txqstats = devm_kzalloc_objs(dev, *lif->txqstats,
+					  lif->ionic->ntxqs_per_lif + 1);
 	if (!lif->txqstats)
 		goto err_out;
-	lif->rxqstats = devm_kcalloc(dev, lif->ionic->nrxqs_per_lif + 1,
-				     sizeof(*lif->rxqstats), GFP_KERNEL);
+	lif->rxqstats = devm_kzalloc_objs(dev, *lif->rxqstats,
+					  lif->ionic->nrxqs_per_lif + 1);
 	if (!lif->rxqstats)
 		goto err_out;
 
@@ -920,8 +920,21 @@ static int ionic_lif_rxq_init(struct ionic_lif *lif, struct ionic_qcq *qcq)
 	};
 	int err;
 
-	q->partner = &lif->txqcqs[q->index]->q;
-	q->partner->partner = q;
+	q->partner = NULL;
+
+	/* Only normal RX queues have matching TX queue partners. */
+	if (q->index < lif->nxqs) {
+		if (!lif->txqcqs ||
+		    q->index >= lif->ionic->ntxqs_per_lif ||
+		    !lif->txqcqs[q->index]) {
+			dev_err(dev, "missing TX queue partner for RX queue %u\n",
+				q->index);
+			return -ENXIO;
+		}
+
+		q->partner = &lif->txqcqs[q->index]->q;
+		q->partner->partner = q;
+	}
 
 	if (!lif->xdp_prog ||
 	    (lif->xdp_prog->aux && lif->xdp_prog->aux->xdp_has_frags))
@@ -1500,7 +1513,8 @@ static int ionic_set_nic_features(struct ionic_lif *lif,
 	ctx.cmd.lif_setattr.features = ionic_netdev_features_to_nic(features);
 
 	if (lif->phc)
-		ctx.cmd.lif_setattr.features |= cpu_to_le64(IONIC_ETH_HW_TIMESTAMP);
+		ctx.cmd.lif_setattr.features |= lif->ionic->ident.lif.eth.config.features &
+			cpu_to_le64(IONIC_ETH_HW_TIMESTAMP | IONIC_ETH_HW_RDMA_TIMESTAMP);
 
 	err = ionic_adminq_post_wait(lif, &ctx);
 	if (err)
@@ -1551,6 +1565,8 @@ static int ionic_set_nic_features(struct ionic_lif *lif,
 		dev_dbg(dev, "feature ETH_HW_TSO_UDP_CSUM\n");
 	if (lif->hw_features & IONIC_ETH_HW_TIMESTAMP)
 		dev_dbg(dev, "feature ETH_HW_TIMESTAMP\n");
+	if (lif->hw_features & IONIC_ETH_HW_RDMA_TIMESTAMP)
+		dev_dbg(dev, "feature ETH_HW_RDMA_TIMESTAMP\n");
 
 	return 0;
 }
@@ -2943,8 +2959,8 @@ int ionic_reconfigure_queues(struct ionic_lif *lif,
 
 	/* allocate temporary qcq arrays to hold new queue structs */
 	if (qparam->nxqs != lif->nxqs || qparam->ntxq_descs != lif->ntxq_descs) {
-		tx_qcqs = devm_kcalloc(lif->ionic->dev, lif->ionic->ntxqs_per_lif,
-				       sizeof(struct ionic_qcq *), GFP_KERNEL);
+		tx_qcqs = devm_kzalloc_objs(lif->ionic->dev, struct ionic_qcq *,
+					    lif->ionic->ntxqs_per_lif);
 		if (!tx_qcqs) {
 			err = -ENOMEM;
 			goto err_out;
@@ -2954,8 +2970,8 @@ int ionic_reconfigure_queues(struct ionic_lif *lif,
 	    qparam->nrxq_descs != lif->nrxq_descs ||
 	    qparam->rxq_features != lif->rxq_features ||
 	    qparam->xdp_prog != lif->xdp_prog) {
-		rx_qcqs = devm_kcalloc(lif->ionic->dev, lif->ionic->nrxqs_per_lif,
-				       sizeof(struct ionic_qcq *), GFP_KERNEL);
+		rx_qcqs = devm_kzalloc_objs(lif->ionic->dev, struct ionic_qcq *,
+					    lif->ionic->nrxqs_per_lif);
 		if (!rx_qcqs) {
 			err = -ENOMEM;
 			goto err_out;

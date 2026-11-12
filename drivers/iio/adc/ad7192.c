@@ -1238,8 +1238,7 @@ static int ad7194_parse_channels(struct iio_dev *indio_dev)
 
 	num_channels += AD7194_CH_BASE_NR;
 
-	ad7194_channels = devm_kcalloc(dev, num_channels,
-				       sizeof(*ad7194_channels), GFP_KERNEL);
+	ad7194_channels = devm_kzalloc_objs(dev, *ad7194_channels, num_channels);
 	if (!ad7194_channels)
 		return -ENOMEM;
 
@@ -1406,6 +1405,9 @@ static int ad7192_probe(struct spi_device *spi)
 	st->int_vref_mv = ret == -ENODEV ? avdd_mv : ret / MILLI;
 
 	st->chip_info = spi_get_device_match_data(spi);
+	if (!st->chip_info)
+		return -ENODATA;
+
 	indio_dev->name = st->chip_info->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = st->chip_info->info;
@@ -1448,11 +1450,11 @@ static const struct of_device_id ad7192_of_match[] = {
 MODULE_DEVICE_TABLE(of, ad7192_of_match);
 
 static const struct spi_device_id ad7192_ids[] = {
-	{ "ad7190", (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7190] },
-	{ "ad7192", (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7192] },
-	{ "ad7193", (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7193] },
-	{ "ad7194", (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7194] },
-	{ "ad7195", (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7195] },
+	{ .name = "ad7190", .driver_data = (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7190] },
+	{ .name = "ad7192", .driver_data = (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7192] },
+	{ .name = "ad7193", .driver_data = (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7193] },
+	{ .name = "ad7194", .driver_data = (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7194] },
+	{ .name = "ad7195", .driver_data = (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7195] },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad7192_ids);

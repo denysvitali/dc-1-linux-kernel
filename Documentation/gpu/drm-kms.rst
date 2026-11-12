@@ -287,6 +287,12 @@ structure, ordering of committing state changes to hardware is sequenced using
 Read on in this chapter, and also in :ref:`drm_atomic_helper` for more detailed
 coverage of specific topics.
 
+Atomic State Lifetime
+---------------------
+
+.. kernel-doc:: drivers/gpu/drm/drm_atomic.c
+   :doc: state lifetime
+
 Handling Driver Private State
 -----------------------------
 
@@ -413,6 +419,9 @@ Plane Panic Functions Reference
 -------------------------------
 
 .. kernel-doc:: include/drm/drm_panic.h
+   :internal:
+
+.. kernel-doc:: drivers/gpu/drm/drm_panic_internal.h
    :internal:
 
 .. kernel-doc:: drivers/gpu/drm/drm_panic.c
@@ -603,6 +612,12 @@ Color Management Properties
 
 .. kernel-doc:: drivers/gpu/drm/drm_color_mgmt.c
    :doc: overview
+
+Color Format Property
+---------------------
+
+.. kernel-doc:: drivers/gpu/drm/drm_connector.c
+   :doc: Color format
 
 Tile Group Property
 -------------------

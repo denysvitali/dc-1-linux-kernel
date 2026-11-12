@@ -842,6 +842,7 @@ struct zpci_dev *zpci_create_device(u32 fid, u32 fh, enum zpci_state state)
 	mutex_init(&zdev->state_lock);
 	mutex_init(&zdev->fmb_lock);
 	mutex_init(&zdev->kzdev_lock);
+	mutex_init(&zdev->pending_errs_lock);
 
 	return zdev;
 
@@ -1078,8 +1079,8 @@ static int zpci_mem_init(void)
 	if (!zpci_iomap_start)
 		goto error_iomap;
 
-	zpci_iomap_bitmap = kcalloc(BITS_TO_LONGS(ZPCI_IOMAP_ENTRIES),
-				    sizeof(*zpci_iomap_bitmap), GFP_KERNEL);
+	zpci_iomap_bitmap = kzalloc_objs(*zpci_iomap_bitmap,
+					 BITS_TO_LONGS(ZPCI_IOMAP_ENTRIES));
 	if (!zpci_iomap_bitmap)
 		goto error_iomap_bitmap;
 
@@ -1173,10 +1174,8 @@ int zpci_scan_devices(void)
 		return rc;
 
 	zpci_add_devices(&scan_list);
-	zpci_bus_for_each(zbus) {
+	zpci_bus_for_each(zbus)
 		zpci_bus_scan_bus(zbus);
-		cond_resched();
-	}
 	return 0;
 }
 

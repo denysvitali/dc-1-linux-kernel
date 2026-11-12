@@ -21,6 +21,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/kmod.h>
+#include <linux/bitmap.h>
 #include <linux/list.h>
 #include <linux/hrtimer.h>
 #include <linux/slab.h>
@@ -610,8 +611,11 @@ void __qdisc_calculate_pkt_len(struct sk_buff *skb,
 
 	pkt_len <<= stab->szopts.size_log;
 out:
-	if (unlikely(pkt_len < 1))
-		pkt_len = 1;
+	/* A size table can inflate qdisc_pkt_len() beyond any real packet
+	 * (via overhead, the data table, or size_log); cap it so deficit
+	 * schedulers such as DRR/ETS terminate their refill loops.
+	 */
+	pkt_len = clamp_t(int, pkt_len, 1, QDISC_PKT_LEN_MAX);
 	qdisc_skb_cb(skb)->pkt_len = pkt_len;
 }
 
@@ -767,22 +771,75 @@ void qdisc_class_hash_remove(struct Qdisc_class_hash *clhash,
 }
 EXPORT_SYMBOL(qdisc_class_hash_remove);
 
-/* Allocate an unique handle from space managed by kernel
- * Possible range is [8000-FFFF]:0000 (0x8000 values)
- */
-static u32 qdisc_alloc_handle(struct net_device *dev)
-{
-	int i = 0x8000;
-	static u32 autohandle = TC_H_MAKE(0x80000000U, 0);
+#define QDISC_AUTO_HANDLE_BASE	0x8000	/* first auto-handle major */
+#define QDISC_AUTO_HANDLE_END	0xFFFE	/* last auto-handle major */
+#define QDISC_AUTO_HANDLE_COUNT	(QDISC_AUTO_HANDLE_END - \
+				 QDISC_AUTO_HANDLE_BASE + 1)
 
-	do {
-		autohandle += TC_H_MAKE(0x10000U, 0);
-		if (autohandle == TC_H_MAKE(TC_H_ROOT, 0))
-			autohandle = TC_H_MAKE(0x80000000U, 0);
-		if (!qdisc_lookup(dev, autohandle))
-			return autohandle;
-		cond_resched();
-	} while	(--i > 0);
+/* Allocate a unique handle from space managed by kernel
+ * Possible range is [8000-FFFE]:0000 (0x7FFF values); 0xFFFF is the
+ * TC_H_ROOT/ingress major.
+ */
+static int qdisc_alloc_handle(struct net_device *dev, u32 *handlep)
+{
+	static u32 autohandle = TC_H_MAKE(0x80000000U, 0);
+	unsigned long start, bit;
+	unsigned long *bitmap;
+	struct Qdisc *q;
+	u32 handle, maj;
+	int b;
+
+	start = ((autohandle >> 16) - QDISC_AUTO_HANDLE_BASE + 1) %
+		QDISC_AUTO_HANDLE_COUNT;
+
+	/* The cursor moves past every handle it hands out, so the next
+	 * handle is normally free: try it with one hashed lookup before
+	 * walking the whole hash.
+	 */
+	handle = (start + QDISC_AUTO_HANDLE_BASE) << 16;
+	if (!qdisc_lookup(dev, handle)) {
+		autohandle = handle;
+		*handlep = handle;
+		return 0;
+	}
+
+	bitmap = bitmap_zalloc(QDISC_AUTO_HANDLE_COUNT, GFP_KERNEL);
+	if (!bitmap)
+		return -ENOMEM;
+
+	/* Mark the occupied auto-handle majors: the hash holds all
+	 * qdiscs except root and ingress ones, and the root can carry
+	 * an auto-range handle.
+	 */
+	q = rtnl_dereference(dev->qdisc);
+	maj = TC_H_MAJ(q->handle) >> 16;
+	if (!(q->flags & TCQ_F_BUILTIN) && !TC_H_MIN(q->handle) &&
+	    maj >= QDISC_AUTO_HANDLE_BASE && maj <= QDISC_AUTO_HANDLE_END)
+		set_bit(maj - QDISC_AUTO_HANDLE_BASE, bitmap);
+
+	hash_for_each(dev->qdisc_hash, b, q, hash) {
+		maj = TC_H_MAJ(q->handle) >> 16;
+		if (maj >= QDISC_AUTO_HANDLE_BASE &&
+		    maj <= QDISC_AUTO_HANDLE_END && !TC_H_MIN(q->handle))
+			set_bit(maj - QDISC_AUTO_HANDLE_BASE, bitmap);
+	}
+
+	bit = find_next_zero_bit(bitmap, QDISC_AUTO_HANDLE_COUNT, start);
+	if (bit >= QDISC_AUTO_HANDLE_COUNT) {
+		bit = find_first_zero_bit(bitmap, start);
+		if (bit >= start)
+			bit = QDISC_AUTO_HANDLE_COUNT;
+	}
+
+	if (bit >= QDISC_AUTO_HANDLE_COUNT) {
+		bitmap_free(bitmap);
+		return -ENOSPC;
+	}
+
+	handle = (bit + QDISC_AUTO_HANDLE_BASE) << 16;
+	autohandle = handle;
+	bitmap_free(bitmap);
+	*handlep = handle;
 
 	return 0;
 }
@@ -1114,6 +1171,9 @@ static int qdisc_graft(struct net_device *dev, struct Qdisc *parent,
 		unsigned int i, num_q, ingress;
 		struct netdev_queue *dev_queue;
 
+		if (new)
+			new->depth = 0;
+
 		ingress = 0;
 		num_q = dev->num_tx_queues;
 		if ((q && q->flags & TCQ_F_INGRESS) ||
@@ -1211,9 +1271,15 @@ skip:
 			NL_SET_ERR_MSG(extack, "STAB not supported on a non root");
 			return -EINVAL;
 		}
+		if (new && parent->depth >= 7) {
+			NL_SET_ERR_MSG(extack, "Qdisc hierarchy is too deep");
+			return -E2BIG;
+		}
 		err = cops->graft(parent, cl, new, &old, extack);
 		if (err)
 			return err;
+		if (new)
+			new->depth = parent->depth + 1;
 		notify_and_destroy(net, skb, n, classid, old, new, extack);
 	}
 	return 0;
@@ -1296,10 +1362,10 @@ static struct Qdisc *qdisc_create(struct net_device *dev,
 		handle = TC_H_MAKE(TC_H_INGRESS, 0);
 	} else {
 		if (handle == 0) {
-			handle = qdisc_alloc_handle(dev);
-			if (handle == 0) {
-				NL_SET_ERR_MSG(extack, "Maximum number of qdisc handles was exceeded");
-				err = -ENOSPC;
+			err = qdisc_alloc_handle(dev, &handle);
+			if (err) {
+				NL_SET_ERR_MSG(extack,
+					       "Failed to allocate a qdisc handle");
 				goto err_out3;
 			}
 		}
@@ -1373,7 +1439,7 @@ err_out4:
 err_out3:
 	qdisc_lock_uninit(sch, ops);
 	netdev_put(dev, &sch->dev_tracker);
-	qdisc_free(sch);
+	qdisc_free_rcu(sch);
 err_out2:
 	bpf_module_put(ops, ops->owner);
 err_out:

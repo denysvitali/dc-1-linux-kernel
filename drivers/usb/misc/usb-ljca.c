@@ -595,6 +595,9 @@ static int ljca_enumerate_gpio(struct ljca_adapter *adap)
 	if (gpio_num > LJCA_MAX_GPIO_NUM)
 		return -EINVAL;
 
+	if (desc->bank_num > ARRAY_SIZE(valid_pin))
+		return -EINVAL;
+
 	/* construct platform data */
 	gpio_info = kzalloc_obj(*gpio_info);
 	if (!gpio_info)
@@ -760,7 +763,7 @@ static int ljca_probe(struct usb_interface *interface,
 	struct ljca_adapter *adap;
 	int ret;
 
-	adap = devm_kzalloc(dev, sizeof(*adap), GFP_KERNEL);
+	adap = devm_kzalloc_obj(dev, *adap);
 	if (!adap)
 		return -ENOMEM;
 

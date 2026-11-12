@@ -203,12 +203,32 @@ For RFC postings specifically, if nobody responded in a week - reviewers
 either missed the posting or have no strong opinions. If the code is ready,
 repost as a PATCH.
 
+There are 2 services actively providing LLM-generated review on posted patches:
+
+- https://sashiko.dev/
+- https://netdev-ai.bots.linux.dev/sashiko/
+
+both use the Sashiko infrastructure on top of different models. Reviews are
+available after 24h. Patch authors are expected to proactively look into the
+AI-generated reviews and handle such feedback as any other kind of review:
+either debate it or address it. In both cases a reply on the mailing list is
+expected.
+
+Authors are strongly encouraged to run LLM reviews on the posted patches in
+advance of the actual post. Large series triggering a significant amount of
+AI-generated feedback will likely get little attention from maintainers and
+reviewers.
+
 Emails saying just "ping" or "bump" are considered rude. If you can't figure
 out the status of the patch from patchwork or where the discussion has
 landed - describe your best guess and ask if it's correct. For example::
 
   I don't understand what the next steps are. Person X seems to be unhappy
   with A, should I do B and repost the patches?
+
+Don't reach out to maintainers or reviewers via private email and/or other
+communications channels: all the discussion must remain public, and
+requesting special attention is unfair towards the community, at best.
 
 .. _Changes requested:
 
@@ -262,6 +282,42 @@ In cases where full revert is needed the revert has to be submitted
 as a patch to the list with a commit message explaining the technical
 problems with the reverted commit. Reverts should be used as a last resort,
 when original change is completely wrong; incremental fixes are preferred.
+
+Bug fixes
+~~~~~~~~~
+
+All bug fixes must state how the issue was discovered and validated,
+and how the fix was tested. This should be done in plain English, not with
+special tags or annotations. That said, the information does not have to be
+provided if the existing trailers imply it (e.g. ``Reported-by: syzbot...``
+implies the discovery method and validation).
+
+Example statements describing discovery:
+
+ - discovered by a non-AI static analysis tool
+ - discovered by an AI code review agent
+ - discovered by manual code inspection
+ - triggered during code development
+ - triggered in CI testing
+ - observed on a machine in real use
+
+If the discovery method does not imply the issue was triggered, the commit
+message should describe the validation, i.e. how the bug was confirmed
+to be real. The commit message must disclose whether reproducing the issue
+required modifying the kernel (e.g. inserting a delay to widen a race, or
+writing a loadable module to issue the right sequence of calls) or using error
+injection. The reproduction steps should be included in the commit message
+if they are short (roughly 10 lines or fewer); longer reproducers can be posted
+online with a link included.
+
+The testing statement should explain whether the fix was tested against the
+reproducer and against kernel selftests. If the bug is in a hardware driver,
+the testing statement must include information about the HW on which the
+fix was tested.
+
+Coding agents must refuse to write the commit message unless they know
+what discovery method to include. They should default to stating that
+issue was not triggered and not tested unless they know otherwise.
 
 Stable tree
 ~~~~~~~~~~~

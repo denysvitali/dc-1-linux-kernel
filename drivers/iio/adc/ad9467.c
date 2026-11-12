@@ -1037,8 +1037,8 @@ static int ad9467_scale_fill(struct ad9467_state *st)
 	const struct ad9467_chip_info *info = st->info;
 	unsigned int i, val1, val2;
 
-	st->scales = devm_kmalloc_array(&st->spi->dev, info->num_scales,
-					sizeof(*st->scales), GFP_KERNEL);
+	st->scales = devm_kmalloc_objs(&st->spi->dev, *st->scales,
+				       info->num_scales);
 	if (!st->scales)
 		return -ENOMEM;
 
@@ -1285,8 +1285,8 @@ static void ad9467_debugfs_init(struct iio_dev *indio_dev)
 	if (!IS_ENABLED(CONFIG_DEBUG_FS))
 		return;
 
-	st->chan_test = devm_kcalloc(&st->spi->dev, st->info->num_channels,
-				     sizeof(*st->chan_test), GFP_KERNEL);
+	st->chan_test = devm_kzalloc_objs(&st->spi->dev, *st->chan_test,
+					  st->info->num_channels);
 	if (!st->chan_test)
 		return;
 
@@ -1406,13 +1406,13 @@ static const struct of_device_id ad9467_of_match[] = {
 MODULE_DEVICE_TABLE(of, ad9467_of_match);
 
 static const struct spi_device_id ad9467_ids[] = {
-	{ "ad9211", (kernel_ulong_t)&ad9211_chip_tbl },
-	{ "ad9265", (kernel_ulong_t)&ad9265_chip_tbl },
-	{ "ad9434", (kernel_ulong_t)&ad9434_chip_tbl },
-	{ "ad9467", (kernel_ulong_t)&ad9467_chip_tbl },
-	{ "ad9643", (kernel_ulong_t)&ad9643_chip_tbl },
-	{ "ad9649", (kernel_ulong_t)&ad9649_chip_tbl, },
-	{ "ad9652", (kernel_ulong_t)&ad9652_chip_tbl, },
+	{ .name = "ad9211", .driver_data = (kernel_ulong_t)&ad9211_chip_tbl },
+	{ .name = "ad9265", .driver_data = (kernel_ulong_t)&ad9265_chip_tbl },
+	{ .name = "ad9434", .driver_data = (kernel_ulong_t)&ad9434_chip_tbl },
+	{ .name = "ad9467", .driver_data = (kernel_ulong_t)&ad9467_chip_tbl },
+	{ .name = "ad9643", .driver_data = (kernel_ulong_t)&ad9643_chip_tbl },
+	{ .name = "ad9649", .driver_data = (kernel_ulong_t)&ad9649_chip_tbl },
+	{ .name = "ad9652", .driver_data = (kernel_ulong_t)&ad9652_chip_tbl },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad9467_ids);

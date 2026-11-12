@@ -164,11 +164,11 @@ int simple_util_parse_tdm_width_map(struct simple_util_priv *priv, struct device
 	}
 
 	ret = -ENOMEM;
-	dai->tdm_width_map = devm_kcalloc(dev, n, sizeof(*dai->tdm_width_map), GFP_KERNEL);
+	dai->tdm_width_map = devm_kzalloc_objs(dev, *dai->tdm_width_map, n);
 	if (!dai->tdm_width_map)
 		return simple_ret(priv, ret); /* see NOTE */
 
-	u32 *array_values __free(kfree) = kcalloc(n, sizeof(*array_values), GFP_KERNEL);
+	u32 *array_values __free(kfree) = kzalloc_objs(*array_values, n);
 	if (!array_values)
 		goto end;
 
@@ -215,6 +215,27 @@ int simple_util_set_dailink_name(struct simple_util_priv *priv,
 	return simple_ret(priv, ret);
 }
 EXPORT_SYMBOL_GPL(simple_util_set_dailink_name);
+
+int simple_util_parse_property(struct simple_util_priv *priv,
+			       int (*func)(struct snd_soc_card *card, const char *propname),
+			       char *prefix, char *property)
+{
+	struct snd_soc_card *card = simple_priv_to_card(priv);
+	struct device_node *node = card->dev->of_node;
+	char prop[128];
+
+	if (!prefix)
+		prefix = "";
+
+	snprintf(prop, sizeof(prop), "%s%s", prefix, property);
+
+	/* no property is not error */
+	if (!of_property_present(node, prop))
+		return 0;
+
+	return func(card, prop);
+}
+EXPORT_SYMBOL_GPL(simple_util_parse_property);
 
 int simple_util_parse_card_name(struct simple_util_priv *priv,
 				char *prefix)
@@ -653,7 +674,7 @@ static int simple_init_for_codec2codec(struct simple_util_priv *priv,
 	}
 
 	ret = -ENOMEM;
-	c2c_params = devm_kzalloc(rtd->dev, sizeof(*c2c_params), GFP_KERNEL);
+	c2c_params = devm_kzalloc_obj(rtd->dev, *c2c_params);
 	if (!c2c_params)
 		goto end;
 
@@ -731,11 +752,12 @@ void simple_util_canonicalize_cpu(struct snd_soc_dai_link_component *cpus,
 }
 EXPORT_SYMBOL_GPL(simple_util_canonicalize_cpu);
 
-void simple_util_clean_reference(struct snd_soc_card *card)
+void simple_util_clean_reference(struct simple_util_priv *priv)
 {
 	struct snd_soc_dai_link *dai_link;
 	struct snd_soc_dai_link_component *cpu;
 	struct snd_soc_dai_link_component *codec;
+	struct snd_soc_card *card = simple_priv_to_card(priv);
 	int i, j;
 
 	for_each_card_prelinks(card, i, dai_link) {
@@ -746,57 +768,6 @@ void simple_util_clean_reference(struct snd_soc_card *card)
 	}
 }
 EXPORT_SYMBOL_GPL(simple_util_clean_reference);
-
-int simple_util_parse_routing(struct snd_soc_card *card,
-			      char *prefix)
-{
-	struct device_node *node = card->dev->of_node;
-	char prop[128];
-
-	if (!prefix)
-		prefix = "";
-
-	snprintf(prop, sizeof(prop), "%s%s", prefix, "routing");
-
-	if (!of_property_present(node, prop))
-		return 0;
-
-	return snd_soc_of_parse_audio_routing(card, prop);
-}
-EXPORT_SYMBOL_GPL(simple_util_parse_routing);
-
-int simple_util_parse_widgets(struct snd_soc_card *card,
-			      char *prefix)
-{
-	struct device_node *node = card->dev->of_node;
-	char prop[128];
-
-	if (!prefix)
-		prefix = "";
-
-	snprintf(prop, sizeof(prop), "%s%s", prefix, "widgets");
-
-	if (of_property_present(node, prop))
-		return snd_soc_of_parse_audio_simple_widgets(card, prop);
-
-	/* no widgets is not error */
-	return 0;
-}
-EXPORT_SYMBOL_GPL(simple_util_parse_widgets);
-
-int simple_util_parse_pin_switches(struct snd_soc_card *card,
-				   char *prefix)
-{
-	char prop[128];
-
-	if (!prefix)
-		prefix = "";
-
-	snprintf(prop, sizeof(prop), "%s%s", prefix, "pin-switches");
-
-	return snd_soc_of_parse_pin_switches(card, prop);
-}
-EXPORT_SYMBOL_GPL(simple_util_parse_pin_switches);
 
 int simple_util_init_jack(struct snd_soc_card *card,
 			  struct simple_util_jack *sjack,
@@ -854,9 +825,19 @@ int simple_util_init_jack(struct snd_soc_card *card,
 }
 EXPORT_SYMBOL_GPL(simple_util_init_jack);
 
-int simple_util_init_aux_jacks(struct simple_util_priv *priv, char *prefix)
+void simple_util_remove_jack(struct simple_util_jack *sjack)
 {
-	struct snd_soc_card *card = simple_priv_to_card(priv);
+	if (!sjack->gpio.desc)
+		return;
+
+	snd_soc_jack_free_gpios(&sjack->jack, 1, &sjack->gpio);
+	sjack->gpio.desc = NULL;
+}
+EXPORT_SYMBOL_GPL(simple_util_remove_jack);
+
+int simple_util_init_aux_jacks(struct snd_soc_card *card, char *prefix)
+{
+	struct simple_util_priv *priv = snd_soc_card_get_drvdata(card);
 	struct snd_soc_component *component;
 	int found_jack_index = 0;
 	int type = 0;
@@ -874,8 +855,7 @@ int simple_util_init_aux_jacks(struct simple_util_priv *priv, char *prefix)
 	if (num < 1)
 		return 0;
 
-	priv->aux_jacks = devm_kcalloc(card->dev, num,
-				       sizeof(struct snd_soc_jack), GFP_KERNEL);
+	priv->aux_jacks = devm_kzalloc_objs(card->dev, struct snd_soc_jack, num);
 	if (!priv->aux_jacks)
 		return simple_ret(priv, -ENOMEM);
 
@@ -919,8 +899,8 @@ int simple_util_init_priv(struct simple_util_priv *priv,
 	struct snd_soc_codec_conf *cconf = NULL;
 	int i, dai_num = 0, dlc_num = 0, cnf_num = 0;
 
-	dai_props = devm_kcalloc(dev, li->link, sizeof(*dai_props), GFP_KERNEL);
-	dai_link  = devm_kcalloc(dev, li->link, sizeof(*dai_link),  GFP_KERNEL);
+	dai_props = devm_kzalloc_objs(dev, *dai_props, li->link);
+	dai_link  = devm_kzalloc_objs(dev, *dai_link, li->link);
 	if (!dai_props || !dai_link)
 		return -ENOMEM;
 
@@ -938,13 +918,13 @@ int simple_util_init_priv(struct simple_util_priv *priv,
 			cnf_num += li->num[i].codecs;
 	}
 
-	dais = devm_kcalloc(dev, dai_num, sizeof(*dais), GFP_KERNEL);
-	dlcs = devm_kcalloc(dev, dlc_num, sizeof(*dlcs), GFP_KERNEL);
+	dais = devm_kzalloc_objs(dev, *dais, dai_num);
+	dlcs = devm_kzalloc_objs(dev, *dlcs, dlc_num);
 	if (!dais || !dlcs)
 		return -ENOMEM;
 
 	if (cnf_num) {
-		cconf = devm_kcalloc(dev, cnf_num, sizeof(*cconf), GFP_KERNEL);
+		cconf = devm_kzalloc_objs(dev, *cconf, cnf_num);
 		if (!cconf)
 			return -ENOMEM;
 	}
@@ -1026,8 +1006,9 @@ EXPORT_SYMBOL_GPL(simple_util_init_priv);
 void simple_util_remove(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = platform_get_drvdata(pdev);
+	struct simple_util_priv *priv = snd_soc_card_get_drvdata(card);
 
-	simple_util_clean_reference(card);
+	simple_util_clean_reference(priv);
 }
 EXPORT_SYMBOL_GPL(simple_util_remove);
 
@@ -1045,6 +1026,17 @@ end:
 	return simple_ret(priv, ret);
 }
 EXPORT_SYMBOL_GPL(graph_util_card_probe);
+
+int graph_util_card_remove(struct snd_soc_card *card)
+{
+	struct simple_util_priv *priv = snd_soc_card_get_drvdata(card);
+
+	simple_util_remove_jack(&priv->hp_jack);
+	simple_util_remove_jack(&priv->mic_jack);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(graph_util_card_remove);
 
 int graph_util_is_ports0(struct device_node *np)
 {
@@ -1144,7 +1136,7 @@ int graph_util_parse_dai(struct simple_util_priv *priv, struct device_node *ep,
 	args.np = ep;
 	dai = snd_soc_get_dai_via_args(&args);
 	if (dai) {
-		const char *dai_name = snd_soc_dai_name_get(dai);
+		const char *dai_name = snd_soc_dai_name(dai);
 		const struct of_phandle_args *dai_args = snd_soc_copy_dai_args(dev, &args);
 
 		ret = -ENOMEM;

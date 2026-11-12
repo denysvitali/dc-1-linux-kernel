@@ -44,5 +44,5 @@ extern const struct mtk_mipitx_data mt2701_mipitx_data;
 extern const struct mtk_mipitx_data mt8173_mipitx_data;
 extern const struct mtk_mipitx_data mt6789_mipitx_data;
 extern const struct mtk_mipitx_data mt8183_mipitx_data;
-
+extern const struct mtk_mipitx_data mt8196_mipitx_data;
 #endif

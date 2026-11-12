@@ -27,6 +27,7 @@
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/module.h>
+#include <linux/workqueue.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/regulator.h>
@@ -461,6 +462,7 @@ int regulator_check_voltage(struct regulator_dev *rdev,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(regulator_check_voltage);
 
 /* return 0 if the state is valid */
 static int regulator_check_states(suspend_state_t state)
@@ -501,6 +503,7 @@ int regulator_check_consumers(struct regulator_dev *rdev,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(regulator_check_consumers);
 
 /* current constraint check */
 static int regulator_check_current_limit(struct regulator_dev *rdev,
@@ -2238,6 +2241,7 @@ static int regulator_resolve_supply(struct regulator_dev *rdev)
 	if (r == rdev) {
 		dev_err(dev, "Supply for %s (%s) resolved to itself\n",
 			rdev->desc->name, rdev->supply_name);
+		put_device(&rdev->dev);
 		if (!have_full_constraints()) {
 			ret = -EINVAL;
 			goto out;
@@ -3028,7 +3032,7 @@ static int _regulator_do_enable(struct regulator_dev *rdev)
 	 */
 	trace_regulator_enable_delay(rdev_get_name(rdev));
 
-	/* If poll_enabled_time is set, poll upto the delay calculated
+	/* If poll_enabled_time is set, poll up to the delay calculated
 	 * above, delaying poll_enabled_time uS to check if the regulator
 	 * actually got enabled.
 	 * If the regulator isn't enabled after our delay helper has expired,
@@ -4467,6 +4471,7 @@ int regulator_do_balance_voltage(struct regulator_dev *rdev,
 out:
 	return ret;
 }
+EXPORT_SYMBOL_GPL(regulator_do_balance_voltage);
 
 static int regulator_balance_voltage(struct regulator_dev *rdev,
 				     suspend_state_t state)
@@ -5796,6 +5801,7 @@ int regulator_coupler_register(struct regulator_coupler *coupler)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(regulator_coupler_register);
 
 static struct regulator_coupler *
 regulator_find_coupler(struct regulator_dev *rdev)
@@ -5860,6 +5866,7 @@ static void regulator_resolve_coupling(struct regulator_dev *rdev)
 		if (c_rdev->coupling_desc.coupler != coupler) {
 			rdev_err(rdev, "coupler mismatch with %s\n",
 				 rdev_get_name(c_rdev));
+			put_device(&c_rdev->dev);
 			return;
 		}
 
@@ -5906,6 +5913,8 @@ static void regulator_remove_coupling(struct regulator_dev *rdev)
 
 		c_desc->coupled_rdevs[i] = NULL;
 		c_desc->n_resolved--;
+
+		put_device(&c_rdev->dev);
 	}
 
 	if (coupler && coupler->detach_regulator) {
@@ -6899,8 +6908,9 @@ static int __init regulator_init_complete(void)
 	 * we'd only do this on systems that need it, and a kernel
 	 * command line option might be useful.
 	 */
-	schedule_delayed_work(&regulator_init_complete_work,
-			      msecs_to_jiffies(30000));
+	queue_delayed_work(system_freezable_wq,
+			   &regulator_init_complete_work,
+			   msecs_to_jiffies(30000));
 
 	return 0;
 }

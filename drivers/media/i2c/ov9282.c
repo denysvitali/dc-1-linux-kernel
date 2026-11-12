@@ -197,7 +197,6 @@ struct ov9282_mode {
  * @noncontinuous_clock: Selection of CSI2 noncontinuous clock mode
  * @cur_mode: Pointer to current selected sensor mode
  * @code: Mbus code currently selected
- * @mutex: Mutex for serializing sensor controls
  */
 struct ov9282 {
 	struct device *dev;
@@ -648,7 +647,8 @@ static int ov9282_set_ctrl(struct v4l2_ctrl *ctrl)
 				      ctrl->val ? OV9282_OUTPUT_ENABLE6_STROBE : 0, NULL);
 		break;
 	case V4L2_CID_FLASH_DURATION:
-		ret = cci_write(ov9282->regmap, OV9282_REG_STROBE_FRAME_SPAN, ctrl->val, NULL);
+		ret = cci_write(ov9282->regmap, OV9282_REG_STROBE_FRAME_SPAN,
+				ov9282_us_to_flash_duration(ov9282, ctrl->val), NULL);
 		break;
 	default:
 		dev_err(ov9282->dev, "Invalid control %d", ctrl->id);
@@ -780,6 +780,7 @@ static int ov9282_get_pad_format(struct v4l2_subdev *sd,
 }
 
 static int ov9282_set_pad_format(struct v4l2_subdev *sd,
+				 const struct v4l2_subdev_client_info *ci,
 				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
@@ -826,7 +827,7 @@ static int ov9282_init_state(struct v4l2_subdev *sd,
 	ov9282_fill_pad_format(ov9282, &supported_modes[DEFAULT_MODE],
 			       ov9282->code, &fmt);
 
-	return ov9282_set_pad_format(sd, sd_state, &fmt);
+	return ov9282_set_pad_format(sd, NULL, sd_state, &fmt);
 }
 
 static const struct v4l2_rect *
@@ -845,6 +846,7 @@ __ov9282_get_pad_crop(struct ov9282 *ov9282,
 }
 
 static int ov9282_get_selection(struct v4l2_subdev *sd,
+				const struct v4l2_subdev_client_info *ci,
 				struct v4l2_subdev_state *sd_state,
 				struct v4l2_subdev_selection *sel)
 {
@@ -1283,7 +1285,7 @@ static int ov9282_probe(struct i2c_client *client)
 	struct ov9282 *ov9282;
 	int ret;
 
-	ov9282 = devm_kzalloc(&client->dev, sizeof(*ov9282), GFP_KERNEL);
+	ov9282 = devm_kzalloc_obj(&client->dev, *ov9282);
 	if (!ov9282)
 		return -ENOMEM;
 

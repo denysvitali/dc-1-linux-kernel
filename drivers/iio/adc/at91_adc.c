@@ -633,9 +633,8 @@ static int at91_adc_trigger_init(struct iio_dev *idev)
 	struct at91_adc_state *st = iio_priv(idev);
 	int i, ret;
 
-	st->trig = devm_kcalloc(&idev->dev,
-				st->caps->trigger_number, sizeof(*st->trig),
-				GFP_KERNEL);
+	st->trig = devm_kzalloc_objs(&idev->dev, *st->trig,
+				     st->caps->trigger_number);
 
 	if (st->trig == NULL) {
 		ret = -ENOMEM;
@@ -988,7 +987,7 @@ static int at91_adc_probe(struct platform_device *pdev)
 	struct iio_dev *idev;
 	struct at91_adc_state *st;
 	u32 reg, prop;
-	char *s;
+	const char *s;
 
 	idev = devm_iio_device_alloc(&pdev->dev, sizeof(struct at91_adc_state));
 	if (!idev)
@@ -1023,7 +1022,7 @@ static int at91_adc_probe(struct platform_device *pdev)
 
 	st->res = st->caps->high_res_bits;
 	if (st->caps->low_res_bits &&
-	    !of_property_read_string(node, "atmel,adc-use-res", (const char **)&s)
+	    !of_property_read_string(node, "atmel,adc-use-res", &s)
 	    && !strcmp(s, "lowres"))
 		st->res = st->caps->low_res_bits;
 

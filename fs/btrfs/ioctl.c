@@ -278,7 +278,7 @@ int btrfs_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 	return 0;
 }
 
-int btrfs_fileattr_set(struct mnt_idmap *idmap,
+int btrfs_fileattr_set(const struct mnt_idmap *idmap,
 		       struct dentry *dentry, struct file_kattr *fa)
 {
 	struct btrfs_inode *inode = BTRFS_I(d_inode(dentry));
@@ -356,16 +356,36 @@ int btrfs_fileattr_set(struct mnt_idmap *idmap,
 			inode_flags |= BTRFS_INODE_NODATACOW;
 		}
 	} else {
-		/*
-		 * Revert back under same assumptions as above
-		 */
-		if (S_ISREG(inode->vfs_inode.i_mode)) {
-			if (inode->vfs_inode.i_size == 0)
-				inode_flags &= ~(BTRFS_INODE_NODATACOW |
-						 BTRFS_INODE_NODATASUM);
-		} else {
+		/* We can only change NODATACOW for zero-sized regular file. */
+		if (S_ISREG(inode->vfs_inode.i_mode) && (inode->vfs_inode.i_size == 0)) {
+			inode_flags &= ~BTRFS_INODE_NODATACOW;
+			/*
+			 * There is currently no way to change NODATASUM flag
+			 * through fileattr API.  If we unconditionally keep the
+			 * current NODATASUM flag, chattr +C then chattr -C will
+			 * keep the NODATASUM flag, and no way to remove that
+			 * flag.
+			 *
+			 * So respect the current mount option for NODATASUM flag.
+			 */
+			if (!btrfs_test_opt(fs_info, NODATASUM))
+				inode_flags &= ~BTRFS_INODE_NODATASUM;
+		} else if (!S_ISREG(inode->vfs_inode.i_mode)) {
 			inode_flags &= ~BTRFS_INODE_NODATACOW;
 		}
+	}
+
+	/*
+	 * Callers write back the whole flag set, so only touch the compression
+	 * flags and the compression property if FS_COMPR_FL or FS_NOCOMP_FL
+	 * changes.
+	 */
+	if (!((fsflags ^ old_fsflags) & (FS_COMPR_FL | FS_NOCOMP_FL))) {
+		/* 1 item for the inode */
+		trans = btrfs_start_transaction(root, 1);
+		if (IS_ERR(trans))
+			return PTR_ERR(trans);
+		goto update_flags;
 	}
 
 	/*
@@ -377,6 +397,7 @@ int btrfs_fileattr_set(struct mnt_idmap *idmap,
 		inode_flags &= ~BTRFS_INODE_COMPRESS;
 		inode_flags |= BTRFS_INODE_NOCOMPRESS;
 	} else if (fsflags & FS_COMPR_FL) {
+		enum btrfs_compression_type comp_type;
 
 		if (IS_SWAPFILE(&inode->vfs_inode))
 			return -ETXTBSY;
@@ -384,18 +405,32 @@ int btrfs_fileattr_set(struct mnt_idmap *idmap,
 		inode_flags |= BTRFS_INODE_COMPRESS;
 		inode_flags &= ~BTRFS_INODE_NOCOMPRESS;
 
-		comp = btrfs_compress_type2str(fs_info->compress_type);
-		if (!comp || comp[0] == 0)
-			comp = btrfs_compress_type2str(BTRFS_COMPRESS_ZLIB);
+		/*
+		 * Keep the algorithm recorded in the compression property,
+		 * otherwise changing an unrelated attribute would reset it to
+		 * the mount default, since FS_IOC_SETFLAGS callers write back
+		 * the whole flag set they got from FS_IOC_GETFLAGS and that
+		 * includes FS_COMPR_FL for any inode carrying the property.
+		 *
+		 * Inodes with the compress flag set but no property keep using
+		 * the mount default, so they behave as before.
+		 */
+		if (inode->prop_compress)
+			comp_type = inode->prop_compress;
+		else if (fs_info->compress_type)
+			comp_type = fs_info->compress_type;
+		else
+			comp_type = BTRFS_COMPRESS_ZLIB;
+		comp = btrfs_compress_type2str(comp_type);
 	} else {
 		inode_flags &= ~(BTRFS_INODE_COMPRESS | BTRFS_INODE_NOCOMPRESS);
 	}
 
 	/*
 	 * 1 for inode item
-	 * 2 for properties
+	 * 1 for property
 	 */
-	trans = btrfs_start_transaction(root, 3);
+	trans = btrfs_start_transaction(root, 2);
 	if (IS_ERR(trans))
 		return PTR_ERR(trans);
 
@@ -527,7 +562,7 @@ static unsigned int create_subvol_num_items(const struct btrfs_qgroup_inherit *i
 	return num_items;
 }
 
-static noinline int create_subvol(struct mnt_idmap *idmap,
+static noinline int create_subvol(const struct mnt_idmap *idmap,
 				  struct inode *dir, struct dentry *dentry,
 				  struct btrfs_qgroup_inherit *inherit)
 {
@@ -857,7 +892,7 @@ free_pending:
  * inside this filesystem so it's quite a bit simpler.
  */
 static noinline int btrfs_mksubvol(struct dentry *parent,
-				   struct mnt_idmap *idmap,
+				   const struct mnt_idmap *idmap,
 				   struct qstr *qname, struct btrfs_root *snap_src,
 				   bool readonly,
 				   struct btrfs_qgroup_inherit *inherit)
@@ -904,7 +939,7 @@ out_dput:
 }
 
 static noinline int btrfs_mksnapshot(struct dentry *parent,
-				   struct mnt_idmap *idmap,
+				   const struct mnt_idmap *idmap,
 				   struct qstr *qname,
 				   struct btrfs_root *root,
 				   bool readonly,
@@ -1136,13 +1171,13 @@ out_drop:
 }
 
 static noinline int __btrfs_ioctl_snap_create(struct file *file,
-				struct mnt_idmap *idmap,
 				const char *name, unsigned long fd, bool subvol,
 				bool readonly,
 				struct btrfs_qgroup_inherit *inherit)
 {
 	int ret;
 	struct qstr qname = QSTR(name);
+	const struct mnt_idmap *idmap = file_mnt_idmap(file);
 
 	if (!S_ISDIR(file_inode(file)->i_mode))
 		return -ENOTDIR;
@@ -1220,8 +1255,7 @@ static noinline int btrfs_ioctl_snap_create(struct file *file,
 	if (ret < 0)
 		return ret;
 
-	return __btrfs_ioctl_snap_create(file, file_mnt_idmap(file),
-					 vol_args->name, vol_args->fd, subvol,
+	return __btrfs_ioctl_snap_create(file, vol_args->name, vol_args->fd, subvol,
 					 false, NULL);
 }
 
@@ -1264,8 +1298,7 @@ static noinline int btrfs_ioctl_snap_create_v2(struct file *file,
 			return ret;
 	}
 
-	return __btrfs_ioctl_snap_create(file, file_mnt_idmap(file),
-					 vol_args->name, vol_args->fd, subvol,
+	return __btrfs_ioctl_snap_create(file, vol_args->name, vol_args->fd, subvol,
 					 readonly, inherit);
 }
 
@@ -1657,13 +1690,11 @@ static noinline int btrfs_ioctl_tree_search_v2(struct btrfs_root *root,
 }
 
 /*
- * Search INODE_REFs to identify path name of 'dirid' directory
- * in a 'tree_id' tree. and sets path name to 'name'.
+ * Search for an INODE_REF in a 'root' tree which identifies the path name of
+ * 'dirid'. When found, it sets 'name' with the path name.
  */
-static noinline int btrfs_search_path_in_tree(struct btrfs_fs_info *info,
-				u64 tree_id, u64 dirid, char *name)
+static noinline int btrfs_search_path_in_tree(struct btrfs_root *root, u64 dirid, char *name)
 {
-	struct btrfs_root *root;
 	struct btrfs_key key;
 	char *ptr;
 	int ret = -1;
@@ -1685,13 +1716,6 @@ static noinline int btrfs_search_path_in_tree(struct btrfs_fs_info *info,
 
 	ptr = &name[BTRFS_INO_LOOKUP_PATH_MAX - 1];
 
-	root = btrfs_get_fs_root(info, tree_id, true);
-	if (IS_ERR(root)) {
-		ret = PTR_ERR(root);
-		root = NULL;
-		goto out;
-	}
-
 	key.objectid = dirid;
 	key.type = BTRFS_INODE_REF_KEY;
 	key.offset = (u64)-1;
@@ -1699,11 +1723,9 @@ static noinline int btrfs_search_path_in_tree(struct btrfs_fs_info *info,
 	while (1) {
 		ret = btrfs_search_backwards(root, &key, path);
 		if (ret < 0)
-			goto out;
-		else if (ret > 0) {
-			ret = -ENOENT;
-			goto out;
-		}
+			return ret;
+		else if (ret > 0)
+			return -ENOENT;
 
 		l = path->nodes[0];
 		slot = path->slots[0];
@@ -1712,10 +1734,8 @@ static noinline int btrfs_search_path_in_tree(struct btrfs_fs_info *info,
 		len = btrfs_inode_ref_name_len(l, iref);
 		ptr -= len + 1;
 		total_len += len + 1;
-		if (ptr < name) {
-			ret = -ENAMETOOLONG;
-			goto out;
-		}
+		if (ptr < name)
+			return -ENAMETOOLONG;
 
 		*(ptr + len) = '/';
 		read_extent_buffer(l, ptr, (unsigned long)(iref + 1), len);
@@ -1730,13 +1750,11 @@ static noinline int btrfs_search_path_in_tree(struct btrfs_fs_info *info,
 	}
 	memmove(name, ptr, total_len);
 	name[total_len] = '\0';
-	ret = 0;
-out:
-	btrfs_put_root(root);
-	return ret;
+
+	return 0;
 }
 
-static int btrfs_search_path_in_tree_user(struct mnt_idmap *idmap,
+static int btrfs_search_path_in_tree_user(const struct mnt_idmap *idmap,
 				struct inode *inode,
 				struct btrfs_ioctl_ino_lookup_user_args *args)
 {
@@ -1877,6 +1895,7 @@ out_put:
 static noinline int btrfs_ioctl_ino_lookup(struct btrfs_root *root,
 					   void __user *argp)
 {
+	bool new_root = false;
 	struct btrfs_ioctl_ino_lookup_args AUTO_KFREE(args);
 	int ret = 0;
 
@@ -1890,6 +1909,8 @@ static noinline int btrfs_ioctl_ino_lookup(struct btrfs_root *root,
 	 */
 	if (args->treeid == 0)
 		args->treeid = btrfs_root_id(root);
+	else
+		new_root = true;
 
 	if (args->objectid == BTRFS_FIRST_FREE_OBJECTID) {
 		args->name[0] = 0;
@@ -1901,9 +1922,14 @@ static noinline int btrfs_ioctl_ino_lookup(struct btrfs_root *root,
 		goto out;
 	}
 
-	ret = btrfs_search_path_in_tree(root->fs_info,
-					args->treeid, args->objectid,
-					args->name);
+	if (new_root) {
+		root = btrfs_get_fs_root(root->fs_info, args->treeid, true);
+		if (IS_ERR(root))
+			return PTR_ERR(root);
+	}
+	ret = btrfs_search_path_in_tree(root, args->objectid, args->name);
+	if (new_root)
+		btrfs_put_root(root);
 
 out:
 	if (ret == 0 && copy_to_user(argp, args, sizeof(*args)))
@@ -2228,7 +2254,7 @@ static noinline int btrfs_ioctl_snap_destroy(struct file *file,
 	struct btrfs_root *dest = NULL;
 	struct btrfs_ioctl_vol_args AUTO_KFREE(vol_args);
 	struct btrfs_ioctl_vol_args_v2 AUTO_KFREE(vol_args2);
-	struct mnt_idmap *idmap = file_mnt_idmap(file);
+	const struct mnt_idmap *idmap = file_mnt_idmap(file);
 	char *subvol_name, *subvol_name_ptr = NULL;
 	int ret = 0;
 	bool destroy_parent = false;
@@ -2367,6 +2393,17 @@ static noinline int btrfs_ioctl_snap_destroy(struct file *file,
 
 	inode = d_inode(dentry);
 	dest = BTRFS_I(inode)->root;
+
+	/*
+	 * A concurrent rename may have changed which subvolume the name
+	 * refers to. Verify that the resolved ID still matches the requested ID.
+	 */
+	if (destroy_v2 && (vol_args2->flags & BTRFS_SUBVOL_SPEC_BY_ID) &&
+	    btrfs_root_id(dest) != vol_args2->subvolid) {
+		ret = -EAGAIN;
+		goto out_end_removing;
+	}
+
 	if (!capable(CAP_SYS_ADMIN)) {
 		/*
 		 * Regular user.  Only allow this with a special mount
@@ -2629,7 +2666,7 @@ static long btrfs_ioctl_rm_dev_v2(struct file *file, void __user *arg)
 err_drop:
 	mnt_drop_write_file(file);
 	if (bdev_file)
-		bdev_fput(bdev_file);
+		btrfs_release_device_allow_freeze(bdev_file);
 out:
 	btrfs_put_dev_args_from_path(&args);
 	return ret;
@@ -2679,7 +2716,7 @@ static long btrfs_ioctl_rm_dev(struct file *file, void __user *arg)
 
 	mnt_drop_write_file(file);
 	if (bdev_file)
-		bdev_fput(bdev_file);
+		btrfs_release_device_allow_freeze(bdev_file);
 out:
 	btrfs_put_dev_args_from_path(&args);
 	return ret;
@@ -2841,8 +2878,8 @@ static long btrfs_ioctl_default_subvol(struct file *file, void __user *argp)
 		else
 			ret = -ENOENT;
 		btrfs_err(fs_info,
-			  "could not find default diritem for dir %llu: %d",
-			  dir_id, ret);
+			  "could not find default diritem for dir %llu: %pe",
+			  dir_id, ERR_PTR(ret));
 		goto out_free;
 	}
 
@@ -3613,7 +3650,7 @@ static long btrfs_ioctl_qgroup_assign(struct file *file, void __user *arg)
 {
 	struct inode *inode = file_inode(file);
 	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
-	struct btrfs_root *root = BTRFS_I(inode)->root;
+	struct btrfs_root *quota_root;
 	struct btrfs_ioctl_qgroup_assign_args AUTO_KFREE(sa);
 	struct btrfs_qgroup_list AUTO_KFREE(prealloc);
 	struct btrfs_trans_handle *trans;
@@ -3644,10 +3681,20 @@ static long btrfs_ioctl_qgroup_assign(struct file *file, void __user *arg)
 		}
 	}
 
+	mutex_lock(&fs_info->qgroup_ioctl_lock);
+	quota_root = btrfs_grab_root(fs_info->quota_root);
+	mutex_unlock(&fs_info->qgroup_ioctl_lock);
+
+	if (!quota_root) {
+		ret = -ENOTCONN;
+		goto drop_write;
+	}
+
 	/* 2 BTRFS_QGROUP_RELATION_KEY items. */
-	trans = btrfs_start_transaction(root, 2);
+	trans = btrfs_start_transaction(quota_root, 2);
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
+		btrfs_put_root(quota_root);
 		goto drop_write;
 	}
 
@@ -3671,6 +3718,7 @@ static long btrfs_ioctl_qgroup_assign(struct file *file, void __user *arg)
 			   "qgroup status update failed after %s relation, marked as inconsistent",
 			   sa->assign ? "adding" : "deleting");
 	err = btrfs_end_transaction(trans);
+	btrfs_put_root(quota_root);
 	if (err && !ret)
 		ret = err;
 
@@ -3682,7 +3730,8 @@ drop_write:
 static long btrfs_ioctl_qgroup_create(struct file *file, void __user *arg)
 {
 	struct inode *inode = file_inode(file);
-	struct btrfs_root *root = BTRFS_I(inode)->root;
+	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
+	struct btrfs_root *quota_root;
 	struct btrfs_ioctl_qgroup_create_args AUTO_KFREE(sa);
 	struct btrfs_trans_handle *trans;
 	int ret;
@@ -3691,7 +3740,7 @@ static long btrfs_ioctl_qgroup_create(struct file *file, void __user *arg)
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (!btrfs_qgroup_enabled(root->fs_info))
+	if (!btrfs_qgroup_enabled(fs_info))
 		return -ENOTCONN;
 
 	ret = mnt_want_write_file(file);
@@ -3714,13 +3763,23 @@ static long btrfs_ioctl_qgroup_create(struct file *file, void __user *arg)
 		goto drop_write;
 	}
 
+	mutex_lock(&fs_info->qgroup_ioctl_lock);
+	quota_root = btrfs_grab_root(fs_info->quota_root);
+	mutex_unlock(&fs_info->qgroup_ioctl_lock);
+
+	if (!quota_root) {
+		ret = -ENOTCONN;
+		goto drop_write;
+	}
+
 	/*
 	 * 1 BTRFS_QGROUP_INFO_KEY item.
 	 * 1 BTRFS_QGROUP_LIMIT_KEY item.
 	 */
-	trans = btrfs_start_transaction(root, 2);
+	trans = btrfs_start_transaction(quota_root, 2);
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
+		btrfs_put_root(quota_root);
 		goto drop_write;
 	}
 
@@ -3731,6 +3790,7 @@ static long btrfs_ioctl_qgroup_create(struct file *file, void __user *arg)
 	}
 
 	err = btrfs_end_transaction(trans);
+	btrfs_put_root(quota_root);
 	if (err && !ret)
 		ret = err;
 
@@ -3743,6 +3803,8 @@ static long btrfs_ioctl_qgroup_limit(struct file *file, void __user *arg)
 {
 	struct inode *inode = file_inode(file);
 	struct btrfs_root *root = BTRFS_I(inode)->root;
+	struct btrfs_root *quota_root;
+	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct btrfs_ioctl_qgroup_limit_args AUTO_KFREE(sa);
 	struct btrfs_trans_handle *trans;
 	int ret;
@@ -3752,7 +3814,7 @@ static long btrfs_ioctl_qgroup_limit(struct file *file, void __user *arg)
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (!btrfs_qgroup_enabled(root->fs_info))
+	if (!btrfs_qgroup_enabled(fs_info))
 		return -ENOTCONN;
 
 	ret = mnt_want_write_file(file);
@@ -3765,10 +3827,20 @@ static long btrfs_ioctl_qgroup_limit(struct file *file, void __user *arg)
 		goto drop_write;
 	}
 
+	mutex_lock(&fs_info->qgroup_ioctl_lock);
+	quota_root = btrfs_grab_root(fs_info->quota_root);
+	mutex_unlock(&fs_info->qgroup_ioctl_lock);
+
+	if (!quota_root) {
+		ret = -ENOTCONN;
+		goto drop_write;
+	}
+
 	/* 1 BTRFS_QGROUP_LIMIT_KEY item. */
-	trans = btrfs_start_transaction(root, 1);
+	trans = btrfs_start_transaction(quota_root, 1);
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
+		btrfs_put_root(quota_root);
 		goto drop_write;
 	}
 
@@ -3781,6 +3853,7 @@ static long btrfs_ioctl_qgroup_limit(struct file *file, void __user *arg)
 	ret = btrfs_limit_qgroup(trans, qgroupid, &sa->lim);
 
 	err = btrfs_end_transaction(trans);
+	btrfs_put_root(quota_root);
 	if (err && !ret)
 		ret = err;
 
@@ -3832,7 +3905,7 @@ static long btrfs_ioctl_quota_rescan_status(struct btrfs_fs_info *fs_info,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (fs_info->qgroup_flags & BTRFS_QGROUP_STATUS_FLAG_RESCAN) {
+	if (test_bit(BTRFS_QGROUP_STATUS_BIT_RESCAN, &fs_info->qgroup_flags)) {
 		qsa.flags = 1;
 		qsa.progress = fs_info->qgroup_rescan_progress.objectid;
 	}
@@ -3852,7 +3925,7 @@ static long btrfs_ioctl_quota_rescan_wait(struct btrfs_fs_info *fs_info)
 }
 
 static long _btrfs_ioctl_set_received_subvol(struct file *file,
-					    struct mnt_idmap *idmap,
+					    const struct mnt_idmap *idmap,
 					    struct btrfs_ioctl_received_subvol_args *sa)
 {
 	struct inode *inode = file_inode(file);
@@ -4552,7 +4625,7 @@ static void btrfs_uring_read_finished(struct io_tw_req tw_req, io_tw_token_t tw)
 	size_t page_offset;
 	ssize_t ret;
 
-	/* The inode lock has already been acquired in btrfs_uring_read_extent.  */
+	/* The inode lock has already been acquired in btrfs_encoded_read(). */
 	btrfs_lockdep_inode_acquire(inode, i_rwsem);
 
 	if (priv->err) {
@@ -4618,7 +4691,6 @@ static int btrfs_uring_read_extent(struct kiocb *iocb, struct iov_iter *iter,
 				   struct iovec *iov, struct io_uring_cmd *cmd)
 {
 	struct btrfs_inode *inode = BTRFS_I(file_inode(iocb->ki_filp));
-	struct extent_io_tree *io_tree = &inode->io_tree;
 	struct page **pages = NULL;
 	struct btrfs_uring_priv *priv = NULL;
 	unsigned long nr_pages;
@@ -4674,8 +4746,6 @@ static int btrfs_uring_read_extent(struct kiocb *iocb, struct iov_iter *iter,
 	return -EIOCBQUEUED;
 
 out_fail:
-	btrfs_unlock_extent(io_tree, start, lockend, &cached_state);
-	btrfs_inode_unlock(inode, BTRFS_ILOCK_SHARED);
 	kfree(priv);
 	for (int i = 0; i < nr_pages; i++) {
 		if (pages[i])
@@ -4702,9 +4772,6 @@ static int btrfs_uring_encoded_read(struct io_uring_cmd *cmd, unsigned int issue
 	void __user *sqe_addr;
 	struct io_btrfs_cmd *bc = io_uring_cmd_to_pdu(cmd, struct io_btrfs_cmd);
 	struct btrfs_uring_encoded_data *data = NULL;
-
-	if (cmd->flags & IORING_URING_CMD_REISSUE)
-		data = bc->data;
 
 	if (!capable(CAP_SYS_ADMIN)) {
 		ret = -EPERM;
@@ -4787,8 +4854,6 @@ static int btrfs_uring_encoded_read(struct io_uring_cmd *cmd, unsigned int issue
 
 	ret = btrfs_encoded_read(&kiocb, &data->iter, &data->args, &cached_state,
 				 &disk_bytenr, &disk_io_size);
-	if (ret == -EAGAIN)
-		goto out_acct;
 	if (ret < 0 && ret != -EIOCBQUEUED)
 		goto out_free;
 
@@ -4816,8 +4881,10 @@ static int btrfs_uring_encoded_read(struct io_uring_cmd *cmd, unsigned int issue
 					      cached_state, disk_bytenr, disk_io_size,
 					      count, data->args.compression,
 					      data->iov, cmd);
-
-		goto out_acct;
+		if (ret == -EIOCBQUEUED)
+			goto out_acct;
+		btrfs_unlock_extent(io_tree, start, lockend, &cached_state);
+		btrfs_inode_unlock(inode, BTRFS_ILOCK_SHARED);
 	}
 
 out_free:
@@ -4828,8 +4895,10 @@ out_acct:
 		add_rchar(current, ret);
 	inc_syscr(current);
 
-	if (ret != -EIOCBQUEUED && ret != -EAGAIN)
+	if (ret != -EIOCBQUEUED) {
 		kfree(data);
+		bc->data = NULL;
+	}
 
 	return ret;
 }
@@ -4841,11 +4910,7 @@ static int btrfs_uring_encoded_write(struct io_uring_cmd *cmd, unsigned int issu
 	struct kiocb kiocb;
 	ssize_t ret;
 	void __user *sqe_addr;
-	struct io_btrfs_cmd *bc = io_uring_cmd_to_pdu(cmd, struct io_btrfs_cmd);
 	struct btrfs_uring_encoded_data *data = NULL;
-
-	if (cmd->flags & IORING_URING_CMD_REISSUE)
-		data = bc->data;
 
 	if (!capable(CAP_SYS_ADMIN)) {
 		ret = -EPERM;
@@ -4858,14 +4923,17 @@ static int btrfs_uring_encoded_write(struct io_uring_cmd *cmd, unsigned int issu
 		goto out_acct;
 	}
 
+	if (issue_flags & IO_URING_F_NONBLOCK) {
+		ret = -EAGAIN;
+		goto out_acct;
+	}
+
 	if (!data) {
 		data = kzalloc_obj(*data, GFP_NOFS);
 		if (!data) {
 			ret = -ENOMEM;
 			goto out_acct;
 		}
-
-		bc->data = data;
 
 		if (issue_flags & IO_URING_F_COMPAT) {
 #if defined(CONFIG_64BIT) && defined(CONFIG_COMPAT)
@@ -4926,11 +4994,6 @@ static int btrfs_uring_encoded_write(struct io_uring_cmd *cmd, unsigned int issu
 		}
 	}
 
-	if (issue_flags & IO_URING_F_NONBLOCK) {
-		ret = -EAGAIN;
-		goto out_acct;
-	}
-
 	pos = data->args.offset;
 	ret = rw_verify_area(WRITE, file, &pos, data->args.len);
 	if (ret < 0)
@@ -4956,8 +5019,7 @@ out_acct:
 		add_wchar(current, ret);
 	inc_syscw(current);
 
-	if (ret != -EAGAIN)
-		kfree(data);
+	kfree(data);
 	return ret;
 }
 
@@ -5205,7 +5267,7 @@ static int btrfs_ioctl_get_csums(struct file *file, void __user *argp)
 	struct btrfs_inode *inode = BTRFS_I(vfs_inode);
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	struct btrfs_root *root = inode->root;
-	struct btrfs_ioctl_get_csums_args args;
+	struct btrfs_ioctl_get_csums_args args = { 0 };
 	BTRFS_PATH_AUTO_FREE(path);
 	const u64 ino = btrfs_ino(inode);
 	const u32 csum_size = fs_info->csum_size;

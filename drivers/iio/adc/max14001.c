@@ -362,10 +362,11 @@ static struct max14001_chip_info max14002_chip_info = {
 };
 
 static const struct spi_device_id max14001_id_table[] = {
-	{ "max14001", (kernel_ulong_t)&max14001_chip_info },
-	{ "max14002", (kernel_ulong_t)&max14002_chip_info },
+	{ .name = "max14001", .driver_data = (kernel_ulong_t)&max14001_chip_info },
+	{ .name = "max14002", .driver_data = (kernel_ulong_t)&max14002_chip_info },
 	{ }
 };
+MODULE_DEVICE_TABLE(spi, max14001_id_table);
 
 static const struct of_device_id max14001_of_match[] = {
 	{ .compatible = "adi,max14001", .data = &max14001_chip_info },

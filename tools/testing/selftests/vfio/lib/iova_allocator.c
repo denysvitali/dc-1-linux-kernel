@@ -13,8 +13,10 @@
 
 #include <linux/iommufd.h>
 #include <linux/limits.h>
+#include <linux/log2.h>
 #include <linux/mman.h>
 #include <linux/overflow.h>
+#include <linux/sizes.h>
 #include <linux/types.h>
 #include <linux/vfio.h>
 
@@ -29,8 +31,7 @@ struct iova_allocator *iova_allocator_init(struct iommu *iommu)
 	ranges = iommu_iova_ranges(iommu, &nranges);
 	VFIO_ASSERT_NOT_NULL(ranges);
 
-	allocator = malloc(sizeof(*allocator));
-	VFIO_ASSERT_NOT_NULL(allocator);
+	allocator = malloc_assert(sizeof(*allocator));
 
 	*allocator = (struct iova_allocator){
 		.ranges = ranges,
@@ -51,7 +52,10 @@ void iova_allocator_cleanup(struct iova_allocator *allocator)
 iova_t iova_allocator_alloc(struct iova_allocator *allocator, size_t size)
 {
 	VFIO_ASSERT_GT(size, 0, "Invalid size arg, zero\n");
-	VFIO_ASSERT_EQ(size & (size - 1), 0, "Invalid size arg, non-power-of-2\n");
+
+	VFIO_ASSERT_LE(size, rounddown_pow_of_two(SIZE_MAX),
+		       "Invalid size arg, too large (%zu)\n", size);
+	size = roundup_pow_of_two(size);
 
 	for (;;) {
 		struct iommu_iova_range *range;
@@ -90,4 +94,3 @@ next_range:
 		allocator->range_offset = 0;
 	}
 }
-

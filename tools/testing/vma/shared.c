@@ -12,6 +12,15 @@ const struct vm_operations_struct vma_dummy_vm_ops;
 struct anon_vma dummy_anon_vma;
 struct task_struct __current;
 
+static int mmap_zero_prepare(struct vm_area_desc *desc)
+{
+	return 0;
+}
+
+const struct file_operations zero_fops = {
+	.mmap_prepare = mmap_zero_prepare,
+};
+
 struct vm_area_struct *alloc_vma(struct mm_struct *mm,
 		unsigned long start, unsigned long end,
 		pgoff_t pgoff, vma_flags_t vma_flags)
@@ -23,7 +32,8 @@ struct vm_area_struct *alloc_vma(struct mm_struct *mm,
 
 	vma->vm_start = start;
 	vma->vm_end = end;
-	vma->vm_pgoff = pgoff;
+	vma_set_pgoff(vma, pgoff);
+	vma_set_anon_pgoff(vma, start >> PAGE_SHIFT);
 	vma->flags = vma_flags;
 	vma_assert_detached(vma);
 
@@ -55,7 +65,7 @@ struct vm_area_struct *alloc_and_link_vma(struct mm_struct *mm,
 	 * begun. Linking to the tree will have caused this to be incremented,
 	 * which means we will get a false positive otherwise.
 	 */
-	vma->vm_lock_seq = UINT_MAX;
+	vma->vm_lock_seq = 0;
 
 	return vma;
 }
@@ -87,13 +97,13 @@ int cleanup_mm(struct mm_struct *mm, struct vma_iterator *vmi)
 
 bool vma_write_started(struct vm_area_struct *vma)
 {
-	int seq = vma->vm_lock_seq;
+	unsigned int seq = vma->vm_lock_seq;
 
 	/* We reset after each check. */
-	vma->vm_lock_seq = UINT_MAX;
+	vma->vm_lock_seq = 0;
 
 	/* The vma_start_write() stub simply increments this value. */
-	return seq > -1;
+	return seq > 0;
 }
 
 void __vma_set_dummy_anon_vma(struct vm_area_struct *vma,
@@ -119,13 +129,4 @@ struct task_struct *get_current(void)
 unsigned long rlimit(unsigned int limit)
 {
 	return (unsigned long)-1;
-}
-
-void vma_set_range(struct vm_area_struct *vma,
-		   unsigned long start, unsigned long end,
-		   pgoff_t pgoff)
-{
-	vma->vm_start = start;
-	vma->vm_end = end;
-	vma->vm_pgoff = pgoff;
 }

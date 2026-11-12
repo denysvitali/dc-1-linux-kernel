@@ -443,7 +443,22 @@ static void tcf_chain_put(struct tcf_chain *chain);
 static void tcf_proto_destroy(struct tcf_proto *tp, bool rtnl_held,
 			      bool sig_destroy, struct netlink_ext_ack *extack)
 {
-	tp->ops->destroy(tp, rtnl_held, extack);
+	/* A locked classifier's destroy callback (e.g. u32_destroy) uses
+	 * rtnl_dereference() and mutates shared structures (e.g. the
+	 * tc_u_common hash list) that are only safe under rtnl_lock. When an
+	 * unlocked classifier's request (e.g. flower on ingress) loses the
+	 * tcf_chain_tp_insert_unique() race and ends up dropping the last
+	 * reference on a locked classifier's proto, destroy() would run
+	 * without rtnl held. Take it here in that case.
+	 */
+	bool not_lockless = !rtnl_held &&
+		!(tp->ops->flags & TCF_PROTO_OPS_DOIT_UNLOCKED);
+
+	if (not_lockless)
+		rtnl_lock();
+	tp->ops->destroy(tp, rtnl_held || not_lockless, extack);
+	if (not_lockless)
+		rtnl_unlock();
 	tcf_proto_count_usesw(tp, false);
 	if (sig_destroy)
 		tcf_proto_signal_destroyed(tp->chain, tp);
@@ -2134,11 +2149,16 @@ retry:
 			    rtnl_held, extack);
 	if (ret <= 0) {
 		kfree_skb(skb);
-		if (ret == -EMSGSIZE) {
-			size += NLMSG_GOODSIZE;
-			goto retry;
-		}
-		return ERR_PTR(-EINVAL);
+		if (ret != -EMSGSIZE)
+			return ERR_PTR(-EINVAL);
+		/* A u16 nest caps the dump, so once the skb is larger than
+		 * any valid message it can never serialize. Stop at the
+		 * bound instead of looping until alloc_skb() fails.
+		 */
+		if (size > U16_MAX + NLMSG_GOODSIZE)
+			return ERR_PTR(-EMSGSIZE);
+		size += NLMSG_GOODSIZE;
+		goto retry;
 	}
 	return skb;
 }
@@ -2185,8 +2205,18 @@ static int tfilter_del_notify(struct net *net, struct sk_buff *oskb,
 	skb = tfilter_notify_prep(net, oskb, n, tp, block, q, parent, fh,
 				  RTM_DELTFILTER, portid, rtnl_held, extack);
 	if (IS_ERR(skb)) {
-		NL_SET_ERR_MSG(extack, "Failed to build del event notification");
-		return PTR_ERR(skb);
+		if (PTR_ERR(skb) != -EMSGSIZE) {
+			NL_SET_ERR_MSG(extack, "Failed to build del event notification");
+			return PTR_ERR(skb);
+		}
+		/* No notification can ever be built for this filter: drop
+		 * it rather than refuse the delete.
+		 */
+		err = tp->ops->delete(tp, fh, last, rtnl_held, extack);
+		if (!err)
+			NL_SET_ERR_MSG(extack,
+				       "Filter deleted; del event notification could not be built");
+		return err;
 	}
 
 	err = tp->ops->delete(tp, fh, last, rtnl_held, extack);
@@ -2233,6 +2263,12 @@ static bool is_ingress_or_clsact(struct tcf_block *block, struct Qdisc *q)
 	return tcf_block_shared(block) || (q && !!(q->flags & TCQ_F_INGRESS));
 }
 
+enum tcf_tp_insert_state {
+	TP_NOT_CREATED = 0, /* did not create and insert a new tp */
+	TP_CREATED, /* created and inserted a new tp */
+	TP_NOT_OWNED, /* created a proto but failed to insert */
+};
+
 static int tc_new_tfilter(struct sk_buff *skb, struct nlmsghdr *n,
 			  struct netlink_ext_ack *extack)
 {
@@ -2253,12 +2289,12 @@ static int tc_new_tfilter(struct sk_buff *skb, struct nlmsghdr *n,
 	unsigned long cl;
 	void *fh;
 	int err;
-	int tp_created;
+	enum tcf_tp_insert_state tp_state;
 	bool rtnl_held = false;
 	u32 flags;
 
 replay:
-	tp_created = 0;
+	tp_state = TP_NOT_CREATED;
 
 	err = nlmsg_parse_deprecated(n, sizeof(*t), tca, TCA_MAX,
 				     rtm_tca_policy, extack);
@@ -2380,13 +2416,15 @@ replay:
 			goto errout_tp;
 		}
 
-		tp_created = 1;
+		tp_state = TP_CREATED;
 		tp = tcf_chain_tp_insert_unique(chain, tp_new, protocol, prio,
 						rtnl_held);
 		if (IS_ERR(tp)) {
 			err = PTR_ERR(tp);
 			goto errout_tp;
 		}
+		if (tp != tp_new)
+			tp_state = TP_NOT_OWNED;
 	} else {
 		mutex_unlock(&chain->filter_chain_lock);
 	}
@@ -2440,13 +2478,26 @@ replay:
 	}
 
 errout:
-	if (err && tp_created)
+	if (err && !IS_ERR_OR_NULL(tp) &&
+	    (tp_state == TP_CREATED || tp->ops->delete_empty))
+		/*
+		 * The request is dropping its reference to tp. If it was
+		 * the last user (the idr is empty now), reclaim the proto.
+		 * A tp this request created is reclaimed unconditionally:
+		 * it is the only owner, so marking it for deletion is
+		 * safe. Otherwise only classifiers with a delete_empty
+		 * callback are reclaimed -- the callback admits an empty
+		 * proto only, so a live shared proto is never unlinked.
+		 * Classifiers without one (deleting is set
+		 * unconditionally) are rtnl-serialized, so the raced
+		 * window this guard closes cannot arise for them.
+		 */
 		tcf_chain_tp_delete_empty(chain, tp, rtnl_held, NULL);
 errout_tp:
 	if (chain) {
 		if (tp && !IS_ERR(tp))
 			tcf_proto_put(tp, rtnl_held, NULL);
-		if (!tp_created)
+		if (tp_state == TP_NOT_CREATED)
 			tcf_chain_put(chain);
 	}
 	tcf_block_release(q, block, rtnl_held);
@@ -3231,7 +3282,7 @@ errout:
 	tcf_chain_put(chain);
 errout_block:
 	tcf_block_release(q, block, true);
-	if (err == -EAGAIN)
+	if (err == -EAGAIN && n->nlmsg_type == RTM_NEWCHAIN)
 		/* Replay the request. */
 		goto replay;
 	return err;
@@ -3349,7 +3400,8 @@ int tcf_exts_init_ex(struct tcf_exts *exts, struct net *net, int action,
 	 * This reference might be taken later from tcf_exts_get_net().
 	 */
 	exts->net = net;
-	exts->actions = kzalloc_objs(struct tc_action *, TCA_ACT_MAX_PRIO);
+	exts->actions = kzalloc_objs(struct tc_action *, TCA_ACT_MAX_PRIO,
+				     GFP_KERNEL_ACCOUNT);
 	if (!exts->actions)
 		return -ENOMEM;
 #endif
@@ -3492,7 +3544,8 @@ int tcf_exts_dump(struct sk_buff *skb, struct tcf_exts *exts)
 			if (tcf_action_dump(skb, exts->actions, 0, 0, false)
 			    < 0)
 				goto nla_put_failure;
-			nla_nest_end(skb, nest);
+			if (nla_nest_end_safe(skb, nest) < 0)
+				goto nla_put_failure;
 		} else if (exts->police) {
 			struct tc_action *act = tcf_exts_first_act(exts);
 			nest = nla_nest_start_noflag(skb, exts->police);
@@ -3500,7 +3553,8 @@ int tcf_exts_dump(struct sk_buff *skb, struct tcf_exts *exts)
 				goto nla_put_failure;
 			if (tcf_action_dump_old(skb, act, 0, 0) < 0)
 				goto nla_put_failure;
-			nla_nest_end(skb, nest);
+			if (nla_nest_end_safe(skb, nest) < 0)
+				goto nla_put_failure;
 		}
 	}
 	return 0;
@@ -3528,7 +3582,8 @@ int tcf_exts_terse_dump(struct sk_buff *skb, struct tcf_exts *exts)
 
 	if (tcf_action_dump(skb, exts->actions, 0, 0, true) < 0)
 		goto nla_put_failure;
-	nla_nest_end(skb, nest);
+	if (nla_nest_end_safe(skb, nest) < 0)
+		goto nla_put_failure;
 	return 0;
 
 nla_put_failure:

@@ -90,7 +90,6 @@ static struct gfs2_sbd *init_sbd(struct super_block *sb)
 	gfs2_tune_init(&sdp->sd_tune);
 
 	init_waitqueue_head(&sdp->sd_kill_wait);
-	init_waitqueue_head(&sdp->sd_async_glock_wait);
 	atomic_set(&sdp->sd_glock_disposal, 0);
 	init_completion(&sdp->sd_locking_init);
 	init_completion(&sdp->sd_withdraw_helper);
@@ -122,6 +121,8 @@ static struct gfs2_sbd *init_sbd(struct super_block *sb)
 	spin_lock_init(&sdp->sd_ail_lock);
 	INIT_LIST_HEAD(&sdp->sd_ail1_list);
 	INIT_LIST_HEAD(&sdp->sd_ail2_list);
+
+	spin_lock_init(&sdp->sd_dead_lock);
 
 	init_rwsem(&sdp->sd_log_flush_lock);
 	atomic_set(&sdp->sd_log_in_flight, 0);
@@ -532,7 +533,7 @@ static void gfs2_others_may_mount(struct gfs2_sbd *sdp)
 
 static int gfs2_jindex_hold(struct gfs2_sbd *sdp, struct gfs2_holder *ji_gh)
 {
-	struct gfs2_inode *dip = GFS2_I(sdp->sd_jindex);
+	struct gfs2_glock *gl = gfs2_inode_glock(sdp->sd_jindex);
 	struct qstr name;
 	char buf[20];
 	struct gfs2_jdesc *jd;
@@ -543,7 +544,7 @@ static int gfs2_jindex_hold(struct gfs2_sbd *sdp, struct gfs2_holder *ji_gh)
 	mutex_lock(&sdp->sd_jindex_mutex);
 
 	for (;;) {
-		error = gfs2_glock_nq_init(dip->i_gl, LM_ST_SHARED, 0, ji_gh);
+		error = gfs2_glock_nq_init(gl, LM_ST_SHARED, 0, ji_gh);
 		if (error)
 			break;
 
@@ -609,7 +610,6 @@ static int init_statfs(struct gfs2_sbd *sdp)
 	struct inode *pn = NULL;
 	char buf[30];
 	struct gfs2_jdesc *jd;
-	struct gfs2_inode *ip;
 
 	sdp->sd_statfs_inode = gfs2_lookup_meta(master, "statfs");
 	if (IS_ERR(sdp->sd_statfs_inode)) {
@@ -654,15 +654,15 @@ static int init_statfs(struct gfs2_sbd *sdp)
 
 	iput(pn);
 	pn = NULL;
-	ip = GFS2_I(sdp->sd_sc_inode);
-	error = gfs2_glock_nq_init(ip->i_gl, LM_ST_EXCLUSIVE, GL_NOPID,
-				   &sdp->sd_sc_gh);
+	error = gfs2_glock_nq_init(gfs2_inode_glock(sdp->sd_sc_inode),
+				   LM_ST_EXCLUSIVE, GL_NOPID, &sdp->sd_sc_gh);
 	if (error) {
 		fs_err(sdp, "can't lock local \"sc\" file: %d\n", error);
 		goto free_local;
 	}
 	/* read in the local statfs buffer - other nodes don't change it. */
-	error = gfs2_meta_inode_buffer(ip, &sdp->sd_sc_bh);
+	error = gfs2_meta_inode_buffer(GFS2_I(sdp->sd_sc_inode),
+				       &sdp->sd_sc_bh);
 	if (error) {
 		fs_err(sdp, "Cannot read in local statfs: %d\n", error);
 		goto unlock_sd_gh;
@@ -695,7 +695,7 @@ static int init_journal(struct gfs2_sbd *sdp, int undo)
 {
 	struct inode *master = d_inode(sdp->sd_master_dir);
 	struct gfs2_holder ji_gh;
-	struct gfs2_inode *ip;
+	struct gfs2_glock *gl;
 	int error = 0;
 
 	gfs2_holder_mark_uninitialized(&ji_gh);
@@ -749,8 +749,8 @@ static int init_journal(struct gfs2_sbd *sdp, int undo)
 			goto fail_jindex;
 		}
 
-		ip = GFS2_I(sdp->sd_jdesc->jd_inode);
-		error = gfs2_glock_nq_init(ip->i_gl, LM_ST_SHARED,
+		gl = gfs2_inode_glock(sdp->sd_jdesc->jd_inode);
+		error = gfs2_glock_nq_init(gl, LM_ST_SHARED,
 					   LM_FLAG_RECOVER | GL_EXACT |
 					   GL_NOCACHE | GL_NOPID,
 					   &sdp->sd_jinode_gh);
@@ -891,7 +891,7 @@ static int init_per_node(struct gfs2_sbd *sdp, int undo)
 	struct inode *pn = NULL;
 	char buf[30];
 	int error = 0;
-	struct gfs2_inode *ip;
+	struct gfs2_glock *gl;
 	struct inode *master = d_inode(sdp->sd_master_dir);
 
 	if (sdp->sd_args.ar_spectator)
@@ -918,8 +918,8 @@ static int init_per_node(struct gfs2_sbd *sdp, int undo)
 	iput(pn);
 	pn = NULL;
 
-	ip = GFS2_I(sdp->sd_qc_inode);
-	error = gfs2_glock_nq_init(ip->i_gl, LM_ST_EXCLUSIVE, GL_NOPID,
+	gl = gfs2_inode_glock(sdp->sd_qc_inode);
+	error = gfs2_glock_nq_init(gl, LM_ST_EXCLUSIVE, GL_NOPID,
 				   &sdp->sd_qc_gh);
 	if (error) {
 		fs_err(sdp, "can't lock local \"qc\" file: %d\n", error);
@@ -1300,7 +1300,6 @@ fail_locking:
 	init_locking(sdp, &mount_gh, UNDO);
 fail_lm:
 	complete_all(&sdp->sd_journal_ready);
-	gfs2_gl_hash_clear(sdp);
 	gfs2_lm_unmount(sdp);
 fail_debug:
 	gfs2_delete_debugfs_file(sdp);
@@ -1783,6 +1782,7 @@ static void gfs2_kill_sb(struct super_block *sb)
 	sdp->sd_master_dir = NULL;
 	shrink_dcache_sb(sb);
 
+	set_bit(SDF_KILL, &sdp->sd_flags);
 	gfs2_evict_inodes(sb);
 
 	/*
@@ -1790,7 +1790,6 @@ static void gfs2_kill_sb(struct super_block *sb)
 	 * destroy_workqueue()) to ensure that any delete work that
 	 * may be running will also see the SDF_KILL flag.
 	 */
-	set_bit(SDF_KILL, &sdp->sd_flags);
 	gfs2_flush_delete_work(sdp);
 	destroy_workqueue(sdp->sd_delete_wq);
 

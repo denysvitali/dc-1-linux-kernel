@@ -310,25 +310,6 @@ static unsigned long mtk_mfg_recalc_rate_gpu(struct clk_hw *hw,
 	return readl(mfg->shared_mem + GF_REG_FREQ_OUT_GPU) * HZ_PER_KHZ;
 }
 
-static int mtk_mfg_determine_rate(struct clk_hw *hw,
-				  struct clk_rate_request *req)
-{
-	/*
-	 * The determine_rate callback needs to be implemented to avoid returning
-	 * the current clock frequency, rather than something even remotely
-	 * close to the frequency that was asked for.
-	 *
-	 * Instead of writing considerable amounts of possibly slow code just to
-	 * somehow figure out which of the three PLLs to round for, or even to
-	 * do a search through one of two OPP tables in order to find the closest
-	 * OPP of a frequency, just return the rate as-is. This avoids devfreq
-	 * "rounding" a request for the lowest frequency to the possibly very
-	 * high current frequency, breaking the powersave governor in the process.
-	 */
-
-	return 0;
-}
-
 static unsigned long mtk_mfg_recalc_rate_stack(struct clk_hw *hw,
 					       unsigned long parent_rate)
 {
@@ -339,12 +320,12 @@ static unsigned long mtk_mfg_recalc_rate_stack(struct clk_hw *hw,
 
 static const struct clk_ops mtk_mfg_clk_gpu_ops = {
 	.recalc_rate = mtk_mfg_recalc_rate_gpu,
-	.determine_rate = mtk_mfg_determine_rate,
+	.determine_rate = clk_determine_rate_noop,
 };
 
 static const struct clk_ops mtk_mfg_clk_stack_ops = {
 	.recalc_rate = mtk_mfg_recalc_rate_stack,
-	.determine_rate = mtk_mfg_determine_rate,
+	.determine_rate = clk_determine_rate_noop,
 };
 
 static const struct clk_init_data mtk_mfg_clk_gpu_init = {
@@ -556,14 +537,14 @@ static int mtk_mfg_read_opp_tables(struct mtk_mfg *mfg)
 		return -EINVAL;
 	}
 
-	mfg->gpu_opps = devm_kcalloc(dev, mfg->num_gpu_opps,
-				     sizeof(struct dev_pm_opp_data), GFP_KERNEL);
+	mfg->gpu_opps = devm_kzalloc_objs(dev, struct dev_pm_opp_data,
+					  mfg->num_gpu_opps);
 	if (!mfg->gpu_opps)
 		return -ENOMEM;
 
 	if (mfg->num_stack_opps) {
-		mfg->stack_opps = devm_kcalloc(dev, mfg->num_stack_opps,
-					       sizeof(struct dev_pm_opp_data), GFP_KERNEL);
+		mfg->stack_opps = devm_kzalloc_objs(dev, struct dev_pm_opp_data,
+						    mfg->num_stack_opps);
 		if (!mfg->stack_opps)
 			return -ENOMEM;
 	}
@@ -657,7 +638,7 @@ static int mtk_mfg_attach_dev(struct generic_pm_domain *pd, struct device *dev)
 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
 	struct dev_pm_opp_data *so = mfg->stack_opps;
 	struct dev_pm_opp_data *go = mfg->gpu_opps;
-	struct dev_pm_opp_data *prev_o;
+	struct dev_pm_opp_data *prev_o = NULL;
 	struct dev_pm_opp_data *o;
 	int i, ret;
 
@@ -801,7 +782,7 @@ static int mtk_mfg_init_mbox(struct mtk_mfg *mfg)
 	struct mtk_mfg_mbox *gf;
 	struct mtk_mfg_mbox *slp;
 
-	gf = devm_kzalloc(dev, sizeof(*gf), GFP_KERNEL);
+	gf = devm_kzalloc_obj(dev, *gf);
 	if (!gf)
 		return -ENOMEM;
 
@@ -820,7 +801,7 @@ static int mtk_mfg_init_mbox(struct mtk_mfg *mfg)
 
 	mfg->gf_mbox = gf;
 
-	slp = devm_kzalloc(dev, sizeof(*slp), GFP_KERNEL);
+	slp = devm_kzalloc_obj(dev, *slp);
 	if (!slp)
 		return -ENOMEM;
 
@@ -846,7 +827,7 @@ static int mtk_mfg_init_clk_provider(struct mtk_mfg *mfg)
 	struct clk_hw_onecell_data *clk_data;
 	int ret;
 
-	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, 2), GFP_KERNEL);
+	clk_data = devm_kzalloc_flex(dev, *clk_data, hws, 2);
 	if (!clk_data)
 		return -ENOMEM;
 
@@ -935,7 +916,7 @@ static int mtk_mfg_probe(struct platform_device *pdev)
 	struct resource res;
 	int ret, i;
 
-	mfg = devm_kzalloc(dev, sizeof(*mfg), GFP_KERNEL);
+	mfg = devm_kzalloc_obj(dev, *mfg);
 	if (!mfg)
 		return -ENOMEM;
 
@@ -959,8 +940,7 @@ static int mtk_mfg_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(mfg->clk_eb),
 				     "Couldn't get 'eb' clock\n");
 
-	mfg->gpu_clks = devm_kcalloc(dev, data->num_clks, sizeof(*mfg->gpu_clks),
-				     GFP_KERNEL);
+	mfg->gpu_clks = devm_kzalloc_objs(dev, *mfg->gpu_clks, data->num_clks);
 	if (!mfg->gpu_clks)
 		return -ENOMEM;
 
@@ -971,8 +951,8 @@ static int mtk_mfg_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "Couldn't get GPU clocks\n");
 
-	mfg->gpu_regs = devm_kcalloc(dev, data->num_regulators,
-				     sizeof(*mfg->gpu_regs), GFP_KERNEL);
+	mfg->gpu_regs = devm_kzalloc_objs(dev, *mfg->gpu_regs,
+					  data->num_regulators);
 	if (!mfg->gpu_regs)
 		return -ENOMEM;
 

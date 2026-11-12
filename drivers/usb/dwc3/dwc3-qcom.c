@@ -602,7 +602,7 @@ static void dwc3_qcom_run_stop_notifier(struct dwc3 *dwc, bool is_on)
 	pm_runtime_mark_last_busy(qcom->dev);
 }
 
-struct dwc3_glue_ops dwc3_qcom_glue_ops = {
+static struct dwc3_glue_ops dwc3_qcom_glue_ops = {
 	.pre_set_role	= dwc3_qcom_set_role_notifier,
 	.pre_run_stop	= dwc3_qcom_run_stop_notifier,
 };
@@ -618,7 +618,7 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
 	bool			ignore_pipe_clk;
 	bool			wakeup_source;
 
-	qcom = devm_kzalloc(&pdev->dev, sizeof(*qcom), GFP_KERNEL);
+	qcom = devm_kzalloc_obj(&pdev->dev, *qcom);
 	if (!qcom)
 		return -ENOMEM;
 

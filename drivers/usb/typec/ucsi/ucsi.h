@@ -466,6 +466,7 @@ struct ucsi_debugfs_entry {
 	struct ucsi_data {
 		u64 low;
 		u64 high;
+		u64 ext;
 	} response;
 	int status;
 	u8 message_out[MESSAGE_OUT_MAX_LEN];
@@ -483,7 +484,8 @@ struct ucsi {
 	struct ucsi_connector *connector;
 	struct ucsi_debugfs_entry *debugfs;
 
-	struct work_struct resume_work;
+	struct delayed_work resume_work;
+	int resume_retries;
 	struct delayed_work work;
 	int work_count;
 #define UCSI_ROLE_SWITCH_RETRY_PER_HZ	10

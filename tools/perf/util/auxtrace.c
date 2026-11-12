@@ -123,7 +123,7 @@ static int evlist__regroup(struct evlist *evlist, struct evsel *leader, struct e
 	return 0;
 }
 
-static bool auxtrace__dont_decode(struct perf_session *session)
+bool auxtrace__dont_decode(struct perf_session *session)
 {
 	return !session->itrace_synth_opts ||
 	       session->itrace_synth_opts->dont_decode;
@@ -191,7 +191,7 @@ void auxtrace_mmap_params__set_idx(struct auxtrace_mmap_params *mp,
 				   struct evlist *evlist,
 				   struct evsel *evsel, int idx)
 {
-	bool per_cpu = !perf_cpu_map__has_any_cpu(evlist->core.user_requested_cpus);
+	bool per_cpu = !perf_cpu_map__has_any_cpu(evlist__core(evlist)->user_requested_cpus);
 
 	mp->mmap_needed = evsel->needs_auxtrace_mmap;
 
@@ -201,11 +201,11 @@ void auxtrace_mmap_params__set_idx(struct auxtrace_mmap_params *mp,
 	mp->idx = idx;
 
 	if (per_cpu) {
-		mp->cpu = perf_cpu_map__cpu(evlist->core.all_cpus, idx);
-		mp->tid = perf_thread_map__pid(evlist->core.threads, 0);
+		mp->cpu = perf_cpu_map__cpu(evlist__core(evlist)->all_cpus, idx);
+		mp->tid = perf_thread_map__pid(evlist__core(evlist)->threads, 0);
 	} else {
 		mp->cpu.cpu = -1;
-		mp->tid = perf_thread_map__pid(evlist->core.threads, idx);
+		mp->tid = perf_thread_map__pid(evlist__core(evlist)->threads, idx);
 	}
 }
 
@@ -251,7 +251,11 @@ static int auxtrace_queues__grow(struct auxtrace_queues *queues,
 {
 	unsigned int nr_queues = queues->nr_queues;
 	struct auxtrace_queue *queue_array;
+	struct auxtrace_queue *old_array = queues->queue_array;
 	unsigned int i;
+
+	if (!new_nr_queues)
+		return -EINVAL;
 
 	if (!nr_queues)
 		nr_queues = AUXTRACE_INIT_NR_QUEUES;
@@ -267,16 +271,17 @@ static int auxtrace_queues__grow(struct auxtrace_queues *queues,
 		return -ENOMEM;
 
 	for (i = 0; i < queues->nr_queues; i++) {
-		list_splice_tail(&queues->queue_array[i].head,
+		list_splice_tail(&old_array[i].head,
 				 &queue_array[i].head);
-		queue_array[i].tid = queues->queue_array[i].tid;
-		queue_array[i].cpu = queues->queue_array[i].cpu;
-		queue_array[i].set = queues->queue_array[i].set;
-		queue_array[i].priv = queues->queue_array[i].priv;
+		queue_array[i].tid = old_array[i].tid;
+		queue_array[i].cpu = old_array[i].cpu;
+		queue_array[i].set = old_array[i].set;
+		queue_array[i].priv = old_array[i].priv;
 	}
 
 	queues->nr_queues = nr_queues;
 	queues->queue_array = queue_array;
+	free(old_array);
 
 	return 0;
 }
@@ -668,10 +673,10 @@ int auxtrace_parse_snapshot_options(struct auxtrace_record *itr,
 
 static int evlist__enable_event_idx(struct evlist *evlist, struct evsel *evsel, int idx)
 {
-	bool per_cpu_mmaps = !perf_cpu_map__has_any_cpu(evlist->core.user_requested_cpus);
+	bool per_cpu_mmaps = !perf_cpu_map__has_any_cpu(evlist__core(evlist)->user_requested_cpus);
 
 	if (per_cpu_mmaps) {
-		struct perf_cpu evlist_cpu = perf_cpu_map__cpu(evlist->core.all_cpus, idx);
+		struct perf_cpu evlist_cpu = perf_cpu_map__cpu(evlist__core(evlist)->all_cpus, idx);
 		int cpu_map_idx = perf_cpu_map__idx(evsel->core.cpus, evlist_cpu);
 
 		if (cpu_map_idx == -1)
@@ -1473,8 +1478,15 @@ s64 perf_event__process_auxtrace(const struct perf_tool *tool __maybe_unused,
 #define PERF_ITRACE_MAX_LAST_BRANCH_SZ		1024
 
 void itrace_synth_opts__set_default(struct itrace_synth_opts *synth_opts,
-				    bool no_sample)
+				    bool no_sample, bool single_event_per_ip)
 {
+	if (single_event_per_ip) {
+		synth_opts->instructions = true;
+		synth_opts->period_type = PERF_ITRACE_PERIOD_INSTRUCTIONS;
+		synth_opts->period = 1;
+		return;
+	}
+
 	synth_opts->branches = true;
 	synth_opts->transactions = true;
 	synth_opts->ptwrites = true;
@@ -1577,7 +1589,8 @@ int itrace_do_parse_synth_opts(struct itrace_synth_opts *synth_opts,
 
 	if (!str) {
 		itrace_synth_opts__set_default(synth_opts,
-					       synth_opts->default_no_sample);
+					       synth_opts->default_no_sample,
+					       synth_opts->default_single_event_per_ip);
 		return 0;
 	}
 
@@ -1838,7 +1851,7 @@ void perf_session__auxtrace_error_inc(struct perf_session *session,
 	struct perf_record_auxtrace_error *e = &event->auxtrace_error;
 
 	if (e->type < PERF_AUXTRACE_ERROR_MAX)
-		session->evlist->stats.nr_auxtrace_errors[e->type] += 1;
+		evlist__stats(session->evlist)->nr_auxtrace_errors[e->type] += 1;
 }
 
 void events_stats__auxtrace_error_warn(const struct events_stats *stats)
@@ -2963,6 +2976,13 @@ void auxtrace__dump_auxtrace_sample(struct perf_session *session,
 int auxtrace__flush_events(struct perf_session *session, const struct perf_tool *tool)
 {
 	if (!session->auxtrace)
+		return 0;
+
+	/*
+	 * Processing was stopped early, e.g. by SIGINT, so don't decode and
+	 * deliver the remaining trace data which can be slow.
+	 */
+	if (session_done())
 		return 0;
 
 	return session->auxtrace->flush_events(session, tool);

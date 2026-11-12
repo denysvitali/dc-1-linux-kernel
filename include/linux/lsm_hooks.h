@@ -112,6 +112,7 @@ struct lsm_blob_sizes {
 	unsigned int lbs_ipc;
 	unsigned int lbs_key;
 	unsigned int lbs_msg_msg;
+	unsigned int lbs_ns;
 	unsigned int lbs_perf_event;
 	unsigned int lbs_task;
 	unsigned int lbs_xattr_count; /* num xattr slots in new_xattrs array */
@@ -167,6 +168,7 @@ enum lsm_order {
  * @initcall_fs: LSM callback for fs_initcall setup, optional
  * @initcall_device: LSM callback for device_initcall() setup, optional
  * @initcall_late: LSM callback for late_initcall() setup, optional
+ * @initcall_late_sync: LSM callback for late_initcall_sync() setup, optional
  */
 struct lsm_info {
 	const struct lsm_id *id;
@@ -182,6 +184,7 @@ struct lsm_info {
 	int (*initcall_fs)(void);
 	int (*initcall_device)(void);
 	int (*initcall_late)(void);
+	int (*initcall_late_sync)(void);
 };
 
 #define DEFINE_LSM(lsm)							\

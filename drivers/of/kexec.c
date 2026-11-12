@@ -261,23 +261,23 @@ static int kho_add_chosen(const struct kimage *image, void *fdt, int chosen_node
 #ifdef CONFIG_KEXEC_HANDOVER
 	phys_addr_t fdt_mem = 0;
 	phys_addr_t fdt_len = 0;
-	phys_addr_t scratch_mem = 0;
-	phys_addr_t scratch_len = 0;
+	phys_addr_t bootmem_arr = 0;
+	phys_addr_t bootmem_len = 0;
 
 	ret = fdt_delprop(fdt, chosen_node, "linux,kho-fdt");
 	if (ret && ret != -FDT_ERR_NOTFOUND)
 		return ret;
-	ret = fdt_delprop(fdt, chosen_node, "linux,kho-scratch");
+	ret = fdt_delprop(fdt, chosen_node, "linux,kho-bootmem");
 	if (ret && ret != -FDT_ERR_NOTFOUND)
 		return ret;
 
-	if (!image->kho.fdt || !image->kho.scratch)
+	if (!image->kho.fdt || !image->kho.bootmem)
 		return 0;
 
 	fdt_mem = image->kho.fdt;
 	fdt_len = PAGE_SIZE;
-	scratch_mem = image->kho.scratch->mem;
-	scratch_len = image->kho.scratch->bufsz;
+	bootmem_arr = image->kho.bootmem->mem;
+	bootmem_len = image->kho.bootmem->bufsz;
 
 	pr_debug("Adding kho metadata to DT");
 
@@ -285,8 +285,8 @@ static int kho_add_chosen(const struct kimage *image, void *fdt, int chosen_node
 				       fdt_mem, fdt_len);
 	if (ret)
 		return ret;
-	ret = fdt_appendprop_addrrange(fdt, 0, chosen_node, "linux,kho-scratch",
-				       scratch_mem, scratch_len);
+	ret = fdt_appendprop_addrrange(fdt, 0, chosen_node, "linux,kho-bootmem",
+				       bootmem_arr, bootmem_len);
 
 #endif /* CONFIG_KEXEC_HANDOVER */
 	return ret;
@@ -455,6 +455,15 @@ void *of_kexec_alloc_and_setup_fdt(const struct kimage *image,
 					"linux,usable-memory-range",
 					crashk_low_res.start,
 					crashk_low_res.end - crashk_low_res.start + 1);
+			if (ret)
+				goto out;
+		}
+
+		for (int i = 0; i < crashk_cma_cnt; i++) {
+			ret = fdt_appendprop_addrrange(fdt, 0, chosen_node,
+					"linux,usable-memory-range",
+					crashk_cma_ranges[i].start,
+					crashk_cma_ranges[i].end - crashk_cma_ranges[i].start + 1);
 			if (ret)
 				goto out;
 		}

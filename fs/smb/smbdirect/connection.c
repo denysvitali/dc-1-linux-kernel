@@ -83,9 +83,9 @@ static int smbdirect_connection_rdma_event_handler(struct rdma_cm_id *id,
 		 * smbdirect_socket_schedule_cleanup[_status]() =>
 		 * smbdirect_socket_cleanup_work().
 		 *
-		 * As otherwise we'd set SMBDIRECT_SOCKET_DISCONNECTING,
-		 * but never ever get RDMA_CM_EVENT_DISCONNECTED and
-		 * never reach SMBDIRECT_SOCKET_DISCONNECTED.
+		 * As otherwise we'd set SMBDIRECT_SOCKET_DISCONNECTING
+		 * and call rdma_disconnect(), but never ever get
+		 * RDMA_CM_EVENT_DISCONNECTED.
 		 */
 		if (event->event == RDMA_CM_EVENT_DEVICE_REMOVAL)
 			smbdirect_socket_schedule_cleanup_status(sc,
@@ -113,9 +113,9 @@ static int smbdirect_connection_rdma_event_handler(struct rdma_cm_id *id,
 		 * smbdirect_socket_schedule_cleanup_status() =>
 		 * smbdirect_socket_cleanup_work().
 		 *
-		 * As otherwise we'd set SMBDIRECT_SOCKET_DISCONNECTING,
-		 * but never ever get RDMA_CM_EVENT_DISCONNECTED and
-		 * never reach SMBDIRECT_SOCKET_DISCONNECTED.
+		 * As otherwise we'd set SMBDIRECT_SOCKET_DISCONNECTING
+		 * and call rdma_disconnect(), but never ever get
+		 * RDMA_CM_EVENT_DISCONNECTED.
 		 *
 		 * This is also a normal disconnect so
 		 * SMBDIRECT_LOG_INFO should be good enough
@@ -287,7 +287,7 @@ int smbdirect_connection_create_qp(struct smbdirect_socket *sc)
 	    qp_cap.max_send_wr > sc->ib.dev->attrs.max_qp_wr) {
 		pr_err("Possible CQE overrun: max_send_wr %d\n",
 		       qp_cap.max_send_wr);
-		pr_err("device %.*s reporting max_cqe %d max_qp_wr %d\n",
+		pr_err("device %.*s reporting max_cqe %u max_qp_wr %u\n",
 		       IB_DEVICE_NAME_MAX,
 		       sc->ib.dev->name,
 		       sc->ib.dev->attrs.max_cqe,
@@ -302,7 +302,7 @@ int smbdirect_connection_create_qp(struct smbdirect_socket *sc)
 	     max_send_wr >= sc->ib.dev->attrs.max_qp_wr)) {
 		pr_err("Possible CQE overrun: rdma_send_wr %d + max_send_wr %d = %d\n",
 		       rdma_send_wr, qp_cap.max_send_wr, max_send_wr);
-		pr_err("device %.*s reporting max_cqe %d max_qp_wr %d\n",
+		pr_err("device %.*s reporting max_cqe %u max_qp_wr %u\n",
 		       IB_DEVICE_NAME_MAX,
 		       sc->ib.dev->name,
 		       sc->ib.dev->attrs.max_cqe,
@@ -316,7 +316,7 @@ int smbdirect_connection_create_qp(struct smbdirect_socket *sc)
 	    qp_cap.max_recv_wr > sc->ib.dev->attrs.max_qp_wr) {
 		pr_err("Possible CQE overrun: max_recv_wr %d\n",
 		       qp_cap.max_recv_wr);
-		pr_err("device %.*s reporting max_cqe %d max_qp_wr %d\n",
+		pr_err("device %.*s reporting max_cqe %u max_qp_wr %u\n",
 		       IB_DEVICE_NAME_MAX,
 		       sc->ib.dev->name,
 		       sc->ib.dev->attrs.max_cqe,
@@ -328,7 +328,7 @@ int smbdirect_connection_create_qp(struct smbdirect_socket *sc)
 
 	if (qp_cap.max_send_sge > sc->ib.dev->attrs.max_send_sge ||
 	    qp_cap.max_recv_sge > sc->ib.dev->attrs.max_recv_sge) {
-		pr_err("device %.*s max_send_sge/max_recv_sge = %d/%d too small\n",
+		pr_err("device %.*s max_send_sge/max_recv_sge = %u/%u too small\n",
 		       IB_DEVICE_NAME_MAX,
 		       sc->ib.dev->name,
 		       sc->ib.dev->attrs.max_send_sge,
@@ -403,12 +403,21 @@ void smbdirect_connection_destroy_qp(struct smbdirect_socket *sc)
 		sc->ib.qp = NULL;
 		rdma_destroy_qp(sc->rdma.cm_id);
 	}
+	/*
+	 * These CQs were created with ib_alloc_cq_any(), which arms an internal
+	 * completion handler (ib_cq_poll_work for IB_POLL_WORKQUEUE). They MUST be
+	 * torn down with ib_free_cq(), which cancel_work_sync()es that poll work
+	 * before freeing the CQ. ib_destroy_cq() skips that step, so a completion
+	 * posted late by the (software) provider — e.g. rxe posting an RNR error
+	 * from rxe_receiver after rdma_destroy_qp() — re-queues ib_cq_poll_work on
+	 * an already-freed CQ (KASAN slab-use-after-free in ib_cq_poll_work).
+	 */
 	if (sc->ib.recv_cq) {
-		ib_destroy_cq(sc->ib.recv_cq);
+		ib_free_cq(sc->ib.recv_cq);
 		sc->ib.recv_cq = NULL;
 	}
 	if (sc->ib.send_cq) {
-		ib_destroy_cq(sc->ib.send_cq);
+		ib_free_cq(sc->ib.send_cq);
 		sc->ib.send_cq = NULL;
 	}
 	if (sc->ib.pd) {
@@ -1520,7 +1529,7 @@ void smbdirect_connection_recv_io_done(struct ib_cq *cq, struct ib_wc *wc)
 	u32 data_length;
 	u32 remaining_data_length;
 
-	if (unlikely(wc->status != IB_WC_SUCCESS || WARN_ON_ONCE(wc->opcode != IB_WC_RECV))) {
+	if (unlikely(wc->status != IB_WC_SUCCESS || wc->opcode != IB_WC_RECV)) {
 		if (wc->status != IB_WC_WR_FLUSH_ERR)
 			smbdirect_log_rdma_recv(sc, SMBDIRECT_LOG_ERR,
 				"wc->status=%s (%d) wc->opcode=%d\n",

@@ -158,6 +158,8 @@ static bool get_ct_or_tuple_from_skb(struct net *net,
 		return true;
 
 	found_ct = nf_ct_tuplehash_to_ctrack(h);
+	*tuple = found_ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
+	*zone = nf_ct_zone(found_ct);
 	*refcounted = true;
 	*ct = found_ct;
 
@@ -249,7 +251,8 @@ check_connections:
 	list->last_gc_count = list->count;
 
 add_new_node:
-	if (WARN_ON_ONCE(list->count > INT_MAX)) {
+	if (unlikely(list->count > INT_MAX)) {
+		DEBUG_NET_WARN_ON_ONCE(1);
 		err = -EOVERFLOW;
 		goto out_put;
 	}
@@ -689,7 +692,7 @@ struct nf_conncount_data *nf_conncount_init(struct net *net, unsigned int keylen
 	    keylen == 0)
 		return ERR_PTR(-EINVAL);
 
-	data = kvzalloc_obj(*data);
+	data = kvzalloc_obj(*data, GFP_KERNEL_ACCOUNT);
 	if (!data)
 		return ERR_PTR(-ENOMEM);
 

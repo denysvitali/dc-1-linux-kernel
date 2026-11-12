@@ -707,8 +707,7 @@ static int register_chain_var(struct crypto_tfm *tfm, u8 xpad, u32 target,
 		return -EAGAIN;
 	}
 
-	memcpy(pad, key, key_len);
-	memset(pad + key_len, 0, HMAC_PAD_BLOCKLEN - key_len);
+	memcpy_and_pad(pad, HMAC_PAD_BLOCKLEN, key, key_len, 0);
 	for (i = 0; i < HMAC_PAD_BLOCKLEN; i++)
 		pad[i] ^= xpad;
 
@@ -1591,6 +1590,7 @@ static const struct of_device_id ixp4xx_crypto_of_match[] = {
 	},
 	{},
 };
+MODULE_DEVICE_TABLE(of, ixp4xx_crypto_of_match);
 
 static struct platform_driver ixp_crypto_driver = {
 	.probe = ixp_crypto_probe,

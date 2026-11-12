@@ -163,7 +163,7 @@ static int nilfs_writepages(struct address_space *mapping,
 	int err = 0;
 
 	if (sb_rdonly(inode->i_sb)) {
-		nilfs_clear_dirty_pages(mapping);
+		nilfs_clear_dirty_pages(mapping, false);
 		return -EROFS;
 	}
 
@@ -257,18 +257,6 @@ static int nilfs_write_end(const struct kiocb *iocb,
 	return err ? : copied;
 }
 
-static ssize_t
-nilfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
-{
-	struct inode *inode = file_inode(iocb->ki_filp);
-
-	if (iov_iter_rw(iter) == WRITE)
-		return 0;
-
-	/* Needs synchronization with the cleaner */
-	return blockdev_direct_IO(iocb, inode, iter, nilfs_get_block);
-}
-
 const struct address_space_operations nilfs_aops = {
 	.read_folio		= nilfs_read_folio,
 	.writepages		= nilfs_writepages,
@@ -277,7 +265,6 @@ const struct address_space_operations nilfs_aops = {
 	.write_begin		= nilfs_write_begin,
 	.write_end		= nilfs_write_end,
 	.invalidate_folio	= block_invalidate_folio,
-	.direct_IO		= nilfs_direct_IO,
 	.migrate_folio		= buffer_migrate_folio_norefs,
 	.is_partially_uptodate  = block_is_partially_uptodate,
 };
@@ -287,8 +274,7 @@ const struct address_space_operations nilfs_buffer_cache_aops = {
 };
 
 static int nilfs_insert_inode_locked(struct inode *inode,
-				     struct nilfs_root *root,
-				     unsigned long ino)
+				struct nilfs_root *root, u64 ino)
 {
 	struct nilfs_iget_args args = {
 		.ino = ino, .root = root, .cno = 0, .type = NILFS_I_TYPE_NORMAL
@@ -305,7 +291,7 @@ struct inode *nilfs_new_inode(struct inode *dir, umode_t mode)
 	struct nilfs_root *root;
 	struct buffer_head *bh;
 	int err = -ENOMEM;
-	ino_t ino;
+	u64 ino;
 
 	inode = new_inode(sb);
 	if (unlikely(!inode))
@@ -343,8 +329,6 @@ struct inode *nilfs_new_inode(struct inode *dir, umode_t mode)
 	ii->i_flags = nilfs_mask_flags(
 		mode, NILFS_I(dir)->i_flags & NILFS_FL_INHERITED);
 
-	/* ii->i_file_acl = 0; */
-	/* ii->i_dir_acl = 0; */
 	ii->i_dir_start_lookup = 0;
 	nilfs_set_inode_flags(inode);
 	inode->i_generation = get_random_u32();
@@ -423,11 +407,6 @@ int nilfs_read_inode_common(struct inode *inode,
 
 	inode->i_blocks = le64_to_cpu(raw_inode->i_blocks);
 	ii->i_flags = le32_to_cpu(raw_inode->i_flags);
-#if 0
-	ii->i_file_acl = le32_to_cpu(raw_inode->i_file_acl);
-	ii->i_dir_acl = S_ISREG(inode->i_mode) ?
-		0 : le32_to_cpu(raw_inode->i_dir_acl);
-#endif
 	ii->i_dir_start_lookup = 0;
 	inode->i_generation = le32_to_cpu(raw_inode->i_generation);
 
@@ -443,7 +422,7 @@ int nilfs_read_inode_common(struct inode *inode,
 }
 
 static int __nilfs_read_inode(struct super_block *sb,
-			      struct nilfs_root *root, unsigned long ino,
+			      struct nilfs_root *root, u64 ino,
 			      struct inode *inode)
 {
 	struct the_nilfs *nilfs = sb->s_fs_info;
@@ -482,8 +461,8 @@ static int __nilfs_read_inode(struct super_block *sb,
 			huge_decode_dev(le64_to_cpu(raw_inode->i_device_code)));
 	} else {
 		nilfs_error(sb,
-			    "invalid file type bits in mode 0%o for inode %lu",
-			    inode->i_mode, ino);
+			"invalid file type bits in mode 0%o for inode %llu",
+			inode->i_mode, ino);
 		err = -EIO;
 		goto failed_unmap;
 	}
@@ -533,7 +512,7 @@ static int nilfs_iget_set(struct inode *inode, void *opaque)
 }
 
 struct inode *nilfs_ilookup(struct super_block *sb, struct nilfs_root *root,
-			    unsigned long ino)
+			    u64 ino)
 {
 	struct nilfs_iget_args args = {
 		.ino = ino, .root = root, .cno = 0, .type = NILFS_I_TYPE_NORMAL
@@ -542,8 +521,8 @@ struct inode *nilfs_ilookup(struct super_block *sb, struct nilfs_root *root,
 	return ilookup5(sb, ino, nilfs_iget_test, &args);
 }
 
-struct inode *nilfs_iget_locked(struct super_block *sb, struct nilfs_root *root,
-				unsigned long ino)
+struct inode *nilfs_iget_locked(struct super_block *sb,
+				struct nilfs_root *root, u64 ino)
 {
 	struct nilfs_iget_args args = {
 		.ino = ino, .root = root, .cno = 0, .type = NILFS_I_TYPE_NORMAL
@@ -553,7 +532,7 @@ struct inode *nilfs_iget_locked(struct super_block *sb, struct nilfs_root *root,
 }
 
 struct inode *nilfs_iget(struct super_block *sb, struct nilfs_root *root,
-			 unsigned long ino)
+			 u64 ino)
 {
 	struct inode *inode;
 	int err;
@@ -579,8 +558,7 @@ struct inode *nilfs_iget(struct super_block *sb, struct nilfs_root *root,
 	return inode;
 }
 
-struct inode *nilfs_iget_for_gc(struct super_block *sb, unsigned long ino,
-				__u64 cno)
+struct inode *nilfs_iget_for_gc(struct super_block *sb, u64 ino, __u64 cno)
 {
 	struct nilfs_iget_args args = {
 		.ino = ino, .root = NULL, .cno = cno, .type = NILFS_I_TYPE_GC
@@ -740,7 +718,7 @@ void nilfs_write_inode_common(struct inode *inode,
 
 void nilfs_update_inode(struct inode *inode, struct buffer_head *ibh, int flags)
 {
-	ino_t ino = inode->i_ino;
+	u64 ino = inode->i_ino;
 	struct nilfs_inode_info *ii = NILFS_I(inode);
 	struct inode *ifile = ii->i_root->ifile;
 	struct nilfs_inode *raw_inode;
@@ -897,16 +875,10 @@ void nilfs_evict_inode(struct inode *inode)
 
 	nilfs_clear_inode(inode);
 
-	if (IS_SYNC(inode))
-		nilfs_set_transaction_flag(NILFS_TI_SYNC);
 	nilfs_transaction_commit(sb);
-	/*
-	 * May construct a logical segment and may fail in sync mode.
-	 * But delete_inode has no return value.
-	 */
 }
 
-int nilfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+int nilfs_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		  struct iattr *iattr)
 {
 	struct nilfs_transaction_info ti;
@@ -945,7 +917,7 @@ out_err:
 	return err;
 }
 
-int nilfs_permission(struct mnt_idmap *idmap, struct inode *inode,
+int nilfs_permission(const struct mnt_idmap *idmap, struct inode *inode,
 		     int mask)
 {
 	struct nilfs_root *root = NILFS_I(inode)->i_root;

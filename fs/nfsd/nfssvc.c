@@ -25,7 +25,10 @@
 #include <net/addrconf.h>
 #include <net/ipv6.h>
 #include <net/net_namespace.h>
+
 #include "nfsd.h"
+#include "nfserr.h"
+#include "nfs4ctl.h"
 #include "cache.h"
 #include "vfs.h"
 #include "netns.h"
@@ -38,11 +41,6 @@
 atomic_t			nfsd_th_cnt = ATOMIC_INIT(0);
 static int			nfsd(void *vrqstp);
 #if defined(CONFIG_NFSD_V2_ACL) || defined(CONFIG_NFSD_V3_ACL)
-static int			nfsd_acl_rpcbind_set(struct net *,
-						     const struct svc_program *,
-						     u32, int,
-						     unsigned short,
-						     unsigned short);
 static __be32			nfsd_acl_init_request(struct svc_rqst *,
 						const struct svc_program *,
 						struct svc_process_info *);
@@ -124,7 +122,7 @@ struct svc_program		nfsd_programs[] = {
 	.pg_class		= "nfsd",
 	.pg_authenticate	= svc_set_client,
 	.pg_init_request	= nfsd_acl_init_request,
-	.pg_rpcbind_set		= nfsd_acl_rpcbind_set,
+	.pg_rpcbind_set		= nfsd_rpcbind_set,
 	},
 #endif /* defined(CONFIG_NFSD_V2_ACL) || defined(CONFIG_NFSD_V3_ACL) */
 #if IS_ENABLED(CONFIG_NFS_LOCALIO)
@@ -204,6 +202,11 @@ int nfsd_minorversion(struct nfsd_net *nn, u32 minorversion, enum vers_op change
 	return 0;
 }
 
+bool nfsd_v4client(struct svc_rqst *rqstp)
+{
+	return rqstp && rqstp->rq_prog == NFS_PROGRAM && rqstp->rq_vers == 4;
+}
+
 bool nfsd_net_try_get(struct net *net) __must_hold(rcu)
 {
 	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
@@ -237,15 +240,21 @@ static void nfsd_net_free(struct percpu_ref *ref)
  */
 #define	NFSD_MAXSERVS		8192
 
+/**
+ * nfsd_nrthreads - report a namespace's configured nfsd thread count
+ * @net: network namespace to query
+ *
+ * Return: the configured thread ceiling, or 0 when no service runs.
+ */
 int nfsd_nrthreads(struct net *net)
 {
-	int i, rv = 0;
+	int rv = 0;
 	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
 
+	/* nfsd_mutex keeps nn->nfsd_serv valid across the read. */
 	mutex_lock(&nfsd_mutex);
 	if (nn->nfsd_serv)
-		for (i = 0; i < nn->nfsd_serv->sv_nrpools; ++i)
-			rv += nn->nfsd_serv->sv_pools[i].sp_nrthrmax;
+		rv = svc_serv_maxthreads(nn->nfsd_serv);
 	mutex_unlock(&nfsd_mutex);
 	return rv;
 }
@@ -351,7 +360,7 @@ static int nfsd_startup_net(struct net *net, const struct cred *cred)
 	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
 	int ret;
 
-	if (nn->nfsd_net_up)
+	if (test_bit(NFSD_NET_UP, &nn->flags))
 		return 0;
 
 	ret = nfsd_startup_generic();
@@ -364,11 +373,11 @@ static int nfsd_startup_net(struct net *net, const struct cred *cred)
 		goto out_socks;
 	}
 
-	if (nfsd_needs_lockd(nn) && !nn->lockd_up) {
+	if (nfsd_needs_lockd(nn) && !test_bit(NFSD_NET_LOCKD_UP, &nn->flags)) {
 		ret = lockd_up(net, cred);
 		if (ret)
 			goto out_socks;
-		nn->lockd_up = true;
+		set_bit(NFSD_NET_LOCKD_UP, &nn->flags);
 	}
 
 	ret = nfsd_file_cache_start_net(net);
@@ -386,7 +395,7 @@ static int nfsd_startup_net(struct net *net, const struct cred *cred)
 	if (ret)
 		goto out_reply_cache;
 
-	nn->nfsd_net_up = true;
+	set_bit(NFSD_NET_UP, &nn->flags);
 	return 0;
 
 out_reply_cache:
@@ -394,9 +403,9 @@ out_reply_cache:
 out_filecache:
 	nfsd_file_cache_shutdown_net(net);
 out_lockd:
-	if (nn->lockd_up) {
+	if (test_bit(NFSD_NET_LOCKD_UP, &nn->flags)) {
 		lockd_down(net);
-		nn->lockd_up = false;
+		clear_bit(NFSD_NET_LOCKD_UP, &nn->flags);
 	}
 out_socks:
 	nfsd_shutdown_generic();
@@ -407,7 +416,7 @@ static void nfsd_shutdown_net(struct net *net)
 {
 	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
 
-	if (nn->nfsd_net_up) {
+	if (test_bit(NFSD_NET_UP, &nn->flags)) {
 		percpu_ref_kill_and_confirm(&nn->nfsd_net_ref, nfsd_net_done);
 		wait_for_completion(&nn->nfsd_net_confirm_done);
 
@@ -415,18 +424,18 @@ static void nfsd_shutdown_net(struct net *net)
 		nfs4_state_shutdown_net(net);
 		nfsd_reply_cache_shutdown(nn);
 		nfsd_file_cache_shutdown_net(net);
-		if (nn->lockd_up) {
+		if (test_bit(NFSD_NET_LOCKD_UP, &nn->flags)) {
 			lockd_down(net);
-			nn->lockd_up = false;
+			clear_bit(NFSD_NET_LOCKD_UP, &nn->flags);
 		}
 		wait_for_completion(&nn->nfsd_net_free_done);
 	}
 
 	percpu_ref_exit(&nn->nfsd_net_ref);
 
-	if (nn->nfsd_net_up)
+	if (test_bit(NFSD_NET_UP, &nn->flags))
 		nfsd_shutdown_generic();
-	nn->nfsd_net_up = false;
+	clear_bit(NFSD_NET_UP, &nn->flags);
 }
 
 static DEFINE_SPINLOCK(nfsd_notifier_lock);
@@ -593,7 +602,14 @@ struct svc_rqst *nfsd_current_rqst(void)
 	return NULL;
 }
 
-int nfsd_create_serv(struct net *net)
+/**
+ * nfsd_create_serv - create the svc_serv for a namespace if it has none
+ * @net: network namespace to operate within
+ * @no_rpcbind: true if the caller registers the listeners with rpcbind
+ *
+ * Return: 0 on success or a negative errno.
+ */
+int nfsd_create_serv(struct net *net, bool no_rpcbind)
 {
 	int error;
 	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
@@ -620,6 +636,9 @@ int nfsd_create_serv(struct net *net)
 		percpu_ref_exit(&nn->nfsd_net_ref);
 		return -ENOMEM;
 	}
+
+	/* svc_bind() reads this, so set it first. */
+	serv->sv_no_rpcbind = no_rpcbind;
 
 	error = svc_bind(serv, net);
 	if (error < 0) {
@@ -649,7 +668,7 @@ int nfsd_nrpools(struct net *net)
 	if (nn->nfsd_serv == NULL)
 		return 0;
 	else
-		return nn->nfsd_serv->sv_nrpools;
+		return svc_serv_nrpools(nn->nfsd_serv);
 }
 
 int nfsd_get_nrthreads(int n, int *nthreads, struct net *net)
@@ -659,7 +678,7 @@ int nfsd_get_nrthreads(int n, int *nthreads, struct net *net)
 	int i;
 
 	if (serv)
-		for (i = 0; i < serv->sv_nrpools && i < n; i++)
+		for (i = 0; i < svc_serv_nrpools(serv) && i < n; i++)
 			nthreads[i] = serv->sv_pools[i].sp_nrthrmax;
 	return 0;
 }
@@ -693,8 +712,8 @@ int nfsd_set_nrthreads(int n, int *nthreads, struct net *net)
 	if (n == 1)
 		return svc_set_num_threads(nn->nfsd_serv, nn->min_threads, nthreads[0]);
 
-	if (n > nn->nfsd_serv->sv_nrpools)
-		n = nn->nfsd_serv->sv_nrpools;
+	if (n > svc_serv_nrpools(nn->nfsd_serv))
+		n = svc_serv_nrpools(nn->nfsd_serv);
 
 	/* enforce a global maximum number of threads */
 	tot = 0;
@@ -725,7 +744,7 @@ int nfsd_set_nrthreads(int n, int *nthreads, struct net *net)
 	}
 
 	/* Anything undefined in array is considered to be 0 */
-	for (i = n; i < nn->nfsd_serv->sv_nrpools; ++i) {
+	for (i = n; i < svc_serv_nrpools(nn->nfsd_serv); ++i) {
 		err = svc_set_pool_threads(nn->nfsd_serv,
 					   &nn->nfsd_serv->sv_pools[i],
 					   0, 0);
@@ -761,7 +780,7 @@ nfsd_svc(int n, int *nthreads, struct net *net, const struct cred *cred, const c
 	strscpy(nn->nfsd_name, scope ? scope : utsname()->nodename,
 		sizeof(nn->nfsd_name));
 
-	error = nfsd_create_serv(net);
+	error = nfsd_create_serv(net, false);
 	if (error)
 		goto out;
 	serv = nn->nfsd_serv;
@@ -789,18 +808,6 @@ nfsd_support_acl_version(int vers)
 	return false;
 }
 
-static int
-nfsd_acl_rpcbind_set(struct net *net, const struct svc_program *progp,
-		     u32 version, int family, unsigned short proto,
-		     unsigned short port)
-{
-	if (!nfsd_support_acl_version(version) ||
-	    !nfsd_vers(net_generic(net, nfsd_net_id), version, NFSD_TEST))
-		return 0;
-	return svc_generic_rpcbind_set(net, progp, version, family,
-			proto, port);
-}
-
 static __be32
 nfsd_acl_init_request(struct svc_rqst *rqstp,
 		      const struct svc_program *progp,
@@ -815,7 +822,7 @@ nfsd_acl_init_request(struct svc_rqst *rqstp,
 
 	ret->mismatch.lovers = NFSD_ACL_NRVERS;
 	for (i = NFSD_ACL_MINVERS; i < NFSD_ACL_NRVERS; i++) {
-		if (nfsd_support_acl_version(rqstp->rq_vers) &&
+		if (nfsd_support_acl_version(i) &&
 		    nfsd_vers(nn, i, NFSD_TEST)) {
 			ret->mismatch.lovers = i;
 			break;
@@ -825,7 +832,7 @@ nfsd_acl_init_request(struct svc_rqst *rqstp,
 		return rpc_prog_unavail;
 	ret->mismatch.hivers = NFSD_ACL_MINVERS;
 	for (i = NFSD_ACL_NRVERS - 1; i >= NFSD_ACL_MINVERS; i--) {
-		if (nfsd_support_acl_version(rqstp->rq_vers) &&
+		if (nfsd_support_acl_version(i) &&
 		    nfsd_vers(nn, i, NFSD_TEST)) {
 			ret->mismatch.hivers = i;
 			break;
@@ -835,12 +842,43 @@ nfsd_acl_init_request(struct svc_rqst *rqstp,
 }
 #endif
 
+/**
+ * nfsd_version_registerable - would nfsd register [@progp, @version]?
+ * @net: network namespace to query
+ * @progp: RPC program to query
+ * @version: RPC version to query
+ *
+ * Answers the question for a listener of any protocol. A caller that asks
+ * about one listener must apply vs_need_cong_ctrl itself.
+ *
+ * Return: true when the version is a candidate for rpcbind registration.
+ */
+bool nfsd_version_registerable(struct net *net,
+			       const struct svc_program *progp, u32 version)
+{
+	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
+
+	/*
+	 * nfsd_acl_version[] is built by CONFIG_NFSD_V2_ACL and
+	 * CONFIG_NFSD_V3_ACL, so a NULL entry already answers for nfsacl and
+	 * nfsd_support_acl_version() would add nothing here.
+	 */
+	if (version >= progp->pg_nvers || !progp->pg_vers[version])
+		return false;
+
+	/* nfslocalio is hidden and never reaches rpcbind. */
+	if (progp->pg_vers[version]->vs_hidden)
+		return false;
+
+	return nfsd_vers(nn, version, NFSD_TEST);
+}
+
 static int
 nfsd_rpcbind_set(struct net *net, const struct svc_program *progp,
 		 u32 version, int family, unsigned short proto,
 		 unsigned short port)
 {
-	if (!nfsd_vers(net_generic(net, nfsd_net_id), version, NFSD_TEST))
+	if (!nfsd_version_registerable(net, progp, version))
 		return 0;
 	return svc_generic_rpcbind_set(net, progp, version, family,
 			proto, port);
@@ -960,6 +998,20 @@ nfsd(void *vrqstp)
 	return 0;
 }
 
+/*
+ * Set rq_status_counter back to an even value, indicating that the rqstp
+ * fields are no longer meaningful to a lockless reader. This pairs with the
+ * odd-valued store made once the request has been decoded, and must run on
+ * every return path that follows it so that the seq-lock like protocol used
+ * by nfsd_nl_rpc_status_get_dumpit() is not left permanently odd. The store
+ * also advances the counter so a concurrent reader detects the transition.
+ */
+static void nfsd_status_counter_set_idle(struct svc_rqst *rqstp)
+{
+	smp_store_release(&rqstp->rq_status_counter,
+			  (rqstp->rq_status_counter | 1) + 1);
+}
+
 /**
  * nfsd_dispatch - Process an NFS or NFSACL or LOCALIO Request
  * @rqstp: incoming request
@@ -1022,14 +1074,9 @@ int nfsd_dispatch(struct svc_rqst *rqstp)
 	if (!proc->pc_encode(rqstp, &rqstp->rq_res_stream))
 		goto out_encode_err;
 
-	/*
-	 * Release rq_status_counter setting it to an even value after the rpc
-	 * request has been properly processed.
-	 */
-	smp_store_release(&rqstp->rq_status_counter, rqstp->rq_status_counter + 1);
-
 	nfsd_cache_update(rqstp, rp, ntli->ntli_cachetype, nfs_reply);
 out_cached_reply:
+	nfsd_status_counter_set_idle(rqstp);
 	return 1;
 
 out_decode_err:
@@ -1040,12 +1087,14 @@ out_decode_err:
 out_update_drop:
 	nfsd_cache_update(rqstp, rp, RC_NOCACHE, NULL);
 out_dropit:
+	nfsd_status_counter_set_idle(rqstp);
 	return 0;
 
 out_encode_err:
 	trace_nfsd_cant_encode_err(rqstp);
 	nfsd_cache_update(rqstp, rp, RC_NOCACHE, NULL);
 	*statp = rpc_system_err;
+	nfsd_status_counter_set_idle(rqstp);
 	return 1;
 }
 

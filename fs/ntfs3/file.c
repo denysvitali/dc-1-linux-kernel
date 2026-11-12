@@ -20,6 +20,7 @@
 #include "debug.h"
 #include "ntfs.h"
 #include "ntfs_fs.h"
+#include <trace/events/ntfs3.h>
 
 /*
  * cifx, btrfs, exfat, ext4, f2fs use this constant.
@@ -129,7 +130,7 @@ int ntfs_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 /*
  * ntfs_fileattr_set - inode_operations::fileattr_set
  */
-int ntfs_fileattr_set(struct mnt_idmap *idmap, struct dentry *dentry,
+int ntfs_fileattr_set(const struct mnt_idmap *idmap, struct dentry *dentry,
 		      struct file_kattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
@@ -182,6 +183,9 @@ static int ntfs_ioctl_set_volume_label(struct ntfs_sb_info *sbi, u8 __user *buf)
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+
+	if (sb_rdonly(sbi->sb))
+		return -EROFS;
 
 	if (copy_from_user(user, buf, FSLABEL_MAX))
 		return -EFAULT;
@@ -261,7 +265,7 @@ long ntfs_compat_ioctl(struct file *filp, u32 cmd, unsigned long arg)
 /*
  * ntfs_getattr - inode_operations::getattr
  */
-int ntfs_getattr(struct mnt_idmap *idmap, const struct path *path,
+int ntfs_getattr(const struct mnt_idmap *idmap, const struct path *path,
 		 struct kstat *stat, u32 request_mask, u32 flags)
 {
 	struct inode *inode = d_inode(path->dentry);
@@ -703,7 +707,7 @@ out:
 /*
  * ntfs_setattr - inode_operations::setattr
  */
-int ntfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+int ntfs_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		 struct iattr *attr)
 {
 	struct inode *inode = d_inode(dentry);
@@ -753,7 +757,9 @@ int ntfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 
 	setattr_copy(idmap, inode, attr);
 
-	if (mode != inode->i_mode) {
+	if (!is_ni_base(ni)) {
+		ia_valid &= ~ATTR_SIZE;
+	} else if (mode != inode->i_mode) {
 		err = ntfs_acl_chmod(idmap, dentry);
 		if (err)
 			goto out;
@@ -820,14 +826,32 @@ static ssize_t ntfs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	size_t bytes = iov_iter_count(iter);
 	loff_t valid, i_size, vbo, end;
 	unsigned int dio_flags;
-	ssize_t err;
+	ssize_t ret;
 
-	err = check_read_restriction(inode);
-	if (err)
-		return err;
+	trace_ntfs3_file_read_iter(iocb, iter);
+
+	ret = check_read_restriction(inode);
+	if (ret)
+		return ret;
 
 	if (!bytes)
 		return 0; /* skip atime */
+
+	if (ni->file.ads.len == ARRAY_SIZE(QUERY_STREAMS) &&
+	    !memcmp(ni->file.ads.name, QUERY_STREAMS, sizeof(QUERY_STREAMS))) {
+		/* Query ADS. */
+		if (unlikely(iocb->ki_flags & IOCB_DIRECT)) {
+			ntfs_inode_warn(
+				inode,
+				"direct I/O for streams is not supported");
+			return -EOPNOTSUPP;
+		}
+
+		inode_lock_shared(inode);
+		ret = ni_query_ads(ni, &iocb->ki_pos, iter);
+		inode_unlock_shared(inode);
+		return ret;
+	}
 
 	if (is_compressed(ni)) {
 		if (iocb->ki_flags & IOCB_DIRECT) {
@@ -867,17 +891,17 @@ static ssize_t ntfs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 
 		if (ni->file.run_da.count) {
 			/* Direct I/O is not compatible with delalloc. */
-			err = ni_allocate_da_blocks(ni);
-			if (err)
+			ret = ni_allocate_da_blocks(ni);
+			if (ret)
 				goto out;
 		}
 
-		err = iomap_dio_rw(iocb, iter, &ntfs_iomap_ops, NULL, dio_flags,
+		ret = iomap_dio_rw(iocb, iter, &ntfs_iomap_ops, NULL, dio_flags,
 				   NULL, 0);
 
-		if (err <= 0)
+		if (ret <= 0)
 			goto out;
-		end = vbo + err;
+		end = vbo + ret;
 		if (valid < end) {
 			size_t to_zero = end - valid;
 			/* Fix iter. */
@@ -889,35 +913,36 @@ static ssize_t ntfs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 			bytes = i_size - vbo;
 		iov_iter_zero(bytes, iter);
 		iocb->ki_pos += bytes;
-		err = bytes;
+		ret = bytes;
 	}
 
 out:
 	inode_unlock_shared(inode);
-	file_accessed(iocb->ki_filp);
-	return err;
+	file_accessed(file);
+	return ret;
 }
 
 /*
  * ntfs_file_splice_read - file_operations::splice_read
  */
-static ssize_t ntfs_file_splice_read(struct file *in, loff_t *ppos,
+static ssize_t ntfs_file_splice_read(struct file *file, loff_t *ppos,
 				     struct pipe_inode_info *pipe, size_t len,
 				     unsigned int flags)
 {
-	struct inode *inode = file_inode(in);
-	ssize_t err;
+	struct inode *inode = file_inode(file);
+	struct ntfs_inode *ni = ntfs_i(inode);
+	ssize_t ret;
 
-	err = check_read_restriction(inode);
-	if (err)
-		return err;
+	ret = check_read_restriction(inode);
+	if (ret)
+		return ret;
 
-	if (is_compressed(ntfs_i(inode))) {
+	if (is_compressed(ni)) {
 		/* Turn off readahead for compressed files. */
-		in->f_ra.ra_pages = 0;
+		file->f_ra.ra_pages = 0;
 	}
 
-	return filemap_splice_read(in, ppos, pipe, len, flags);
+	return filemap_splice_read(file, ppos, pipe, len, flags);
 }
 
 /*
@@ -1225,6 +1250,8 @@ static ssize_t ntfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	loff_t vbo, endbyte;
 	ssize_t ret, err;
 
+	trace_ntfs3_file_write_iter(iocb, from);
+
 	if (!inode_trylock(inode)) {
 		if (iocb->ki_flags & IOCB_NOWAIT)
 			return -EAGAIN;
@@ -1420,7 +1447,8 @@ static int ntfs_file_release(struct inode *inode, struct file *file)
 		down_write(&ni->file.run_lock);
 
 		/* Deallocate preallocated. */
-		err = attr_set_size_ex(ni, ATTR_DATA, NULL, 0, &ni->file.run,
+		err = attr_set_size_ex(ni, ATTR_DATA, ni->file.ads.name,
+				       ni->file.ads.len, &ni->file.run,
 				       inode->i_size, &ni->i_valid, false, NULL,
 				       true);
 

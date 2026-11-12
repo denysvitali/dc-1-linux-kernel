@@ -879,7 +879,7 @@ struct platform_device *ci_hdrc_add_device(struct device *dev,
 	}
 
 	pdev->dev.parent = dev;
-	device_set_of_node_from_dev(&pdev->dev, dev);
+	platform_device_set_of_node_from_dev(pdev, dev);
 
 	ret = platform_device_add_resources(pdev, res, nres);
 	if (ret)
@@ -1041,7 +1041,7 @@ static int ci_hdrc_probe(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	ci = devm_kzalloc(dev, sizeof(*ci), GFP_KERNEL);
+	ci = devm_kzalloc_obj(dev, *ci);
 	if (!ci)
 		return -ENOMEM;
 

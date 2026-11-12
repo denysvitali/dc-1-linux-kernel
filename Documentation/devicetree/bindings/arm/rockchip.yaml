@@ -66,10 +66,23 @@ properties:
               - anbernic,rg-ds
           - const: rockchip,rk3568
 
+      - description: Anbernic RK3576 Handheld Gaming Console
+        items:
+          - enum:
+              - anbernic,rg-vita-pro
+          - const: rockchip,rk3576
+
       - description: Ariaboard Photonicat
         items:
           - const: ariaboard,photonicat
           - const: rockchip,rk3568
+
+      - description: ArmSoM CM5 Module based boards
+        items:
+          - enum:
+              - armsom,cm5-io
+          - const: armsom,cm5
+          - const: rockchip,rk3576
 
       - description: ArmSoM Sige1 board
         items:
@@ -162,6 +175,18 @@ properties:
           - const: coolpi,pi-4b
           - const: rockchip,rk3588s
 
+      - description: DFRobot UNIHIKER M10 V1.2
+        items:
+          - const: dfrobot,unihiker-m10-v1.2
+          - const: rockchip,rk3308
+
+      - description: Alientek CLRV1126F SoM based boards
+        items:
+          - enum:
+              - alientek,dlrv1126
+          - const: alientek,clrv1126f
+          - const: rockchip,rv1126
+
       - description: Edgeble Neural Compute Module 2(Neu2) SoM based boards
         items:
           - const: edgeble,neural-compute-module-2-io   # Edgeble Neural Compute Module 2 IO Board
@@ -190,6 +215,18 @@ properties:
         items:
           - const: embedfire,lubancat-2
           - const: rockchip,rk3568
+
+      - description: EmbedFire LubanCat 4
+        items:
+          - const: embedfire,lubancat-4
+          - const: rockchip,rk3588s
+
+      - description: EmbedFire LubanCat 5IO
+        items:
+          - enum:
+              - embedfire,lubancat-5io
+          - const: embedfire,lubancat-5-btb
+          - const: rockchip,rk3588
 
       - description: Engicam PX30.Core C.TOUCH 2.0
         items:
@@ -315,6 +352,13 @@ properties:
               - friendlyarm,nanopi-r2s-plus
           - const: rockchip,rk3328
 
+      - description: FriendlyElec NanoPi RK3528 series boards
+        items:
+          - enum:
+              - friendlyarm,nanopi-r28s
+              - friendlyarm,nanopi-zero2
+          - const: rockchip,rk3528
+
       - description: FriendlyElec NanoPi R3S
         items:
           - const: friendlyarm,nanopi-r3s
@@ -344,9 +388,10 @@ properties:
               - friendlyarm,nanopi-r5s
           - const: rockchip,rk3568
 
-      - description: FriendlyElec NanoPi R6 series boards
+      - description: FriendlyElec NanoPi6 series boards
         items:
           - enum:
+              - friendlyarm,nanopi-m6
               - friendlyarm,nanopi-r6c
               - friendlyarm,nanopi-r6s
           - const: rockchip,rk3588s
@@ -355,11 +400,6 @@ properties:
         items:
           - const: friendlyarm,nanopi-r76s
           - const: rockchip,rk3576
-
-      - description: FriendlyElec NanoPi Zero2
-        items:
-          - const: friendlyarm,nanopi-zero2
-          - const: rockchip,rk3528
 
       - description: FriendlyElec NanoPC T6 series boards
         items:
@@ -684,6 +724,12 @@ properties:
           - const: google,veyron
           - const: rockchip,rk3288
 
+      - description: Graperain G3568 series board
+        items:
+          - enum:
+              - graperain,g3568-v2
+          - const: rockchip,rk3568
+
       - description: H96 Max V58 TV Box
         items:
           - const: haochuangyi,h96-max-v58
@@ -723,6 +769,11 @@ properties:
         items:
           - const: hardkernel,odroid-m2
           - const: rockchip,rk3588s
+
+      - description: HINLINK H28K
+        items:
+          - const: hinlink,h28k
+          - const: rockchip,rk3528
 
       - description: HINLINK H66K / H68K
         items:
@@ -779,6 +830,16 @@ properties:
           - const: lckfb,tspi-rk3566
           - const: rockchip,rk3566
 
+      - description: LCKFB Taishan Pi 3M RK3576
+        items:
+          - const: lckfb,tspi-3m-rk3576
+          - const: rockchip,rk3576
+
+      - description: LincPlus LincStation E1
+        items:
+          - const: techvision,tvd8322r
+          - const: rockchip,rk3568
+
       - description: LinkEase EasePi R1
         items:
           - const: linkease,easepi-r1
@@ -797,6 +858,11 @@ properties:
               - lunzn,fastrhino-r66s
               - lunzn,fastrhino-r68s
           - const: rockchip,rk3568
+
+      - description: MangoPi M28K
+        items:
+          - const: widora,mangopi-m28k
+          - const: rockchip,rk3528
 
       - description: mqmaker MiQi
         items:
@@ -959,9 +1025,11 @@ properties:
           - const: radxa,e20c
           - const: rockchip,rk3528
 
-      - description: Radxa E52C
+      - description: Radxa E52C/E54C
         items:
-          - const: radxa,e52c
+          - enum:
+              - radxa,e52c
+              - radxa,e54c
           - const: rockchip,rk3582
           - const: rockchip,rk3588s
 
@@ -1290,9 +1358,11 @@ properties:
           - const: tsd,rk3588-jaguar
           - const: rockchip,rk3588
 
-      - description: Theobroma Systems RK3588-Q7 with Haikou baseboard
+      - description: Theobroma Systems RK3588-Q7 with baseboards
         items:
-          - const: tsd,rk3588-tiger-haikou
+          - enum:
+              - tsd,rk3588-tiger-displayport-carrier
+              - tsd,rk3588-tiger-haikou
           - const: tsd,rk3588-tiger
           - const: rockchip,rk3588
 
@@ -1304,6 +1374,21 @@ properties:
       - description: Turing RK1
         items:
           - const: turing,rk1
+          - const: rockchip,rk3588
+
+      - description: Vicharak Axon
+        items:
+          - const: vicharak,axon
+          - const: rockchip,rk3588
+
+      - description: Vicharak Vaaman
+        items:
+          - const: vicharak,vaaman
+          - const: rockchip,rk3399
+
+      - description: Vicharak Vaaman2
+        items:
+          - const: vicharak,vaaman2
           - const: rockchip,rk3588
 
       - description: WolfVision PF5 mainboard
@@ -1338,6 +1423,7 @@ properties:
         items:
           - enum:
               - xunlong,orangepi-5
+              - xunlong,orangepi-5-pro
               - xunlong,orangepi-5b
           - const: rockchip,rk3588s
 
@@ -1346,6 +1432,11 @@ properties:
           - const: xunlong,orangepi-cm5-base
           - const: xunlong,orangepi-cm5
           - const: rockchip,rk3588s
+
+      - description: Youyeetoo YY3588
+        items:
+          - const: youyeetoo,yy3588
+          - const: rockchip,rk3588
 
       - description: Zkmagic A95X Z2
         items:

@@ -598,7 +598,7 @@ static int fpc202_probe(struct i2c_client *client)
 	struct fpc202_priv *priv;
 	int ret, port_id, led_id;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -718,7 +718,7 @@ static void fpc202_remove(struct i2c_client *client)
 
 static const struct of_device_id fpc202_of_match[] = {
 	{ .compatible = "ti,fpc202" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, fpc202_of_match);
 

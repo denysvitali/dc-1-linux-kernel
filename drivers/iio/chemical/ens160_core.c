@@ -283,12 +283,7 @@ static int ens160_set_trigger_state(struct iio_trigger *trig, bool state)
 				ENS160_REG_CONFIG_INTDAT |
 				ENS160_REG_CONFIG_INT_CFG;
 
-	if (state)
-		return regmap_set_bits(data->regmap, ENS160_REG_CONFIG,
-				       int_bits);
-	else
-		return regmap_clear_bits(data->regmap, ENS160_REG_CONFIG,
-					 int_bits);
+	return regmap_assign_bits(data->regmap, ENS160_REG_CONFIG, int_bits, state);
 }
 
 static const struct iio_trigger_ops ens160_trigger_ops = {
@@ -320,7 +315,7 @@ static int ens160_setup_trigger(struct iio_dev *indio_dev, int irq)
 			       IRQF_NO_THREAD, indio_dev->name,
 			       indio_dev->trig);
 	if (ret)
-		return dev_err_probe(dev, ret, "failed to request irq\n");
+		return ret;
 
 	return 0;
 }

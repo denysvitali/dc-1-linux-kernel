@@ -44,7 +44,6 @@
 #include "dm.h"
 #include "mlx5_ib.h"
 #include "umr.h"
-#include "data_direct.h"
 #include "dmah.h"
 
 static int mkey_max_umr_order(struct mlx5_ib_dev *dev)
@@ -339,7 +338,7 @@ static int mlx5r_build_frmr_key(struct ib_device *device,
 	return 0;
 }
 
-static struct ib_frmr_pool_ops mlx5r_frmr_pool_ops = {
+static const struct ib_frmr_pool_ops mlx5r_frmr_pool_ops = {
 	.create_frmrs = mlx5r_create_mkeys,
 	.destroy_frmrs = mlx5r_destroy_mkeys,
 	.build_key = mlx5r_build_frmr_key,
@@ -587,7 +586,7 @@ static struct mlx5_ib_mr *reg_create(struct ib_pd *pd, struct ib_umem *umem,
 				      populate ? pd : dev->umrc.pd);
 	/* In case a data direct flow, overwrite the pdn field by its internal kernel PD */
 	if (umem->is_dmabuf && ksm_mode)
-		MLX5_SET(mkc, mkc, pd, dev->ddr.pdn);
+		MLX5_SET(mkc, mkc, pd, dev->mdev->data_direct->pdn);
 
 	MLX5_SET(mkc, mkc, free, !populate);
 	MLX5_SET(mkc, mkc, access_mode_1_0, access_mode);
@@ -898,8 +897,8 @@ static void mlx5_ib_dmabuf_invalidate_cb(struct dma_buf_attachment *attach)
 	ib_umem_dmabuf_unmap_pages(umem_dmabuf);
 }
 
-static struct dma_buf_attach_ops mlx5_ib_dmabuf_attach_ops = {
-	.allow_peer2peer = 1,
+static const struct dma_buf_attach_ops mlx5_ib_dmabuf_attach_ops = {
+	.allow_peer2peer = true,
 	.invalidate_mappings = mlx5_ib_dmabuf_invalidate_cb,
 };
 
@@ -997,7 +996,7 @@ reg_user_mr_dmabuf_by_data_direct(struct ib_pd *pd, u64 offset,
 		return ERR_PTR(-EOPNOTSUPP);
 
 	mutex_lock(&dev->data_direct_lock);
-	data_direct_dev = dev->data_direct_dev;
+	data_direct_dev = mlx5_data_direct_get_dev(dev->mdev->data_direct);
 	if (!data_direct_dev) {
 		ret = -EINVAL;
 		goto end;
@@ -1006,7 +1005,7 @@ reg_user_mr_dmabuf_by_data_direct(struct ib_pd *pd, u64 offset,
 	/* If no device's 'data direct mkey' with RO flags exists
 	 * mask it out accordingly.
 	 */
-	if (!dev->ddr.mkey_ro_valid)
+	if (!dev->mdev->data_direct->mkey_ro_valid)
 		access_flags &= ~IB_ACCESS_RELAXED_ORDERING;
 	crossed_mr = reg_user_mr_dmabuf(pd, &data_direct_dev->pdev->dev,
 					offset, length, virt_addr, fd,

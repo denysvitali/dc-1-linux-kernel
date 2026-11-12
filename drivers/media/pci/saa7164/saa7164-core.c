@@ -742,35 +742,6 @@ u32 saa7164_getcurrentfirmwareversion(struct saa7164_dev *dev)
 	return reg;
 }
 
-/* TODO: Debugging func, remove */
-void saa7164_dumpregs(struct saa7164_dev *dev, u32 addr)
-{
-	int i;
-
-	dprintk(1, "--------------------> 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f\n");
-
-	for (i = 0; i < 0x100; i += 16)
-		dprintk(1, "region0[0x%08x] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-			i,
-			(u8)saa7164_readb(addr + i + 0),
-			(u8)saa7164_readb(addr + i + 1),
-			(u8)saa7164_readb(addr + i + 2),
-			(u8)saa7164_readb(addr + i + 3),
-			(u8)saa7164_readb(addr + i + 4),
-			(u8)saa7164_readb(addr + i + 5),
-			(u8)saa7164_readb(addr + i + 6),
-			(u8)saa7164_readb(addr + i + 7),
-			(u8)saa7164_readb(addr + i + 8),
-			(u8)saa7164_readb(addr + i + 9),
-			(u8)saa7164_readb(addr + i + 10),
-			(u8)saa7164_readb(addr + i + 11),
-			(u8)saa7164_readb(addr + i + 12),
-			(u8)saa7164_readb(addr + i + 13),
-			(u8)saa7164_readb(addr + i + 14),
-			(u8)saa7164_readb(addr + i + 15)
-			);
-}
-
 static void saa7164_dump_hwdesc(struct saa7164_dev *dev)
 {
 	dprintk(1, "@0x%p hwdesc sizeof(struct tmComResHWDescr) = %d bytes\n",
@@ -856,7 +827,7 @@ static void saa7164_get_descriptors(struct saa7164_dev *dev)
 		saa7164_dump_hwdesc(dev);
 
 	if (dev->intfdesc.bLength != sizeof(struct tmComResInterfaceDescr)) {
-		printk(KERN_ERR "struct struct tmComResInterfaceDescr is mangled\n");
+		printk(KERN_ERR "struct tmComResInterfaceDescr is mangled\n");
 		printk(KERN_ERR "Need %x got %d\n", dev->intfdesc.bLength,
 			(u32)sizeof(struct tmComResInterfaceDescr));
 	} else
@@ -878,6 +849,9 @@ static int get_resources(struct saa7164_dev *dev)
 		if (request_mem_region(pci_resource_start(dev->pci, 2),
 			pci_resource_len(dev->pci, 2), dev->name))
 			return 0;
+
+		release_mem_region(pci_resource_start(dev->pci, 0),
+				   pci_resource_len(dev->pci, 0));
 	}
 
 	printk(KERN_ERR "%s: can't get MMIO memory @ 0x%llx or 0x%llx\n",
@@ -1000,8 +974,7 @@ static int saa7164_dev_setup(struct saa7164_dev *dev)
 		       dev->name, dev->pci->subsystem_vendor,
 		       dev->pci->subsystem_device);
 
-		saa7164_devcount--;
-		return -ENODEV;
+		goto err_devlist;
 	}
 
 	/* PCI/e allocations */
@@ -1039,7 +1012,7 @@ err_ioremap_bar2:
 	iounmap(dev->lmmio);
 err_ioremap_bar0:
 	release_resources(dev);
-
+err_devlist:
 	scoped_guard(mutex, &devlist) {
 		list_del(&dev->devlist);
 	}
@@ -1342,7 +1315,6 @@ static int saa7164_initdev(struct pci_dev *pci_dev,
 		}
 
 		saa7164_get_descriptors(dev);
-		saa7164_dumpregs(dev, 0);
 		saa7164_getcurrentfirmwareversion(dev);
 		saa7164_getfirmwarestatus(dev);
 		err = saa7164_bus_setup(dev);
@@ -1535,10 +1507,7 @@ static void saa7164_finidev(struct pci_dev *pci_dev)
 static const struct pci_device_id saa7164_pci_tbl[] = {
 	{
 		/* SAA7164 */
-		.vendor       = 0x1131,
-		.device       = 0x7164,
-		.subvendor    = PCI_ANY_ID,
-		.subdevice    = PCI_ANY_ID,
+		PCI_DEVICE(0x1131, 0x7164),
 	}, {
 		/* --- end of list --- */
 	}

@@ -26,10 +26,10 @@
 	(hbg_queue_used_num((head), (tail), (ring)) == 0)
 #define hbg_queue_is_full(head, tail, ring) \
 	(hbg_queue_left_num((head), (tail), (ring)) == 0)
-#define hbg_queue_next_prt(p, ring) (((p) + 1) % (ring)->len)
+#define hbg_queue_next_ptr(p, ring) (((p) + 1) % (ring)->len)
 #define hbg_queue_move_next(p, ring) ({ \
 	typeof(ring) _ring = (ring); \
-	_ring->p = hbg_queue_next_prt(_ring->p, _ring); })
+	_ring->p = hbg_queue_next_ptr(_ring->p, _ring); })
 
 #define hbg_get_page_order(ring) ({ \
 	typeof(ring) _ring = (ring); \
@@ -155,6 +155,7 @@ netdev_tx_t hbg_net_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 	buffer->skb = skb;
 	buffer->skb_len = skb->len;
 	if (unlikely(hbg_dma_map(buffer))) {
+		buffer->skb = NULL;
 		dev_kfree_skb_any(skb);
 		return NETDEV_TX_OK;
 	}
@@ -166,7 +167,7 @@ netdev_tx_t hbg_net_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 	/* This smp_store_release() pairs with smp_load_acquire() in
 	 * hbg_napi_tx_recycle() called in tx interrupt handle process.
 	 */
-	smp_store_release(&ring->ntu, hbg_queue_next_prt(ntu, ring));
+	smp_store_release(&ring->ntu, hbg_queue_next_ptr(ntu, ring));
 	dev_sw_netstats_tx_add(netdev, 1, skb->len);
 	return NETDEV_TX_OK;
 }
@@ -219,7 +220,7 @@ static int hbg_napi_tx_recycle(struct napi_struct *napi, int budget)
 			break;
 
 		hbg_buffer_free(buffer);
-		ntc = hbg_queue_next_prt(ntc, ring);
+		ntc = hbg_queue_next_ptr(ntc, ring);
 		packet_done++;
 	}
 
@@ -534,7 +535,7 @@ next_buffer:
 	return packet_done;
 }
 
-static void hbg_ring_page_pool_destory(struct hbg_ring *ring)
+static void hbg_ring_page_pool_destroy(struct hbg_ring *ring)
 {
 	if (!ring->page_pool)
 		return;
@@ -553,7 +554,7 @@ static int hbg_ring_page_pool_init(struct hbg_priv *priv, struct hbg_ring *ring)
 		.nid = dev_to_node(&priv->pdev->dev),
 		.dev = &priv->pdev->dev,
 		.napi = &ring->napi,
-		.dma_dir = DMA_FROM_DEVICE,
+		.dma_dir = DMA_BIDIRECTIONAL,
 		.offset = 0,
 		.max_len = hbg_get_page_size(ring),
 	};
@@ -588,7 +589,7 @@ static void hbg_ring_uninit(struct hbg_ring *ring)
 		buffer->priv = NULL;
 	}
 
-	hbg_ring_page_pool_destory(ring);
+	hbg_ring_page_pool_destroy(ring);
 	dma_free_coherent(&ring->priv->pdev->dev,
 			  ring->len * sizeof(*ring->queue),
 			  ring->queue, ring->queue_dma);

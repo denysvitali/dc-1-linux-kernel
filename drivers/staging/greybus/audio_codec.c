@@ -311,8 +311,7 @@ int gbaudio_module_update(struct gbaudio_codec_info *codec,
 	}
 
 	/* parse dai_id from AIF widget's stream_name */
-	ret = sscanf(w->sname, "%s %d %s", intf_name, &dai_id, dir);
-	if (ret < 3) {
+	if (sscanf(w->sname, "%s %d %s", intf_name, &dai_id, dir) != 3) {
 		dev_err(codec->dev, "Error while parsing dai_id for %s\n", w->name);
 		return -EINVAL;
 	}
@@ -323,7 +322,7 @@ int gbaudio_module_update(struct gbaudio_codec_info *codec,
 			ret = gbaudio_module_enable_tx(codec, module, dai_id);
 		else
 			ret = gbaudio_module_disable_tx(module, dai_id);
-	} else if (w->id == snd_soc_dapm_aif_out) {
+	} else {
 		if (enable)
 			ret = gbaudio_module_enable_rx(codec, module, dai_id);
 		else
@@ -700,7 +699,7 @@ static int gbaudio_init_jack(struct gbaudio_module_info *module,
 	snprintf(module->jack_name, NAME_SIZE, "GB %d Headset Jack",
 		 module->dev_id);
 
-	headset = devm_kzalloc(module->dev, sizeof(*headset), GFP_KERNEL);
+	headset = devm_kzalloc_obj(module->dev, *headset);
 	if (!headset)
 		return -ENOMEM;
 
@@ -722,7 +721,7 @@ static int gbaudio_init_jack(struct gbaudio_module_info *module,
 
 	snprintf(module->button_name, NAME_SIZE, "GB %d Button Jack",
 		 module->dev_id);
-	button = devm_kzalloc(module->dev, sizeof(*button), GFP_KERNEL);
+	button = devm_kzalloc_obj(module->dev, *button);
 	if (!button) {
 		ret = -ENOMEM;
 		goto free_jacks;
@@ -1006,7 +1005,7 @@ static int gbcodec_probe(struct snd_soc_component *comp)
 	struct gbaudio_codec_info *info;
 	struct gbaudio_codec_dai *dai;
 
-	info = devm_kzalloc(comp->dev, sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc_obj(comp->dev, *info);
 	if (!info)
 		return -ENOMEM;
 
@@ -1018,7 +1017,7 @@ static int gbcodec_probe(struct snd_soc_component *comp)
 
 	/* init dai_list used to maintain runtime stream info */
 	for (i = 0; i < ARRAY_SIZE(gbaudio_dai); i++) {
-		dai = devm_kzalloc(comp->dev, sizeof(*dai), GFP_KERNEL);
+		dai = devm_kzalloc_obj(comp->dev, *dai);
 		if (!dai)
 			return -ENOMEM;
 		dai->id = gbaudio_dai[i].id;

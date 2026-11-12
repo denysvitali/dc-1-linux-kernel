@@ -1169,7 +1169,7 @@ static int bh1770_probe(struct i2c_client *client)
 	struct bh1770_chip *chip;
 	int err;
 
-	chip = devm_kzalloc(&client->dev, sizeof *chip, GFP_KERNEL);
+	chip = devm_kzalloc_obj(&client->dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 
@@ -1363,9 +1363,9 @@ static int bh1770_runtime_resume(struct device *dev)
 #endif
 
 static const struct i2c_device_id bh1770_id[] = {
-	{ "bh1770glc" },
-	{ "sfh7770" },
-	{}
+	{ .name = "bh1770glc" },
+	{ .name = "sfh7770" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, bh1770_id);

@@ -12,6 +12,9 @@
 #include <linux/bpf.h>
 #include <linux/filter.h>
 
+#define RV_MAX_REG_ARGS		8
+#define RV_EXTRA_STK_ARGS	(RV_MAX_REG_ARGS - MAX_BPF_FUNC_REG_ARGS)
+
 /* verify runtime detection extension status */
 #define rv_ext_enabled(ext) \
 	(IS_ENABLED(CONFIG_RISCV_ISA_##ext) && riscv_has_extension_likely(RISCV_ISA_EXT_##ext))
@@ -81,6 +84,8 @@ struct rv_jit_context {
 	int ex_jmp_off;
 	unsigned long flags;
 	int stack_size;
+	int tcc_offset;
+	int stack_arg_sz;
 	u64 arena_vm_start;
 	u64 user_vm_start;
 };

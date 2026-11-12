@@ -231,7 +231,7 @@ static struct iommu_domain *vsi_iommu_domain_alloc_paging(struct device *dev)
 	struct vsi_iommu *iommu = dev_iommu_priv_get(dev);
 	struct vsi_iommu_domain *vsi_domain;
 
-	vsi_domain = kzalloc(sizeof(*vsi_domain), GFP_KERNEL);
+	vsi_domain = kzalloc_obj(*vsi_domain);
 	if (!vsi_domain)
 		return NULL;
 
@@ -672,7 +672,7 @@ static int vsi_iommu_probe(struct platform_device *pdev)
 	struct vsi_iommu *iommu;
 	int err;
 
-	iommu = devm_kzalloc(dev, sizeof(*iommu), GFP_KERNEL);
+	iommu = devm_kzalloc_obj(dev, *iommu);
 	if (!iommu)
 		return -ENOMEM;
 

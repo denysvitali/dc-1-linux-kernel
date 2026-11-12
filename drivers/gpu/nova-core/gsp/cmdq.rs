@@ -8,10 +8,11 @@ use kernel::{
     device,
     dma::{
         Coherent,
+        CoherentBox,
         DmaAddress, //
     },
-    dma_write,
     io::{
+        io_project,
         poll::read_poll_timeout,
         Io, //
     },
@@ -19,10 +20,19 @@ use kernel::{
     prelude::*,
     ptr,
     sync::{
-        aref::ARef,
+        barrier::{
+            dma_mb,
+            Full,
+            Read,
+            Write, //
+        },
         Mutex, //
     },
-    time::Delta,
+    time::{
+        Delta,
+        Instant,
+        Monotonic, //
+    },
     transmute::{
         AsBytes,
         FromBytes, //
@@ -51,9 +61,10 @@ use crate::{
         GSP_PAGE_SIZE, //
     },
     num,
-    regs,
     sbuffer::SBufferIter, //
 };
+
+use super::regs;
 
 /// Marker type representing the absence of a reply for a command. Commands using this as their
 /// reply type are sent using [`Cmdq::send_command_no_wait`].
@@ -123,7 +134,9 @@ pub(crate) trait CommandToGsp {
 
 /// Trait representing messages received from the GSP.
 ///
-/// This trait tells [`Cmdq::receive_msg`] how it can receive a given type of message.
+/// A reply that [`Cmdq::send_command`] waits for, or an event that [`Cmdq::await_msg`] waits for.
+/// The receiver matches a message's function code against [`Self::FUNCTION`] and decodes the
+/// message with [`Self::read`].
 pub(crate) trait MessageFromGsp: Sized {
     /// Function identifying this message from the GSP.
     const FUNCTION: MsgFunction;
@@ -171,20 +184,18 @@ static_assert!(align_of::<MsgqData>() == GSP_PAGE_SIZE);
 #[repr(C)]
 // There is no struct defined for this in the open-gpu-kernel-source headers.
 // Instead it is defined by code in `GspMsgQueuesInit()`.
-// TODO: Revert to private once `IoView` projections replace the `gsp_mem` module.
-pub(super) struct Msgq {
+struct Msgq {
     /// Header for sending messages, including the write pointer.
-    pub(super) tx: MsgqTxHeader,
+    tx: MsgqTxHeader,
     /// Header for receiving messages, including the read pointer.
-    pub(super) rx: MsgqRxHeader,
+    rx: MsgqRxHeader,
     /// The message queue proper.
     msgq: MsgqData,
 }
 
 /// Structure shared between the driver and the GSP and containing the command and message queues.
 #[repr(C)]
-// TODO: Revert to private once `IoView` projections replace the `gsp_mem` module.
-pub(super) struct GspMem {
+struct GspMem {
     /// Self-mapping page table entries.
     ptes: PteArray<{ Self::PTE_ARRAY_SIZE }>,
     /// CPU queue: the driver writes commands here, and the GSP reads them. It also contains the
@@ -192,13 +203,13 @@ pub(super) struct GspMem {
     /// index into the GSP queue.
     ///
     /// This member is read-only for the GSP.
-    pub(super) cpuq: Msgq,
+    cpuq: Msgq,
     /// GSP queue: the GSP writes messages here, and the driver reads them. It also contains the
     /// write and read pointers that the GSP updates. This means that the read pointer here is an
     /// index into the CPU queue.
     ///
     /// This member is read-only for the driver.
-    pub(super) gspq: Msgq,
+    gspq: Msgq,
 }
 
 impl GspMem {
@@ -224,28 +235,20 @@ unsafe impl FromBytes for GspMem {}
 ///   pointer and the GSP read pointer. This region is returned by [`Self::driver_write_area`].
 /// * The driver owns (i.e. can read from) the part of the GSP message queue between the CPU read
 ///   pointer and the GSP write pointer. This region is returned by [`Self::driver_read_area`].
-struct DmaGspMem(Coherent<GspMem>);
+struct DmaGspMem<'a>(Coherent<'a, GspMem>);
 
-impl DmaGspMem {
+impl<'a> DmaGspMem<'a> {
     /// Allocate a new instance and map it for `dev`.
-    fn new(dev: &device::Device<device::Bound>) -> Result<Self> {
+    fn new(dev: &'a device::Device<device::Bound>) -> Result<Self> {
         const MSGQ_SIZE: u32 = num::usize_into_u32::<{ size_of::<Msgq>() }>();
         const RX_HDR_OFF: u32 = num::usize_into_u32::<{ mem::offset_of!(Msgq, rx) }>();
 
-        let gsp_mem = Coherent::<GspMem>::zeroed(dev, GFP_KERNEL)?;
+        let mut gsp_mem = CoherentBox::<'_, GspMem>::zeroed(dev, GFP_KERNEL)?;
+        gsp_mem.cpuq.tx = MsgqTxHeader::new(MSGQ_SIZE, RX_HDR_OFF, MSGQ_NUM_PAGES);
+        gsp_mem.cpuq.rx = MsgqRxHeader::new();
 
-        let start = gsp_mem.dma_handle();
-        // Write values one by one to avoid an on-stack instance of `PteArray`.
-        for i in 0..GspMem::PTE_ARRAY_SIZE {
-            dma_write!(gsp_mem, .ptes.0[build: i], PteArray::<0>::entry(start, i)?);
-        }
-
-        dma_write!(
-            gsp_mem,
-            .cpuq.tx,
-            MsgqTxHeader::new(MSGQ_SIZE, RX_HDR_OFF, MSGQ_NUM_PAGES)
-        );
-        dma_write!(gsp_mem, .cpuq.rx, MsgqRxHeader::new());
+        let gsp_mem: Coherent<'_, _> = gsp_mem.into();
+        PteArray::init(io_project!(gsp_mem, .ptes), gsp_mem.dma_address())?;
 
         Ok(Self(gsp_mem))
     }
@@ -406,7 +409,12 @@ impl DmaGspMem {
     //
     // - The returned value is within `0..MSGQ_NUM_PAGES`.
     fn gsp_write_ptr(&self) -> u32 {
-        super::fw::gsp_mem::gsp_write_ptr(&self.0)
+        let ptr = MsgqTxHeader::write_ptr(io_project!(self.0, .gspq.tx)) % MSGQ_NUM_PAGES;
+
+        // ORDERING: LOAD->LOAD ordering needed to order `gsp_write_ptr` read before data read.
+        dma_mb(Read);
+
+        ptr
     }
 
     // Returns the index of the memory page the GSP will read the next command from.
@@ -415,7 +423,12 @@ impl DmaGspMem {
     //
     // - The returned value is within `0..MSGQ_NUM_PAGES`.
     fn gsp_read_ptr(&self) -> u32 {
-        super::fw::gsp_mem::gsp_read_ptr(&self.0)
+        let ptr = MsgqRxHeader::read_ptr(io_project!(self.0, .gspq.rx)) % MSGQ_NUM_PAGES;
+
+        // ORDERING: LOAD->STORE ordering needed to order `gsp_read_ptr` read before data write.
+        dma_mb(Full);
+
+        ptr
     }
 
     // Returns the index of the memory page the CPU can read the next message from.
@@ -424,12 +437,17 @@ impl DmaGspMem {
     //
     // - The returned value is within `0..MSGQ_NUM_PAGES`.
     fn cpu_read_ptr(&self) -> u32 {
-        super::fw::gsp_mem::cpu_read_ptr(&self.0)
+        MsgqRxHeader::read_ptr(io_project!(self.0, .cpuq.rx)) % MSGQ_NUM_PAGES
     }
 
     // Informs the GSP that it can send `elem_count` new pages into the message queue.
     fn advance_cpu_read_ptr(&mut self, elem_count: u32) {
-        super::fw::gsp_mem::advance_cpu_read_ptr(&self.0, elem_count)
+        // ORDERING: LOAD->STORE ordering needed to order `cpu_read_ptr` write after data read.
+        dma_mb(Full);
+
+        let rx = io_project!(self.0, .cpuq.rx);
+        let rptr = MsgqRxHeader::read_ptr(rx).wrapping_add(elem_count) % MSGQ_NUM_PAGES;
+        MsgqRxHeader::set_read_ptr(rx, rptr)
     }
 
     // Returns the index of the memory page the CPU can write the next command to.
@@ -438,12 +456,17 @@ impl DmaGspMem {
     //
     // - The returned value is within `0..MSGQ_NUM_PAGES`.
     fn cpu_write_ptr(&self) -> u32 {
-        super::fw::gsp_mem::cpu_write_ptr(&self.0)
+        MsgqTxHeader::write_ptr(io_project!(self.0, .cpuq.tx)) % MSGQ_NUM_PAGES
     }
 
     // Informs the GSP that it can process `elem_count` new pages from the command queue.
     fn advance_cpu_write_ptr(&mut self, elem_count: u32) {
-        super::fw::gsp_mem::advance_cpu_write_ptr(&self.0, elem_count)
+        // ORDERING: STORE->STORE ordering needed to order `cpu_write_ptr` write after data write.
+        dma_mb(Write);
+
+        let tx = io_project!(self.0, .cpuq.tx);
+        let wptr = MsgqTxHeader::write_ptr(tx).wrapping_add(elem_count) % MSGQ_NUM_PAGES;
+        MsgqTxHeader::set_write_ptr(tx, wptr);
     }
 }
 
@@ -460,7 +483,7 @@ struct GspCommand<'a> {
 
 /// A message ready to be processed from the message queue.
 ///
-/// This is the type returned by [`Cmdq::wait_for_msg`].
+/// This is the type returned by [`CmdqInner::wait_for_msg`].
 struct GspMessage<'a> {
     // Reference to the header of the message.
     header: &'a GspMsgElement,
@@ -474,15 +497,15 @@ struct GspMessage<'a> {
 /// Provides the ability to send commands and receive messages from the GSP using a shared memory
 /// area.
 #[pin_data]
-pub(crate) struct Cmdq {
+pub(crate) struct Cmdq<'cmdq> {
     /// Inner mutex-protected state.
     #[pin]
-    inner: Mutex<CmdqInner>,
-    /// DMA handle of the command queue's shared memory region.
-    pub(super) dma_handle: DmaAddress,
+    inner: Mutex<CmdqInner<'cmdq>>,
+    /// DMA address of the command queue's shared memory region.
+    pub(super) dma_addr: DmaAddress,
 }
 
-impl Cmdq {
+impl<'cmdq> Cmdq<'cmdq> {
     /// Offset of the data after the PTEs.
     const POST_PTE_OFFSET: usize = core::mem::offset_of!(GspMem, cpuq);
 
@@ -503,14 +526,18 @@ impl Cmdq {
     pub(super) const RECEIVE_TIMEOUT: Delta = Delta::from_secs(5);
 
     /// Creates a new command queue for `dev`.
-    pub(crate) fn new(dev: &device::Device<device::Bound>) -> impl PinInit<Self, Error> + '_ {
+    pub(crate) fn new(
+        dev: &'cmdq device::Device<device::Bound>,
+        bar: Bar0<'cmdq>,
+    ) -> impl PinInit<Self, Error> + 'cmdq {
         pin_init_scope(move || {
             let gsp_mem = DmaGspMem::new(dev)?;
 
             Ok(try_pin_init!(Self {
-                dma_handle: gsp_mem.0.dma_handle(),
+                dma_addr: gsp_mem.0.dma_address(),
                 inner <- new_mutex!(CmdqInner {
-                    dev: dev.into(),
+                    dev,
+                    bar,
                     gsp_mem,
                     seq: 0,
                 }),
@@ -538,21 +565,21 @@ impl Cmdq {
 
     /// Sends `command` to the GSP and waits for the reply.
     ///
-    /// Messages with non-matching function codes are silently consumed until the expected reply
-    /// arrives.
+    /// Events that arrive before the reply are logged and consumed.
     ///
     /// The queue is locked for the entire send+receive cycle to ensure that no other command can
     /// be interleaved.
     ///
     /// # Errors
     ///
-    /// - `ETIMEDOUT` if space does not become available to send the command, or if the reply is
-    ///   not received within the timeout.
+    /// - `ETIMEDOUT` if space does not become available to send the command, or if the reply does
+    ///   not arrive within [`Self::RECEIVE_TIMEOUT`] of the send, however many events arrive
+    ///   while waiting.
     /// - `EIO` if the variable payload requested by the command has not been entirely
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
     /// Error codes returned by the command and reply initializers are propagated as-is.
-    pub(crate) fn send_command<M>(&self, bar: Bar0<'_>, command: M) -> Result<M::Reply>
+    pub(crate) fn send_command<M>(&self, command: M) -> Result<M::Reply>
     where
         M: CommandToGsp,
         M::Reply: MessageFromGsp,
@@ -560,15 +587,9 @@ impl Cmdq {
         Error: From<<M::Reply as MessageFromGsp>::InitError>,
     {
         let mut inner = self.inner.lock();
-        inner.send_command(bar, command)?;
+        inner.send_command(command)?;
 
-        loop {
-            match inner.receive_msg::<M::Reply>(Self::RECEIVE_TIMEOUT) {
-                Ok(reply) => break Ok(reply),
-                Err(ERANGE) => continue,
-                Err(e) => break Err(e),
-            }
-        }
+        inner.await_msg()
     }
 
     /// Sends `command` to the GSP without waiting for a reply.
@@ -580,37 +601,63 @@ impl Cmdq {
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
     /// Error codes returned by the command initializers are propagated as-is.
-    pub(crate) fn send_command_no_wait<M>(&self, bar: Bar0<'_>, command: M) -> Result
+    pub(crate) fn send_command_no_wait<M>(&self, command: M) -> Result
     where
         M: CommandToGsp<Reply = NoReply>,
         Error: From<M::InitError>,
     {
-        self.inner.lock().send_command(bar, command)
+        self.inner.lock().send_command(command)
     }
 
-    /// Receive a message from the GSP.
+    /// Waits for an unsolicited GSP event of type `M`. Events that arrive before it are logged and
+    /// consumed.
     ///
-    /// See [`CmdqInner::receive_msg`] for details.
-    pub(crate) fn receive_msg<M: MessageFromGsp>(&self, timeout: Delta) -> Result<M>
+    /// The queue mutex is held for the whole wait, up to [`Self::RECEIVE_TIMEOUT`], so no other
+    /// caller can send a command or consume an event meanwhile.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if the event does not arrive within [`Self::RECEIVE_TIMEOUT`] of the call,
+    ///   however many other events arrive while waiting.
+    /// - `EIO` if a message fails framing or checksum validation.
+    ///
+    /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
+    pub(crate) fn await_msg<M: MessageFromGsp>(&self) -> Result<M>
     where
         // This allows all error types, including `Infallible`, to be used for `M::InitError`.
         Error: From<M::InitError>,
     {
-        self.inner.lock().receive_msg(timeout)
+        self.inner.lock().await_msg()
+    }
+
+    /// Logs and consumes every message the GSP has already posted, and returns without waiting for
+    /// more.
+    ///
+    /// No caller is waiting for a reply while this holds the queue mutex, so every message is
+    /// logged as an event. See "Draining the GSP-to-CPU queue" in
+    /// `Documentation/gpu/nova/core/interrupts.rst`.
+    ///
+    /// # Errors
+    ///
+    /// `EIO` if a message fails framing or checksum validation.
+    pub(crate) fn drain(&self) -> Result {
+        self.inner.lock().drain()
     }
 }
 
 /// Inner mutex protected state of [`Cmdq`].
-struct CmdqInner {
+struct CmdqInner<'a> {
     /// Device this command queue belongs to.
-    dev: ARef<device::Device>,
+    dev: &'a device::Device,
+    /// MMIO mapping of PCI BAR0, for writing the GSP doorbell.
+    bar: Bar0<'a>,
     /// Current command sequence number.
     seq: u32,
     /// Memory area shared with the GSP for communicating commands and messages.
-    gsp_mem: DmaGspMem,
+    gsp_mem: DmaGspMem<'a>,
 }
 
-impl CmdqInner {
+impl CmdqInner<'_> {
     /// Timeout for waiting for space on the command queue.
     const ALLOCATE_TIMEOUT: Delta = Delta::from_secs(1);
 
@@ -624,7 +671,7 @@ impl CmdqInner {
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
     /// Error codes returned by the command initializers are propagated as-is.
-    fn send_single_command<M>(&mut self, bar: Bar0<'_>, command: M) -> Result
+    fn send_single_command<M>(&mut self, command: M) -> Result
     where
         M: CommandToGsp,
         // This allows all error types, including `Infallible`, to be used for `M::InitError`.
@@ -645,8 +692,8 @@ impl CmdqInner {
         // SAFETY: `msg_header` and `cmd` are valid references, and not touched if the initializer
         // fails.
         unsafe {
-            msg_element.__init(core::ptr::from_mut(dst.header))?;
-            command.init().__init(core::ptr::from_mut(cmd))?;
+            pin_init::raw_try_init(core::ptr::from_mut(dst.header), msg_element)?;
+            pin_init::raw_try_init(core::ptr::from_mut(cmd), command.init())?;
         }
 
         // Fill the variable-length payload, which may be empty.
@@ -678,7 +725,7 @@ impl CmdqInner {
         let elem_count = dst.header.element_count();
         self.seq += 1;
         self.gsp_mem.advance_cpu_write_ptr(elem_count);
-        Cmdq::notify_gsp(bar);
+        Cmdq::notify_gsp(self.bar);
 
         Ok(())
     }
@@ -694,19 +741,19 @@ impl CmdqInner {
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
     /// Error codes returned by the command initializers are propagated as-is.
-    fn send_command<M>(&mut self, bar: Bar0<'_>, command: M) -> Result
+    fn send_command<M>(&mut self, command: M) -> Result
     where
         M: CommandToGsp,
         Error: From<M::InitError>,
     {
         match SplitState::new(command)? {
-            SplitState::Single(command) => self.send_single_command(bar, command),
+            SplitState::Single(command) => self.send_single_command(command),
             SplitState::Split(command, mut continuations) => {
-                self.send_single_command(bar, command)?;
+                self.send_single_command(command)?;
 
                 while let Some(continuation) = continuations.next() {
                     // Turbofish needed because the compiler cannot infer M here.
-                    self.send_single_command::<ContinuationRecord<'_>>(bar, continuation)?;
+                    self.send_single_command::<ContinuationRecord<'_>>(continuation)?;
                 }
 
                 Ok(())
@@ -796,8 +843,8 @@ impl CmdqInner {
 
     /// Receive a message from the GSP.
     ///
-    /// The expected message type is specified using the `M` generic parameter. If the pending
-    /// message has a different function code, `ERANGE` is returned and the message is consumed.
+    /// A message whose function code is `M::FUNCTION` is decoded and returned. Any other message
+    /// is logged as an event.
     ///
     /// The read pointer is always advanced past the message, regardless of whether it matched.
     ///
@@ -806,8 +853,7 @@ impl CmdqInner {
     /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
     /// - `EIO` if there was some inconsistency (e.g. message shorter than advertised) on the
     ///   message queue.
-    /// - `EINVAL` if the function code of the message was not recognized.
-    /// - `ERANGE` if the message had a recognized but non-matching function code.
+    /// - `ENOMSG` if the message was not the awaited reply.
     ///
     /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
     fn receive_msg<M: MessageFromGsp>(&mut self, timeout: Delta) -> Result<M>
@@ -816,11 +862,11 @@ impl CmdqInner {
         Error: From<M::InitError>,
     {
         let message = self.wait_for_msg(timeout)?;
-        let function = message.header.function().map_err(|_| EINVAL)?;
+        let function = message.header.function();
+        let seq = message.header.sequence();
 
-        // Extract the message. Store the result as we want to advance the read pointer even in
-        // case of failure.
-        let result = if function == M::FUNCTION {
+        // An early return here would leave the read pointer on this message.
+        let result = if matches!(function, Ok(f) if f == M::FUNCTION) {
             let (cmd, contents_1) = M::Message::from_bytes_prefix(message.contents.0).ok_or(EIO)?;
             let mut sbuffer = SBufferIter::new_reader([contents_1, message.contents.1]);
 
@@ -831,12 +877,14 @@ impl CmdqInner {
                         dev_warn!(
                             &self.dev,
                             "GSP message {:?} has unprocessed data\n",
-                            function
+                            M::FUNCTION
                         );
                     }
                 })
         } else {
-            Err(ERANGE)
+            self.log_event(function, seq);
+
+            Err(ENOMSG)
         };
 
         // Advance the read pointer past this message.
@@ -845,5 +893,92 @@ impl CmdqInner {
         )?);
 
         result
+    }
+
+    /// Receives a message of type `M`, waiting up to [`Cmdq::RECEIVE_TIMEOUT`] from the call.
+    ///
+    /// Any other message that arrives first is logged as an event and does not extend the
+    /// deadline.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if no message of type `M` arrives before the deadline, however many other
+    ///   messages arrive while waiting.
+    /// - `EIO` if a message fails framing or checksum validation (see [`Self::wait_for_msg`]).
+    ///
+    /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
+    fn await_msg<M: MessageFromGsp>(&mut self) -> Result<M>
+    where
+        // This allows all error types, including `Infallible`, to be used for `M::InitError`.
+        Error: From<M::InitError>,
+    {
+        let deadline = Instant::<Monotonic>::now() + Cmdq::RECEIVE_TIMEOUT;
+        loop {
+            let remaining = deadline - Instant::<Monotonic>::now();
+            if remaining.is_negative() {
+                break Err(ETIMEDOUT);
+            }
+            match self.receive_msg::<M>(remaining) {
+                Ok(msg) => break Ok(msg),
+                Err(ENOMSG) => continue,
+                Err(e) => break Err(e),
+            }
+        }
+    }
+
+    /// Logs an event, meaning a message that no caller was waiting for.
+    ///
+    /// An OS error or robust-channel record is logged at error level and an unknown function code
+    /// at warning level. Every other event is recorded only by the receive trace in
+    /// [`Self::wait_for_msg`].
+    fn log_event(&self, function: Result<MsgFunction, u32>, seq: u32) {
+        match function {
+            Ok(MsgFunction::OsErrorLog) => {
+                dev_err!(&self.dev, "GSP reported an OS error (seq {})\n", seq);
+            }
+            Ok(MsgFunction::RcTriggered) => {
+                dev_err!(
+                    &self.dev,
+                    "GSP triggered robust-channel recovery (seq {})\n",
+                    seq
+                );
+            }
+            // Nothing to do for the remaining known function codes.
+            Ok(_) => {}
+            Err(raw) => {
+                dev_warn!(
+                    &self.dev,
+                    "unknown GSP message function {:#x} (seq {})\n",
+                    raw,
+                    seq
+                );
+            }
+        }
+    }
+
+    /// Logs and consumes every message the queue holds.
+    ///
+    /// # Errors
+    ///
+    /// `EIO` if a message fails framing or checksum validation, or if a message's page count
+    /// overflows a `u32`.
+    fn drain(&mut self) -> Result {
+        while !self.gsp_mem.driver_read_area().0.is_empty() {
+            // A message is available, so this returns without waiting.
+            let msg = self.wait_for_msg(Delta::ZERO)?;
+
+            let pages =
+                u32::try_from(msg.header.length().div_ceil(GSP_PAGE_SIZE)).map_err(|_| {
+                    dev_err!(&self.dev, "GSP drain: message length overflow\n");
+                    EIO
+                })?;
+            let function = msg.header.function();
+            let seq = msg.header.sequence();
+
+            self.gsp_mem.advance_cpu_read_ptr(pages);
+            self.log_event(function, seq);
+        }
+
+        Ok(())
     }
 }

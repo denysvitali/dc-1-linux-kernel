@@ -43,11 +43,19 @@ int hfsplus_write_begin(const struct kiocb *iocb,
 			unsigned len, struct folio **foliop,
 			void **fsdata)
 {
+	struct inode *inode = mapping->host;
+	struct hfsplus_sb_info *sbi = HFSPLUS_SB(inode->i_sb);
+	loff_t total_capacity;
 	int ret;
+
+	total_capacity = (loff_t)sbi->total_blocks << sbi->alloc_blksz_shift;
+
+	if (pos >= total_capacity)
+		return -EFBIG;
 
 	ret = cont_write_begin(iocb, mapping, pos, len, foliop, fsdata,
 				hfsplus_get_block,
-				&HFSPLUS_I(mapping->host)->phys_size);
+				&HFSPLUS_I(inode)->phys_size);
 	if (unlikely(ret))
 		hfsplus_write_failed(mapping, pos + len);
 
@@ -297,7 +305,7 @@ static int hfsplus_file_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int hfsplus_setattr(struct mnt_idmap *idmap,
+static int hfsplus_setattr(const struct mnt_idmap *idmap,
 			   struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = d_inode(dentry);
@@ -327,7 +335,7 @@ static int hfsplus_setattr(struct mnt_idmap *idmap,
 	return 0;
 }
 
-int hfsplus_getattr(struct mnt_idmap *idmap, const struct path *path,
+int hfsplus_getattr(const struct mnt_idmap *idmap, const struct path *path,
 		    struct kstat *stat, u32 request_mask,
 		    unsigned int query_flags)
 {
@@ -789,7 +797,7 @@ int hfsplus_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 	return 0;
 }
 
-int hfsplus_fileattr_set(struct mnt_idmap *idmap,
+int hfsplus_fileattr_set(const struct mnt_idmap *idmap,
 			 struct dentry *dentry, struct file_kattr *fa)
 {
 	struct inode *inode = d_inode(dentry);

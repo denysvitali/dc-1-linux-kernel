@@ -107,7 +107,7 @@ static int lmh_probe(struct platform_device *pdev)
 	if (!qcom_scm_is_available())
 		return -EPROBE_DEFER;
 
-	lmh_data = devm_kzalloc(dev, sizeof(*lmh_data), GFP_KERNEL);
+	lmh_data = devm_kzalloc_obj(dev, *lmh_data);
 	if (!lmh_data)
 		return -ENOMEM;
 
@@ -223,7 +223,6 @@ static int lmh_probe(struct platform_device *pdev)
 			       IRQF_NO_THREAD | IRQF_NO_SUSPEND,
 			       "lmh-irq", lmh_data);
 	if (ret) {
-		dev_err(dev, "Error %d registering irq %x\n", ret, lmh_data->irq);
 		irq_domain_remove(lmh_data->domain);
 		return ret;
 	}

@@ -71,12 +71,8 @@ struct erofs_dev_context {
 	bool flatdev;
 };
 
-/* all filesystem-wide lz4 configurations */
 struct erofs_sb_lz4_info {
-	/* # of pages needed for EROFS lz4 rolling decompression */
-	u16 max_distance_pages;
-	/* maximum possible blocks for pclusters in the filesystem */
-	u16 max_pclusterblks;
+	u16 max_pclusterblks;	/* maximum physical blocks for LZ4 pclusters */
 };
 
 struct erofs_xattr_prefix_item {
@@ -98,11 +94,9 @@ struct erofs_sb_info {
 	unsigned int sync_decompress;	/* strategy for sync decompression */
 	unsigned int shrinker_run_no;
 
-	/* pseudo inode to manage cached pages */
-	struct inode *managed_cache;
-
 	struct erofs_sb_lz4_info lz4;
 #endif	/* CONFIG_EROFS_FS_ZIP */
+	struct inode *managed_cache; /* pseudo inode to cache physical data */
 	struct inode *packed_inode;
 	struct inode *metabox_inode;
 	struct erofs_dev_context *devs;
@@ -156,6 +150,7 @@ struct erofs_sb_info {
 #define EROFS_MOUNT_DAX_NEVER		0x00000080
 #define EROFS_MOUNT_DIRECT_IO		0x00000100
 #define EROFS_MOUNT_INODE_SHARE		0x00000200
+#define EROFS_MOUNT_SUPERBLOCK_SHARE	0x00000400
 
 #define clear_opt(opt, option)	((opt)->mount_opt &= ~EROFS_MOUNT_##option)
 #define set_opt(opt, option)	((opt)->mount_opt |= EROFS_MOUNT_##option)
@@ -176,10 +171,10 @@ enum {
 
 struct erofs_buf {
 	struct address_space *mapping;
-	struct file *file;
 	u64 off;
 	struct page *page;
 	void *base;
+	bool mc;
 };
 #define __EROFS_BUF_INITIALIZER	((struct erofs_buf){ .page = NULL })
 
@@ -269,7 +264,7 @@ struct erofs_inode {
 #ifdef CONFIG_EROFS_FS_ZIP
 		struct {
 			unsigned short z_advise;
-			unsigned char  z_algorithmtype[2];
+			unsigned char  z_algofmt[2];
 			unsigned char  z_lclusterbits;
 			union {
 				u64    z_tailextent_headlcn;
@@ -288,8 +283,8 @@ struct erofs_inode {
 			struct erofs_inode_fingerprint fingerprint;
 			spinlock_t ishare_lock;
 		};
-		/* for each real inode */
-		struct inode *sharedinode;
+		/* for each real filesystem inode */
+		struct dentry *sharedentry;
 	};
 #endif
 	/* the corresponding vfs inode */
@@ -385,7 +380,6 @@ struct erofs_map_dev {
 
 extern const struct super_operations erofs_sops;
 extern const struct address_space_operations erofs_aops;
-extern const struct address_space_operations erofs_fileio_aops;
 extern const struct address_space_operations z_erofs_aops;
 
 extern const struct inode_operations erofs_generic_iops;
@@ -397,8 +391,21 @@ extern const struct file_operations erofs_file_fops;
 extern const struct file_operations erofs_dir_fops;
 extern const struct file_operations erofs_ishare_fops;
 
-extern const struct iomap_ops z_erofs_iomap_report_ops;
+struct erofs_iomap_iter_ctx {
+	struct page *page;
+	void *base;
+	struct inode *realinode;
+};
 
+extern const struct iomap_ops z_erofs_iomap_report_ops;
+extern const struct iomap_read_ops erofs_fileio_iomap_read_ops;
+
+int erofs_setup_managed_cache(struct super_block *sb);
+#ifdef CONFIG_EROFS_FS_BACKED_BY_FILE
+int erofs_read_meta_folio(struct file *file, struct folio *folio);
+#else
+#define erofs_read_meta_folio NULL
+#endif
 void *erofs_read_metadata(struct super_block *sb, struct erofs_buf *buf,
 			  erofs_off_t *offset, int *lengthp);
 void erofs_unmap_metabuf(struct erofs_buf *buf);
@@ -411,12 +418,13 @@ void *erofs_read_metabuf(struct erofs_buf *buf, struct super_block *sb,
 int erofs_map_dev(struct super_block *sb, struct erofs_map_dev *dev);
 int erofs_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		 u64 start, u64 len);
+loff_t erofs_file_llseek(struct file *file, loff_t offset, int whence);
 int erofs_map_blocks(struct inode *inode, struct erofs_map_blocks *map);
 void erofs_onlinefolio_init(struct folio *folio);
 void erofs_onlinefolio_split(struct folio *folio);
 void erofs_onlinefolio_end(struct folio *folio, int err, bool dirty);
 struct inode *erofs_iget(struct super_block *sb, erofs_nid_t nid);
-int erofs_getattr(struct mnt_idmap *idmap, const struct path *path,
+int erofs_getattr(const struct mnt_idmap *idmap, const struct path *path,
 		  struct kstat *stat, u32 request_mask,
 		  unsigned int query_flags);
 int erofs_namei(struct inode *dir, const struct qstr *name,
@@ -448,9 +456,6 @@ erofs_get_aops(struct inode *realinode)
 			  "EXPERIMENTAL EROFS subpage compressed block support in use. Use at your own risk!");
 		return &z_erofs_aops;
 	}
-	if (IS_ENABLED(CONFIG_EROFS_FS_BACKED_BY_FILE) &&
-	    erofs_is_fileio_mode(EROFS_SB(realinode->i_sb)))
-		return &erofs_fileio_aops;
 	return &erofs_aops;
 }
 

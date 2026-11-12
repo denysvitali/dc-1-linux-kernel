@@ -81,6 +81,30 @@ void enetc_reset_mac_addr_filter(struct enetc_mac_filter *filter)
 }
 EXPORT_SYMBOL_GPL(enetc_reset_mac_addr_filter);
 
+void enetc_set_congestion_mode(struct enetc_ndev_priv *priv, bool enable)
+{
+	struct enetc_si *si = priv->si;
+	struct enetc_hw *hw = &si->hw;
+
+	spin_lock(&si->gen_lock);
+
+	assign_bit(ENETC_RXBDR_CM, &priv->flags, enable);
+
+	for (int i = 0; i < priv->num_rx_rings; i++) {
+		u32 old_rbmr = enetc_rxbdr_rd(hw, i, ENETC_RBMR);
+		u32 rbmr;
+
+		rbmr = u32_replace_bits(old_rbmr, enable, ENETC_RBMR_CM);
+		if (rbmr == old_rbmr)
+			continue;
+
+		enetc_rxbdr_wr(hw, i, ENETC_RBMR, rbmr);
+	}
+
+	spin_unlock(&si->gen_lock);
+}
+EXPORT_SYMBOL_GPL(enetc_set_congestion_mode);
+
 static int enetc_num_stack_tx_queues(struct enetc_ndev_priv *priv)
 {
 	int num_tx_rings = priv->num_tx_rings;
@@ -2632,7 +2656,6 @@ static void enetc_setup_rxbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring,
 			      bool extended)
 {
 	int idx = rx_ring->index;
-	u32 rbmr = 0;
 
 	enetc_rxbdr_wr(hw, idx, ENETC_RBBAR0,
 		       lower_32_bits(rx_ring->bd_dma_base));
@@ -2660,12 +2683,6 @@ static void enetc_setup_rxbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring,
 	enetc_rxbdr_wr(hw, idx, ENETC_RBICR0, ENETC_RBICR0_ICEN | 0x1);
 
 	rx_ring->ext_en = extended;
-	if (rx_ring->ext_en)
-		rbmr |= ENETC_RBMR_BDS;
-
-	if (rx_ring->ndev->features & NETIF_F_HW_VLAN_CTAG_RX)
-		rbmr |= ENETC_RBMR_VTE;
-
 	rx_ring->rcir = hw->reg + ENETC_BDR(RX, idx, ENETC_RBCIR);
 	rx_ring->idr = hw->reg + ENETC_SIRXIDR;
 
@@ -2676,8 +2693,6 @@ static void enetc_setup_rxbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring,
 	enetc_lock_mdio();
 	enetc_refill_rx_ring(rx_ring, enetc_bd_unused(rx_ring));
 	enetc_unlock_mdio();
-
-	enetc_rxbdr_wr(hw, idx, ENETC_RBMR, rbmr);
 }
 
 static void enetc_setup_bdrs(struct enetc_ndev_priv *priv, bool extended)
@@ -2704,21 +2719,34 @@ static void enetc_enable_txbdr(struct enetc_hw *hw, struct enetc_bdr *tx_ring)
 
 static void enetc_enable_rxbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring)
 {
+	struct enetc_ndev_priv *priv = netdev_priv(rx_ring->ndev);
 	int idx = rx_ring->index;
-	u32 rbmr;
+	u32 rbmr = ENETC_RBMR_EN;
 
-	rbmr = enetc_rxbdr_rd(hw, idx, ENETC_RBMR);
-	rbmr |= ENETC_RBMR_EN;
+	if (rx_ring->ext_en)
+		rbmr |= ENETC_RBMR_BDS;
+
+	if (rx_ring->ndev->features & NETIF_F_HW_VLAN_CTAG_RX)
+		rbmr |= ENETC_RBMR_VTE;
+
+	if (test_bit(ENETC_RXBDR_CM, &priv->flags))
+		rbmr |= ENETC_RBMR_CM;
+
 	enetc_rxbdr_wr(hw, idx, ENETC_RBMR, rbmr);
 }
 
 static void enetc_enable_rx_bdrs(struct enetc_ndev_priv *priv)
 {
-	struct enetc_hw *hw = &priv->si->hw;
+	struct enetc_si *si = priv->si;
+	struct enetc_hw *hw = &si->hw;
 	int i;
+
+	spin_lock(&si->gen_lock);
 
 	for (i = 0; i < priv->num_rx_rings; i++)
 		enetc_enable_rxbdr(hw, priv->rx_ring[i]);
+
+	spin_unlock(&si->gen_lock);
 }
 
 static void enetc_enable_tx_bdrs(struct enetc_ndev_priv *priv)
@@ -2748,11 +2776,16 @@ static void enetc_disable_txbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring)
 
 static void enetc_disable_rx_bdrs(struct enetc_ndev_priv *priv)
 {
-	struct enetc_hw *hw = &priv->si->hw;
+	struct enetc_si *si = priv->si;
+	struct enetc_hw *hw = &si->hw;
 	int i;
+
+	spin_lock(&si->gen_lock);
 
 	for (i = 0; i < priv->num_rx_rings; i++)
 		enetc_disable_rxbdr(hw, priv->rx_ring[i]);
+
+	spin_unlock(&si->gen_lock);
 }
 
 static void enetc_disable_tx_bdrs(struct enetc_ndev_priv *priv)
@@ -2899,11 +2932,31 @@ static void enetc_clear_interrupts(struct enetc_ndev_priv *priv)
 static int enetc_phylink_connect(struct net_device *ndev)
 {
 	struct enetc_ndev_priv *priv = netdev_priv(ndev);
+	struct enetc_si *si = priv->si;
 	struct ethtool_keee edata;
 	int err;
 
 	if (!priv->phylink) {
 		/* phy-less mode */
+		if (!si->ops->vf_reg_link_status_notifier)
+			goto carrier_on;
+
+		/* For phy-less VFs on ENETC v4, attempt to register a link
+		 * status notifier with the PF via the VSI-to-PSI messaging
+		 * channel. If registration succeeds, the PF will immediately
+		 * send the current link status and broadcast future link
+		 * transitions; carrier state is then managed in
+		 * enetc_vf_msg_handle_link_status(). If registration fails,
+		 * fall back to the LS1028A behaviour and assert carrier
+		 * unconditionally via netif_carrier_on().
+		 */
+		if (!si->ops->vf_reg_link_status_notifier(si))
+			return 0;
+
+		dev_warn(&ndev->dev,
+			 "Link status notifier registration failed\n");
+
+carrier_on:
 		netif_carrier_on(ndev);
 		return 0;
 	}
@@ -2988,10 +3041,6 @@ int enetc_open(struct net_device *ndev)
 	if (err)
 		goto err_setup_irqs;
 
-	err = enetc_phylink_connect(ndev);
-	if (err)
-		goto err_phy_connect;
-
 	tx_res = enetc_alloc_tx_resources(priv);
 	if (IS_ERR(tx_res)) {
 		err = PTR_ERR(tx_res);
@@ -3004,6 +3053,10 @@ int enetc_open(struct net_device *ndev)
 		goto err_alloc_rx;
 	}
 
+	err = enetc_phylink_connect(ndev);
+	if (err)
+		goto err_phy_connect;
+
 	enetc_tx_onestep_tstamp_init(priv);
 	enetc_assign_tx_resources(priv, tx_res);
 	enetc_assign_rx_resources(priv, rx_res);
@@ -3012,12 +3065,11 @@ int enetc_open(struct net_device *ndev)
 
 	return 0;
 
+err_phy_connect:
+	enetc_free_rx_resources(rx_res, priv->num_rx_rings);
 err_alloc_rx:
 	enetc_free_tx_resources(tx_res, priv->num_tx_rings);
 err_alloc_tx:
-	if (priv->phylink)
-		phylink_disconnect_phy(priv->phylink);
-err_phy_connect:
 	enetc_free_irqs(priv);
 err_setup_irqs:
 	clk_disable_unprepare(priv->ref_clk);
@@ -3057,6 +3109,7 @@ EXPORT_SYMBOL_GPL(enetc_stop);
 int enetc_close(struct net_device *ndev)
 {
 	struct enetc_ndev_priv *priv = netdev_priv(ndev);
+	struct enetc_si *si = priv->si;
 
 	enetc_stop(ndev);
 
@@ -3064,6 +3117,20 @@ int enetc_close(struct net_device *ndev)
 		phylink_stop(priv->phylink);
 		phylink_disconnect_phy(priv->phylink);
 	} else {
+		if (!si->ops->vf_unreg_link_status_notifier)
+			goto carrier_off;
+
+		/* No need to check whether the previous registration was
+		 * successful. Sending the deregistration message has no
+		 * impact; the PF side simply clears the corresponding bit
+		 * in link_status_ms_mask for the VF.
+		 */
+		if (!si->ops->vf_unreg_link_status_notifier(si))
+			goto carrier_off;
+
+		dev_warn(&ndev->dev,
+			 "Link status notifier unregistration failed\n");
+carrier_off:
 		netif_carrier_off(ndev);
 	}
 
@@ -3344,11 +3411,16 @@ EXPORT_SYMBOL_GPL(enetc_get_stats);
 static void enetc_enable_rxvlan(struct net_device *ndev, bool en)
 {
 	struct enetc_ndev_priv *priv = netdev_priv(ndev);
-	struct enetc_hw *hw = &priv->si->hw;
+	struct enetc_si *si = priv->si;
+	struct enetc_hw *hw = &si->hw;
 	int i;
+
+	spin_lock(&si->gen_lock);
 
 	for (i = 0; i < priv->num_rx_rings; i++)
 		enetc_bdr_enable_rxvlan(hw, i, en);
+
+	spin_unlock(&si->gen_lock);
 }
 
 static void enetc_enable_txvlan(struct net_device *ndev, bool en)
@@ -3679,6 +3751,7 @@ int enetc_pci_probe(struct pci_dev *pdev, const char *name, int sizeof_priv)
 
 	si = PTR_ALIGN(p, ENETC_SI_ALIGN);
 	si->pad = (char *)si - (char *)p;
+	spin_lock_init(&si->gen_lock);
 
 	pci_set_drvdata(pdev, si);
 	si->pdev = pdev;
@@ -3752,6 +3825,13 @@ static const struct enetc_drvdata enetc_vf_data = {
 	.eth_ops = &enetc_vf_ethtool_ops,
 };
 
+static const struct enetc_drvdata enetc4_vf_data = {
+	.sysclk_freq = ENETC_CLK_333M,
+	.tx_csum = true,
+	.max_frags = ENETC4_MAX_SKB_FRAGS,
+	.eth_ops = &enetc_vf_ethtool_ops,
+};
+
 static const struct enetc_platform_info enetc_info[] = {
 	{ .revision = ENETC_REV_1_0,
 	  .dev_id = ENETC_DEV_ID_PF,
@@ -3765,6 +3845,10 @@ static const struct enetc_platform_info enetc_info[] = {
 	  .dev_id = ENETC_DEV_ID_VF,
 	  .data = &enetc_vf_data,
 	},
+	{ .revision = ENETC_REV_4_1,
+	  .dev_id = NXP_ENETC_VF_DEV_ID,
+	  .data = &enetc4_vf_data,
+	},
 	{
 	  .revision = ENETC_REV_4_3,
 	  .dev_id = NXP_ENETC_PPM_DEV_ID,
@@ -3773,6 +3857,10 @@ static const struct enetc_platform_info enetc_info[] = {
 	{ .revision = ENETC_REV_4_3,
 	  .dev_id = NXP_ENETC_PF_DEV_ID,
 	  .data = &enetc4_pf_data,
+	},
+	{ .revision = ENETC_REV_4_3,
+	  .dev_id = NXP_ENETC_VF_DEV_ID,
+	  .data = &enetc4_vf_data,
 	},
 };
 

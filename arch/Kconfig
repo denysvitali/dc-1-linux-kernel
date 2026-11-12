@@ -114,6 +114,20 @@ config GENERIC_ENTRY
 	select GENERIC_IRQ_ENTRY
 	select GENERIC_SYSCALL
 
+config ARCH_SUPPORTS_SYSCALL_USER_DISPATCH
+	bool
+
+config SYSCALL_USER_DISPATCH
+	bool "Syscall User Dispatch"
+	depends on ARCH_SUPPORTS_SYSCALL_USER_DISPATCH
+	depends on GENERIC_ENTRY
+	default y
+	help
+	  Syscall User Dispatch lets a thread have its own system calls
+	  intercepted and redirected to a userspace signal handler based
+	  on a prctl() configured instruction pointer range.
+	  If unsure, say Y.
+
 config KPROBES
 	bool "Kprobes"
 	depends on HAVE_KPROBES
@@ -363,6 +377,9 @@ config ARCH_HAS_DMA_CLEAR_UNCACHED
 config ARCH_HAS_CPU_FINALIZE_INIT
 	bool
 
+config ARCH_HAS_DELAY_TIMER
+	bool
+
 # The architecture has a per-task state that includes the mm's PASID
 config ARCH_HAS_CPU_PASID
 	bool
@@ -509,13 +526,6 @@ config HAVE_ARCH_JUMP_LABEL
 config HAVE_ARCH_JUMP_LABEL_RELATIVE
 	bool
 
-config MMU_GATHER_TABLE_FREE
-	bool
-
-config MMU_GATHER_RCU_TABLE_FREE
-	bool
-	select MMU_GATHER_TABLE_FREE
-
 config MMU_GATHER_PAGE_SIZE
 	bool
 
@@ -531,7 +541,6 @@ config MMU_GATHER_MERGE_VMAS
 
 config MMU_GATHER_NO_GATHER
 	bool
-	depends on MMU_GATHER_TABLE_FREE
 
 config ARCH_WANT_IRQS_OFF_ACTIVATE_MM
 	bool
@@ -637,7 +646,7 @@ config HAVE_ARCH_SECCOMP_FILTER
 	  - syscall_set_return_value()
 	  - SIGSYS siginfo_t support
 	  - secure_computing is called from a ptrace_event()-safe context
-	  - secure_computing return value is checked and a return value of -1
+	  - secure_computing return value is checked and if false it
 	    results in the system call being skipped immediately.
 	  - seccomp syscall wired up
 	  - if !HAVE_SPARSE_SYSCALL_NR, have SECCOMP_ARCH_NATIVE,
@@ -1221,13 +1230,9 @@ config ARCH_MMAP_RND_BITS_MIN
 config ARCH_MMAP_RND_BITS_MAX
 	int
 
-config ARCH_MMAP_RND_BITS_DEFAULT
-	int
-
 config ARCH_MMAP_RND_BITS
 	int "Number of bits to use for ASLR of mmap base address" if EXPERT
 	range ARCH_MMAP_RND_BITS_MIN ARCH_MMAP_RND_BITS_MAX
-	default ARCH_MMAP_RND_BITS_DEFAULT if ARCH_MMAP_RND_BITS_DEFAULT
 	default ARCH_MMAP_RND_BITS_MIN
 	depends on HAVE_ARCH_MMAP_RND_BITS
 	help
@@ -1255,13 +1260,9 @@ config ARCH_MMAP_RND_COMPAT_BITS_MIN
 config ARCH_MMAP_RND_COMPAT_BITS_MAX
 	int
 
-config ARCH_MMAP_RND_COMPAT_BITS_DEFAULT
-	int
-
 config ARCH_MMAP_RND_COMPAT_BITS
 	int "Number of bits to use for ASLR of mmap base address for compatible applications" if EXPERT
 	range ARCH_MMAP_RND_COMPAT_BITS_MIN ARCH_MMAP_RND_COMPAT_BITS_MAX
-	default ARCH_MMAP_RND_COMPAT_BITS_DEFAULT if ARCH_MMAP_RND_COMPAT_BITS_DEFAULT
 	default ARCH_MMAP_RND_COMPAT_BITS_MIN
 	depends on HAVE_ARCH_MMAP_RND_COMPAT_BITS
 	help
@@ -1682,7 +1683,6 @@ config HAVE_SPARSE_SYSCALL_NR
 	  related optimizations for a given architecture.
 
 config ARCH_HAS_VDSO_ARCH_DATA
-	depends on HAVE_GENERIC_VDSO
 	bool
 
 config ARCH_HAS_VDSO_TIME_DATA
@@ -1695,44 +1695,6 @@ config HAVE_STATIC_CALL_INLINE
 	bool
 	depends on HAVE_STATIC_CALL
 	select OBJTOOL
-
-config HAVE_PREEMPT_DYNAMIC
-	bool
-
-config HAVE_PREEMPT_DYNAMIC_CALL
-	bool
-	depends on HAVE_STATIC_CALL
-	select HAVE_PREEMPT_DYNAMIC
-	help
-	  An architecture should select this if it can handle the preemption
-	  model being selected at boot time using static calls.
-
-	  Where an architecture selects HAVE_STATIC_CALL_INLINE, any call to a
-	  preemption function will be patched directly.
-
-	  Where an architecture does not select HAVE_STATIC_CALL_INLINE, any
-	  call to a preemption function will go through a trampoline, and the
-	  trampoline will be patched.
-
-	  It is strongly advised to support inline static call to avoid any
-	  overhead.
-
-config HAVE_PREEMPT_DYNAMIC_KEY
-	bool
-	depends on HAVE_ARCH_JUMP_LABEL
-	select HAVE_PREEMPT_DYNAMIC
-	help
-	  An architecture should select this if it can handle the preemption
-	  model being selected at boot time using static keys.
-
-	  Each preemption function will be given an early return based on a
-	  static key. This should have slightly lower overhead than non-inline
-	  static calls, as this effectively inlines each trampoline into the
-	  start of its callee. This may avoid redundant work, and may
-	  integrate better with CFI schemes.
-
-	  This will have greater overhead than using inline static calls as
-	  the call to the preemption function cannot be entirely elided.
 
 config ARCH_WANT_LD_ORPHAN_WARN
 	bool

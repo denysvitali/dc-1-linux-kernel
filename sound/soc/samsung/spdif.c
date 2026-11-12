@@ -380,8 +380,8 @@ static int spdif_probe(struct platform_device *pdev)
 
 	spdif->pclk = devm_clk_get(&pdev->dev, "spdif");
 	if (IS_ERR(spdif->pclk)) {
-		dev_err(&pdev->dev, "failed to get peri-clock\n");
-		ret = -ENOENT;
+		ret = dev_err_probe(&pdev->dev, PTR_ERR(spdif->pclk),
+				    "failed to get peri-clock\n");
 		goto err0;
 	}
 	ret = clk_prepare_enable(spdif->pclk);
@@ -390,8 +390,8 @@ static int spdif_probe(struct platform_device *pdev)
 
 	spdif->sclk = devm_clk_get(&pdev->dev, "sclk_spdif");
 	if (IS_ERR(spdif->sclk)) {
-		dev_err(&pdev->dev, "failed to get internal source clock\n");
-		ret = -ENOENT;
+		ret = dev_err_probe(&pdev->dev, PTR_ERR(spdif->sclk),
+				    "failed to get internal source clock\n");
 		goto err1;
 	}
 	ret = clk_prepare_enable(spdif->sclk);
@@ -415,19 +415,15 @@ static int spdif_probe(struct platform_device *pdev)
 
 	ret = samsung_asoc_dma_platform_register(&pdev->dev, filter,
 						 NULL, NULL, NULL);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to register DMA: %d\n", ret);
+	if (ret)
 		goto err2;
-	}
 
 	dev_set_drvdata(&pdev->dev, spdif);
 
 	ret = devm_snd_soc_register_component(&pdev->dev,
 			&samsung_spdif_component, &samsung_spdif_dai, 1);
-	if (ret != 0) {
-		dev_err(&pdev->dev, "fail to register dai\n");
+	if (ret != 0)
 		goto err2;
-	}
 
 	return 0;
 err2:

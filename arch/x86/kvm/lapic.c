@@ -75,6 +75,16 @@ module_param(lapic_timer_advance, bool, 0444);
 /* step-by-step approximation to mitigate fluctuation */
 #define LAPIC_TIMER_ADVANCE_ADJUST_STEP 8
 
+/* apic attention bits */
+#define KVM_APIC_CHECK_VAPIC	0
+/*
+ * The following bit is set with PV-EOI, unset on EOI.
+ * We detect PV-EOI changes by guest by comparing
+ * this bit with PV-EOI in guest memory.
+ * See the implementation in apic_update_pv_eoi.
+ */
+#define KVM_APIC_PV_EOI_PENDING	1
+
 static bool __read_mostly vector_hashing_enabled = true;
 module_param_named(vector_hashing, vector_hashing_enabled, bool, 0444);
 
@@ -1487,8 +1497,7 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
 		break;
 
 	default:
-		printk(KERN_ERR "TODO: unsupported delivery mode %x\n",
-		       delivery_mode);
+		WARN_ON_ONCE(1);
 		break;
 	}
 	return result;
@@ -1543,7 +1552,7 @@ static bool kvm_ioapic_handles_vector(struct kvm_lapic *apic, int vector)
 	return test_bit(vector, apic->vcpu->arch.ioapic_handled_vectors);
 }
 
-static void kvm_ioapic_send_eoi(struct kvm_lapic *apic, int vector)
+static void kvm_ioapic_send_eoi(struct kvm_lapic *apic, u8 vector)
 {
 	int __maybe_unused trigger_mode;
 
@@ -1613,7 +1622,7 @@ static int apic_set_eoi(struct kvm_lapic *apic)
  * this interface assumes a trap-like exit, which has already finished
  * desired side effect including vISR and vPPR update.
  */
-void kvm_apic_set_eoi_accelerated(struct kvm_vcpu *vcpu, int vector)
+void kvm_apic_set_eoi_accelerated(struct kvm_vcpu *vcpu, u8 vector)
 {
 	struct kvm_lapic *apic = vcpu->arch.apic;
 

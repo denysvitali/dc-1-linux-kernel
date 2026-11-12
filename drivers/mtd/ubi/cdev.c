@@ -861,7 +861,7 @@ static int ubi_get_ec_info(struct ubi_device *ubi, struct ubi_ecinfo_req __user 
 		int ec;
 
 		if (ubi_io_is_bad(ubi, peb)) {
-			if (__put_user(UBI_UNKNOWN, ureq->erase_counters+read_cnt))
+			if (put_user(UBI_UNKNOWN, ureq->erase_counters+read_cnt))
 				return -EFAULT;
 
 			continue;
@@ -877,7 +877,7 @@ static int ubi_get_ec_info(struct ubi_device *ubi, struct ubi_ecinfo_req __user 
 
 		spin_unlock(&ubi->wl_lock);
 
-		if (__put_user(ec, ureq->erase_counters+read_cnt))
+		if (put_user(ec, ureq->erase_counters+read_cnt))
 			return -EFAULT;
 
 	}
@@ -1112,7 +1112,7 @@ static long ctrl_cdev_ioctl(struct file *file, unsigned int cmd,
 		mutex_lock(&ubi_devices_mutex);
 		err = ubi_attach_mtd_dev(mtd, req.ubi_num, req.vid_hdr_offset,
 					 req.max_beb_per1024, !!req.disable_fm,
-					 !!req.need_resv_pool);
+					 !!req.need_resv_pool, req.wl_threshold);
 		mutex_unlock(&ubi_devices_mutex);
 		if (err < 0)
 			put_mtd_device(mtd);

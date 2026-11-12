@@ -169,7 +169,7 @@ static int eeti_ts_probe(struct i2c_client *client)
 	 * for interrupts to occur.
 	 */
 
-	eeti = devm_kzalloc(dev, sizeof(*eeti), GFP_KERNEL);
+	eeti = devm_kzalloc_obj(dev, *eeti);
 	if (!eeti) {
 		dev_err(dev, "failed to allocate driver data\n");
 		return -ENOMEM;
@@ -276,6 +276,7 @@ static const struct of_device_id of_eeti_ts_match[] = {
 	{ .compatible = "eeti,exc3000-i2c", },
 	{ }
 };
+MODULE_DEVICE_TABLE(of, of_eeti_ts_match);
 #endif
 
 static struct i2c_driver eeti_ts_driver = {

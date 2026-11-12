@@ -137,7 +137,8 @@ static int vsp1_du_insert_uif(struct vsp1_device *vsp1,
 
 	format.pad = UIF_PAD_SINK;
 
-	ret = v4l2_subdev_call(&uif->subdev, pad, set_fmt, NULL, &format);
+	ret = v4l2_subdev_call(&uif->subdev, pad, set_fmt, NULL, NULL,
+			       &format);
 	if (ret < 0)
 		return ret;
 
@@ -184,7 +185,7 @@ static int vsp1_du_pipeline_setup_rpf(struct vsp1_device *vsp1,
 	format.format.ycbcr_enc = input->ycbcr_enc;
 	format.format.quantization = input->quantization;
 
-	ret = v4l2_subdev_call(&rpf->entity.subdev, pad, set_fmt, NULL,
+	ret = v4l2_subdev_call(&rpf->entity.subdev, pad, set_fmt, NULL, NULL,
 			       &format);
 	if (ret < 0)
 		return ret;
@@ -199,6 +200,7 @@ static int vsp1_du_pipeline_setup_rpf(struct vsp1_device *vsp1,
 	sel.r = input->crop;
 
 	ret = v4l2_subdev_call(&rpf->entity.subdev, pad, set_selection, NULL,
+			       NULL,
 			       &sel);
 	if (ret < 0)
 		return ret;
@@ -226,7 +228,7 @@ static int vsp1_du_pipeline_setup_rpf(struct vsp1_device *vsp1,
 
 	format.format.code = MEDIA_BUS_FMT_ARGB8888_1X32;
 
-	ret = v4l2_subdev_call(&rpf->entity.subdev, pad, set_fmt, NULL,
+	ret = v4l2_subdev_call(&rpf->entity.subdev, pad, set_fmt, NULL, NULL,
 			       &format);
 	if (ret < 0)
 		return ret;
@@ -240,7 +242,7 @@ static int vsp1_du_pipeline_setup_rpf(struct vsp1_device *vsp1,
 	/* BRx sink, propagate the format from the RPF source. */
 	format.pad = brx_input;
 
-	ret = v4l2_subdev_call(&pipe->brx->subdev, pad, set_fmt, NULL,
+	ret = v4l2_subdev_call(&pipe->brx->subdev, pad, set_fmt, NULL, NULL,
 			       &format);
 	if (ret < 0)
 		return ret;
@@ -254,6 +256,7 @@ static int vsp1_du_pipeline_setup_rpf(struct vsp1_device *vsp1,
 	sel.r = vsp1->drm->inputs[rpf->entity.index].compose;
 
 	ret = v4l2_subdev_call(&pipe->brx->subdev, pad, set_selection, NULL,
+			       NULL,
 			       &sel);
 	if (ret < 0)
 		return ret;
@@ -387,7 +390,7 @@ static int vsp1_du_pipeline_setup_brx(struct vsp1_device *vsp1,
 	format.format.height = drm_pipe->height;
 	format.format.field = V4L2_FIELD_NONE;
 
-	ret = v4l2_subdev_call(&brx->subdev, pad, set_fmt, NULL,
+	ret = v4l2_subdev_call(&brx->subdev, pad, set_fmt, NULL, NULL,
 			       &format);
 	if (ret < 0)
 		return ret;
@@ -419,13 +422,12 @@ static int vsp1_du_pipeline_setup_inputs(struct vsp1_device *vsp1,
 	struct vsp1_entity *uif;
 	bool use_uif = false;
 	struct vsp1_brx *brx;
-	unsigned int i;
 	int ret;
 
 	/* Count the number of enabled inputs and sort them by Z-order. */
 	pipe->num_inputs = 0;
 
-	for (i = 0; i < vsp1->info->rpf_count; ++i) {
+	for (unsigned int i = 0; i < vsp1->info->rpf_count; ++i) {
 		struct vsp1_rwpf *rpf = vsp1->rpf[i];
 		unsigned int j;
 
@@ -457,7 +459,7 @@ static int vsp1_du_pipeline_setup_inputs(struct vsp1_device *vsp1,
 	brx = to_brx(&pipe->brx->subdev);
 
 	/* Setup the RPF input pipeline for every enabled input. */
-	for (i = 0; i < pipe->brx->source_pad; ++i) {
+	for (unsigned int i = 0; i < pipe->brx->source_pad; ++i) {
 		struct vsp1_rwpf *rpf = inputs[i];
 
 		if (!rpf) {
@@ -539,7 +541,8 @@ static int vsp1_du_pipeline_setup_output(struct vsp1_device *vsp1,
 	format.format.code = MEDIA_BUS_FMT_ARGB8888_1X32;
 	format.format.field = V4L2_FIELD_NONE;
 
-	ret = v4l2_subdev_call(&pipe->output->entity.subdev, pad, set_fmt, NULL,
+	ret = v4l2_subdev_call(&pipe->output->entity.subdev, pad, set_fmt,
+			       NULL, NULL,
 			       &format);
 	if (ret < 0)
 		return ret;
@@ -559,7 +562,7 @@ static int vsp1_du_pipeline_setup_output(struct vsp1_device *vsp1,
 		format.format.code, pipe->output->entity.index);
 
 	format.pad = LIF_PAD_SINK;
-	ret = v4l2_subdev_call(&pipe->lif->subdev, pad, set_fmt, NULL,
+	ret = v4l2_subdev_call(&pipe->lif->subdev, pad, set_fmt, NULL, NULL,
 			       &format);
 	if (ret < 0)
 		return ret;
@@ -732,7 +735,6 @@ int vsp1_du_disable(struct device *dev, unsigned int pipe_index)
 	struct vsp1_device *vsp1 = dev_get_drvdata(dev);
 	struct vsp1_drm_pipeline *drm_pipe;
 	struct vsp1_pipeline *pipe;
-	unsigned int i;
 	int ret;
 
 	if (pipe_index >= vsp1->info->lif_count)
@@ -748,7 +750,7 @@ int vsp1_du_disable(struct device *dev, unsigned int pipe_index)
 		if (ret == -ETIMEDOUT)
 			dev_err(vsp1->dev, "DRM pipeline stop timeout\n");
 
-		for (i = 0; i < ARRAY_SIZE(pipe->inputs); ++i) {
+		for (unsigned int i = 0; i < ARRAY_SIZE(pipe->inputs); ++i) {
 			struct vsp1_rwpf *rpf = pipe->inputs[i];
 
 			if (!rpf)
@@ -964,16 +966,14 @@ EXPORT_SYMBOL_GPL(vsp1_du_unmap_sg);
 
 int vsp1_drm_init(struct vsp1_device *vsp1)
 {
-	unsigned int i;
-
-	vsp1->drm = devm_kzalloc(vsp1->dev, sizeof(*vsp1->drm), GFP_KERNEL);
+	vsp1->drm = devm_kzalloc_obj(vsp1->dev, *vsp1->drm);
 	if (!vsp1->drm)
 		return -ENOMEM;
 
 	mutex_init(&vsp1->drm->lock);
 
 	/* Create one DRM pipeline per LIF. */
-	for (i = 0; i < vsp1->info->lif_count; ++i) {
+	for (unsigned int i = 0; i < vsp1->info->lif_count; ++i) {
 		struct vsp1_drm_pipeline *drm_pipe = &vsp1->drm->pipe[i];
 		struct vsp1_pipeline *pipe = &drm_pipe->pipe;
 
@@ -1010,7 +1010,7 @@ int vsp1_drm_init(struct vsp1_device *vsp1)
 	}
 
 	/* Disable all RPFs initially. */
-	for (i = 0; i < vsp1->info->rpf_count; ++i) {
+	for (unsigned int i = 0; i < vsp1->info->rpf_count; ++i) {
 		struct vsp1_rwpf *input = vsp1->rpf[i];
 
 		INIT_LIST_HEAD(&input->entity.list_pipe);

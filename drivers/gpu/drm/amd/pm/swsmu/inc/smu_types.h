@@ -252,7 +252,9 @@
 	__SMU_DUMMY_MAP(DriverMode2Reset), \
 	__SMU_DUMMY_MAP(GetGfxOffStatus),		 \
 	__SMU_DUMMY_MAP(GetGfxOffEntryCount),		 \
-	__SMU_DUMMY_MAP(LogGfxOffResidency),			\
+	__SMU_DUMMY_MAP(StartGfxOffResidencyLogging),		\
+	__SMU_DUMMY_MAP(GfxOffResidencyLogReadSample),		\
+	__SMU_DUMMY_MAP(StopGfxOffResidencyLogging),		\
 	__SMU_DUMMY_MAP(SetNumBadMemoryPagesRetired),		\
 	__SMU_DUMMY_MAP(SetBadMemoryPagesRetiredFlagsPerChannel), \
 	__SMU_DUMMY_MAP(AllowGpo),	\
@@ -283,6 +285,7 @@
 	__SMU_DUMMY_MAP(GetStaticMetricsTable), \
 	__SMU_DUMMY_MAP(GetSystemMetricsTable), \
 	__SMU_DUMMY_MAP(GetRASTableVersion), \
+	__SMU_DUMMY_MAP(GetRmaStatus),    \
 	__SMU_DUMMY_MAP(GetBadPageCount), \
 	__SMU_DUMMY_MAP(GetBadPageMcaAddr), \
 	__SMU_DUMMY_MAP(SetTimestamp), \
@@ -295,11 +298,16 @@
 	__SMU_DUMMY_MAP(GetSmartShiftStatus), \
 	__SMU_DUMMY_MAP(EnableLSdma), \
 	__SMU_DUMMY_MAP(DisableLSdma), \
+	__SMU_DUMMY_MAP(GetMetricsTableVersion), \
+	__SMU_DUMMY_MAP(GetMetricsTableLogSample), \
+	__SMU_DUMMY_MAP(GetMetricsTableLogDramAddr), \
 	__SMU_DUMMY_MAP(InitializeGfx), \
 	__SMU_DUMMY_MAP(SetSoftMaxFclk), \
 	__SMU_DUMMY_MAP(SetSoftMaxGl2clk), \
 	__SMU_DUMMY_MAP(SetSoftMinGl2clk), \
-	__SMU_DUMMY_MAP(GetSystemMetricsVersion),
+	__SMU_DUMMY_MAP(GetSystemMetricsVersion), \
+	__SMU_DUMMY_MAP(SetNpmLimit), \
+	__SMU_DUMMY_MAP(PrepareNodeForUnload),
 
 #undef __SMU_DUMMY_MAP
 #define __SMU_DUMMY_MAP(type)	SMU_MSG_##type

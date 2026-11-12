@@ -51,7 +51,7 @@
 
 #define STARLINK_FORMAT_ATTR(_name, _config)				      \
 	(&((struct dev_ext_attribute[]) {				      \
-		{ .attr = __ATTR(_name, 0444, starlink_pmu_sysfs_format_show, NULL), \
+		{ .attr = __DEVICE_ATTR(_name, 0444, starlink_pmu_sysfs_format_show, NULL), \
 		  .var = (void *)_config, }				      \
 	})[0].attr.attr)
 
@@ -130,7 +130,7 @@ cpumask_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct starlink_pmu *starlink_pmu = to_starlink_pmu(dev_get_drvdata(dev));
 
-	return cpumap_print_to_pagebuf(true, buf, &starlink_pmu->cpumask);
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&starlink_pmu->cpumask));
 }
 
 static DEVICE_ATTR_RO(cpumask);
@@ -435,7 +435,7 @@ static int starlink_setup_irqs(struct starlink_pmu *starlink_pmu,
 	ret = devm_request_irq(&pdev->dev, irq, starlink_pmu_handle_irq,
 			       0, STARLINK_PMU_PDEV_NAME, starlink_pmu);
 	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "Failed to request IRQ\n");
+		return ret;
 
 	starlink_pmu->irq = irq;
 
@@ -510,7 +510,7 @@ static int starlink_pmu_probe(struct platform_device *pdev)
 	struct resource *res;
 	int cpuid, i, ret;
 
-	starlink_pmu = devm_kzalloc(&pdev->dev, sizeof(*starlink_pmu), GFP_KERNEL);
+	starlink_pmu = devm_kzalloc_obj(&pdev->dev, *starlink_pmu);
 	if (!starlink_pmu)
 		return -ENOMEM;
 

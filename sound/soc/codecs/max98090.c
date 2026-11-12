@@ -2341,6 +2341,7 @@ static irqreturn_t max98090_interrupt(int irq, void *data)
  *
  * @component:  MAX98090 component
  * @jack:   jack to report detection events on
+ * @data: can be used if codec driver need extra data for configuring jack
  *
  * Enable microphone detection via IRQ on the MAX98090.  If GPIOs are
  * being used to bring out signals to the processor then only platform
@@ -2381,6 +2382,29 @@ static int max98090_set_jack(struct snd_soc_component *component,
 #define MAX98090_RATES SNDRV_PCM_RATE_8000_96000
 #define MAX98090_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE)
 
+static const u64 max98090_selectable_formats[] = {
+	/*
+	 * Non RIGHT_J formats doesn't have 24bit support.
+	 * priority is RIGHT_J > I2S/LEFT_J/DSP_A
+	 * see
+	 *	max98090_dai_startup()
+	 */
+	/* 1st priority */
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF,
+	/* 2nd priority */
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF,
+};
+
 static const struct snd_soc_dai_ops max98090_dai_ops = {
 	.startup = max98090_dai_startup,
 	.set_sysclk = max98090_dai_set_sysclk,
@@ -2389,6 +2413,8 @@ static const struct snd_soc_dai_ops max98090_dai_ops = {
 	.hw_params = max98090_dai_hw_params,
 	.mute_stream = max98090_dai_mute,
 	.trigger = max98090_dai_trigger,
+	.auto_selectable_formats = max98090_selectable_formats,
+	.num_auto_selectable_formats = ARRAY_SIZE(max98090_selectable_formats),
 	.no_capture_mute = 1,
 };
 
@@ -2421,10 +2447,6 @@ static int max98090_probe(struct snd_soc_component *component)
 	unsigned int micbias;
 
 	dev_dbg(component->dev, "max98090_probe\n");
-
-	max98090->mclk = devm_clk_get(component->dev, "mclk");
-	if (PTR_ERR(max98090->mclk) == -EPROBE_DEFER)
-		return -EPROBE_DEFER;
 
 	max98090->component = component;
 
@@ -2585,8 +2607,7 @@ static int max98090_i2c_probe(struct i2c_client *i2c)
 
 	pr_debug("max98090_i2c_probe\n");
 
-	max98090 = devm_kzalloc(&i2c->dev, sizeof(struct max98090_priv),
-		GFP_KERNEL);
+	max98090 = devm_kzalloc_obj(&i2c->dev, struct max98090_priv);
 	if (max98090 == NULL)
 		return -ENOMEM;
 
@@ -2605,6 +2626,11 @@ static int max98090_i2c_probe(struct i2c_client *i2c)
 		dev_err(&i2c->dev, "Failed to allocate regmap: %d\n", ret);
 		goto err_enable;
 	}
+
+	max98090->mclk = devm_clk_get(&i2c->dev, "mclk");
+	if (IS_ERR(max98090->mclk))
+		if (PTR_ERR(max98090->mclk) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
 
 	ret = devm_request_threaded_irq(&i2c->dev, i2c->irq, NULL,
 		max98090_interrupt, IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
@@ -2645,12 +2671,18 @@ static void max98090_i2c_remove(struct i2c_client *client)
 static int max98090_runtime_resume(struct device *dev)
 {
 	struct max98090_priv *max98090 = dev_get_drvdata(dev);
+	int ret;
 
 	regcache_cache_only(max98090->regmap, false);
 
 	max98090_reset(max98090);
 
-	regcache_sync(max98090->regmap);
+	ret = regcache_sync(max98090->regmap);
+	if (ret < 0) {
+		regcache_cache_only(max98090->regmap, true);
+		regcache_mark_dirty(max98090->regmap);
+		return ret;
+	}
 
 	return 0;
 }

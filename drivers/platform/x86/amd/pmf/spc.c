@@ -10,6 +10,7 @@
  */
 
 #include <acpi/button.h>
+#include <linux/amd-pmf.h>
 #include <linux/amd-pmf-io.h>
 #include <linux/cleanup.h>
 #include <linux/power_supply.h>
@@ -17,78 +18,13 @@
 #include "pmf.h"
 
 #ifdef CONFIG_AMD_PMF_DEBUG
-static const char *platform_type_as_str(u16 platform_type)
-{
-	switch (platform_type) {
-	case CLAMSHELL:
-		return "CLAMSHELL";
-	case FLAT:
-		return "FLAT";
-	case TENT:
-		return "TENT";
-	case STAND:
-		return "STAND";
-	case TABLET:
-		return "TABLET";
-	case BOOK:
-		return "BOOK";
-	case PRESENTATION:
-		return "PRESENTATION";
-	case PULL_FWD:
-		return "PULL_FWD";
-	default:
-		return "UNKNOWN";
-	}
-}
-
-static const char *laptop_placement_as_str(u16 device_state)
-{
-	switch (device_state) {
-	case ON_TABLE:
-		return "ON_TABLE";
-	case ON_LAP_MOTION:
-		return "ON_LAP_MOTION";
-	case IN_BAG:
-		return "IN_BAG";
-	case OUT_OF_BAG:
-		return "OUT_OF_BAG";
-	default:
-		return "UNKNOWN";
-	}
-}
-
-static const char *ta_slider_as_str(unsigned int state)
-{
-	switch (state) {
-	case TA_BEST_PERFORMANCE:
-		return "PERFORMANCE";
-	case TA_BETTER_PERFORMANCE:
-		return "BALANCED";
-	case TA_BEST_BATTERY:
-		return "POWER_SAVER";
-	default:
-		return "Unknown TA Slider State";
-	}
-}
-
-static u32 amd_pmf_get_ta_custom_bios_inputs(struct ta_pmf_enact_table *in, int index)
-{
-	switch (index) {
-	case 0 ... 1:
-		return in->ev_info.bios_input_1[index];
-	case 2 ... 9:
-		return in->ev_info.bios_input_2[index - 2];
-	default:
-		return 0;
-	}
-}
-
 void amd_pmf_dump_ta_inputs(struct amd_pmf_dev *dev, struct ta_pmf_enact_table *in)
 {
 	int i;
 
 	dev_dbg(dev->dev, "==== TA inputs START ====\n");
-	dev_dbg(dev->dev, "Slider State: %s\n", ta_slider_as_str(in->ev_info.power_slider));
+	dev_dbg(dev->dev, "Slider State: %s\n",
+		amd_pmf_get_slider_position(in->ev_info.power_slider));
 	dev_dbg(dev->dev, "Power Source: %s\n", amd_pmf_source_as_str(in->ev_info.power_source));
 	dev_dbg(dev->dev, "Battery Percentage: %u\n", in->ev_info.bat_percentage);
 	dev_dbg(dev->dev, "Designed Battery Capacity: %u\n", in->ev_info.bat_design);
@@ -102,16 +38,15 @@ void amd_pmf_dump_ta_inputs(struct amd_pmf_dev *dev, struct ta_pmf_enact_table *
 	dev_dbg(dev->dev, "LID State: %s\n", in->ev_info.lid_state ? "close" : "open");
 	dev_dbg(dev->dev, "User Presence: %s\n", in->ev_info.user_present ? "Present" : "Away");
 	dev_dbg(dev->dev, "Ambient Light: %d\n", in->ev_info.ambient_light);
-	dev_dbg(dev->dev, "Platform type: %s\n", platform_type_as_str(in->ev_info.platform_type));
+	dev_dbg(dev->dev, "Platform type: %s\n",
+		amd_pmf_get_platform_type(in->ev_info.platform_type));
 	dev_dbg(dev->dev, "Laptop placement: %s\n",
-		laptop_placement_as_str(in->ev_info.device_state));
+		amd_pmf_get_laptop_placement(in->ev_info.device_state));
 	for (i = 0; i < ARRAY_SIZE(custom_bios_inputs); i++)
 		dev_dbg(dev->dev, "Custom BIOS input%d: %u\n", i + 1,
 			amd_pmf_get_ta_custom_bios_inputs(in, i));
 	dev_dbg(dev->dev, "==== TA inputs END ====\n");
 }
-#else
-void amd_pmf_dump_ta_inputs(struct amd_pmf_dev *dev, struct ta_pmf_enact_table *in) {}
 #endif
 
 /*
@@ -249,13 +184,11 @@ static int amd_pmf_get_battery_prop(enum power_supply_property prop)
 			continue;
 
 		ret = power_supply_get_property(psy, prop, &value);
-		if (ret) {
-			power_supply_put(psy);
-			return ret;
-		}
+		power_supply_put(psy);
+		return ret ? ret : value.intval;
 	}
 
-	return value.intval;
+	return -ENODEV;
 }
 
 static int amd_pmf_get_battery_info(struct amd_pmf_dev *dev, struct ta_pmf_enact_table *in)
@@ -287,14 +220,14 @@ static int amd_pmf_get_slider_info(struct amd_pmf_dev *dev, struct ta_pmf_enact_
 	switch (dev->current_profile) {
 	case PLATFORM_PROFILE_PERFORMANCE:
 	case PLATFORM_PROFILE_BALANCED_PERFORMANCE:
-		val = TA_BEST_PERFORMANCE;
+		val = AMD_PMF_TA_BEST_PERFORMANCE;
 		break;
 	case PLATFORM_PROFILE_BALANCED:
-		val = TA_BETTER_PERFORMANCE;
+		val = AMD_PMF_TA_BETTER_PERFORMANCE;
 		break;
 	case PLATFORM_PROFILE_LOW_POWER:
 	case PLATFORM_PROFILE_QUIET:
-		val = TA_BEST_BATTERY;
+		val = AMD_PMF_TA_BEST_BATTERY;
 		break;
 	default:
 		dev_err(dev->dev, "Unknown Platform Profile.\n");

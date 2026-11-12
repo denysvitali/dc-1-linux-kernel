@@ -175,11 +175,10 @@ static bool mod_power_update_replay_active_status(unsigned int active_replay_eve
 		if (link->replay_settings.coasting_vtotal_table[PR_COASTING_TYPE_TEST_HARNESS])
 			*coasting_vtotal =
 				link->replay_settings.coasting_vtotal_table[PR_COASTING_TYPE_TEST_HARNESS];
-		if (link->replay_settings.frame_skip_number_table[PR_COASTING_TYPE_TEST_HARNESS]) {
-			ASSERT(link->replay_settings.frame_skip_number_table[PR_COASTING_TYPE_TEST_HARNESS] <= 0xFFFF);
-			*frame_skip_number =
-				(uint16_t)link->replay_settings.frame_skip_number_table[PR_COASTING_TYPE_TEST_HARNESS];
-		}
+
+		ASSERT(link->replay_settings.frame_skip_number_table[PR_COASTING_TYPE_TEST_HARNESS] <= 0xFFFF);
+		*frame_skip_number =
+			(uint16_t)link->replay_settings.frame_skip_number_table[PR_COASTING_TYPE_TEST_HARNESS];
 
 		/* During the ultra sleep mode testing, disable the timing sync in short vblank mode */
 		if (active_replay_events & (replay_event_test_harness_enable_replay)) {
@@ -339,9 +338,11 @@ static bool mod_power_update_replay_active_status(unsigned int active_replay_eve
 
 	/* General UI scenario */
 	if (active_replay_events & replay_event_general_ui) {
-		if (replay_enable_option & pr_enable_option_general_ui)
+		if (replay_enable_option & pr_enable_option_general_ui) {
+			if (link->replay_settings.system_in_dc)
+				link->replay_settings.config.replay_timing_sync_supported = false;
 			return true;
-		else
+		} else
 			return false;
 	}
 
@@ -762,6 +763,19 @@ void mod_power_replay_residency(const struct dc_stream_state *stream,
 		link->dc->link_srv->edp_replay_residency(link, residency, is_start, mode);
 }
 
+bool mod_power_replay_get_cumulative_residency(const struct dc_stream_state *stream,
+	uint32_t *residency_milli_pct)
+{
+	const struct dc_link *link = dc_stream_get_link(stream);
+
+	if (!link || !link->dc || !link->dc->link_srv)
+		return false;
+
+	return link->dc->link_srv->edp_replay_get_cumulative_residency(
+		link, residency_milli_pct);
+}
+
+
 bool mod_power_replay_set_power_opt_and_coasting_vtotal(struct mod_power *mod_power,
 	const struct dc_stream_state *stream, unsigned int active_replay_events, uint32_t coasting_vtotal,
 	bool is_ultra_sleep_mode, uint16_t frame_skip_number)
@@ -805,6 +819,13 @@ void mod_power_replay_notify_mode_change(struct mod_power *mod_power,
 
 	core_power = MOD_POWER_TO_CORE(mod_power);
 	active_replay_events = core_power->map[stream_index].replay_events;
+
+	/* forced psr is active for seamless switch.
+	 * Re-running edp_setup_psr would disturb the freeze,
+	 * so skip the PSR re-setup until forced psr releases the override.
+	 */
+	if (active_replay_events & replay_event_os_override_hold)
+		return;
 
 	link->replay_settings.replay_smu_opt_enable =
 		(link->replay_settings.config.replay_smu_opt_supported &&

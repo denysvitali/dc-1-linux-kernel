@@ -40,6 +40,7 @@
  *   and locked.
  */
 pte_t *try_get_locked_pte(struct mm_struct *mm, unsigned long vmaddr, spinlock_t **ptl)
+__context_unsafe(/* Returns nonnull if lock taken or not taken */)
 {
 	pmd_t *pmdp, pmd, pmdval;
 	pud_t *pudp, pud;
@@ -90,6 +91,7 @@ EXPORT_SYMBOL_GPL(try_get_locked_pte);
  * Context: needs to be called while holding the mmap lock.
  */
 void gmap_helper_zap_one_page(struct mm_struct *mm, unsigned long vmaddr)
+__context_unsafe(/* pte_unmap_unlock() not instrumented */)
 {
 	struct vm_area_struct *vma;
 	spinlock_t *ptl;	/* Lock for the host (userspace) page table */
@@ -100,7 +102,7 @@ void gmap_helper_zap_one_page(struct mm_struct *mm, unsigned long vmaddr)
 
 	/* Find the vm address for the guest address */
 	vma = vma_lookup(mm, vmaddr);
-	if (!vma || is_vm_hugetlb_page(vma))
+	if (!vma || vma_is_hugetlb(vma))
 		return;
 
 	/* Get pointer to the page table entry */
@@ -137,7 +139,7 @@ void gmap_helper_discard(struct mm_struct *mm, unsigned long vmaddr, unsigned lo
 		vma = find_vma_intersection(mm, vmaddr, end);
 		if (!vma)
 			return;
-		if (!is_vm_hugetlb_page(vma))
+		if (!vma_is_hugetlb(vma))
 			zap_vma_range(vma, vmaddr, min(end, vma->vm_end) - vmaddr);
 		vmaddr = vma->vm_end;
 	}
@@ -161,6 +163,7 @@ EXPORT_SYMBOL_GPL(gmap_helper_discard);
  *          disabled.
  */
 void gmap_helper_try_set_pte_unused(struct mm_struct *mm, unsigned long vmaddr)
+__context_unsafe(/* pte_unmap_unlock() not instrumented */)
 {
 	spinlock_t *ptl;	/* Lock for the host (userspace) page table */
 	pte_t *ptep;
@@ -200,7 +203,7 @@ static int find_zeropage_pte_entry(pte_t *pte, unsigned long addr,
 		 * currently only works in COW mappings, which is also where
 		 * mm_forbids_zeropage() is checked.
 		 */
-		if (!is_cow_mapping(walk->vma->vm_flags))
+		if (!vma_is_cow_mapping(walk->vma))
 			return -EFAULT;
 
 		*found_addr = addr;
@@ -244,7 +247,7 @@ static int __gmap_helper_unshare_zeropages(struct mm_struct *mm)
 		 * proof to catch unexpected zeropages in other mappings and
 		 * fail.
 		 */
-		if ((vma->vm_flags & VM_PFNMAP) || is_vm_hugetlb_page(vma))
+		if ((vma->vm_flags & VM_PFNMAP) || vma_is_hugetlb(vma))
 			continue;
 		addr = vma->vm_start;
 
@@ -272,7 +275,6 @@ retry:
 		 * truncation. In that case, the shared zeropage would be gone
 		 * and we can simply retry and make progress.
 		 */
-		cond_resched();
 		goto retry;
 	}
 

@@ -429,7 +429,7 @@ static char *memdup_to_str(char *maybe_str, int max_len, gfp_t gfp)
 static ssize_t cpumask_show(struct device *dev,
 			    struct device_attribute *attr, char *buf)
 {
-	return cpumap_print_to_pagebuf(true, buf, &hv_24x7_cpumask);
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&hv_24x7_cpumask));
 }
 
 static ssize_t sockets_show(struct device *dev,
@@ -462,7 +462,7 @@ static struct attribute *device_str_attr_create_(char *name, char *str)
 	attr->var = str;
 	attr->attr.attr.name = name;
 	attr->attr.attr.mode = 0444;
-	attr->attr.show = device_show_string;
+	attr->attr.show_const = device_show_string;
 
 	return &attr->attr.attr;
 }

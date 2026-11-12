@@ -12,6 +12,7 @@
 #define __AA_MATCH_H
 
 #include <linux/kref.h>
+#include <linux/overflow.h>
 
 #define DFA_NOMATCH			0
 #define DFA_START			1
@@ -120,21 +121,31 @@ struct aa_dfa {
 
 static inline size_t table_size(size_t len, size_t el_size)
 {
-	return ALIGN(sizeof(struct table_header) + len * el_size, 8);
+	size_t size;
+
+	/* Need check_*_overflow for 32 bit machines */
+	if (check_mul_overflow(len, el_size, &size) ||
+	    check_add_overflow(size, sizeof(struct table_header), &size) ||
+	    size > SIZE_MAX - 7)
+		return 0;
+
+	return ALIGN(size, 8);
 }
 
 #define aa_state_t unsigned int
 
-struct aa_dfa *aa_dfa_unpack(void *blob, size_t size, int flags);
-aa_state_t aa_dfa_match_len(struct aa_dfa *dfa, aa_state_t start,
+struct aa_dfa *aa_dfa_unpack(const void *blob, size_t size, int flags);
+aa_state_t aa_dfa_match_len(const struct aa_dfa *dfa, aa_state_t start,
 			    const char *str, int len);
-aa_state_t aa_dfa_match(struct aa_dfa *dfa, aa_state_t start,
+aa_state_t aa_dfa_match(const struct aa_dfa *dfa, aa_state_t start,
 			const char *str);
-aa_state_t aa_dfa_next(struct aa_dfa *dfa, aa_state_t state, const char c);
-aa_state_t aa_dfa_outofband_transition(struct aa_dfa *dfa, aa_state_t state);
-aa_state_t aa_dfa_match_until(struct aa_dfa *dfa, aa_state_t start,
+aa_state_t aa_dfa_next(const struct aa_dfa *dfa, aa_state_t state,
+		       const char c);
+aa_state_t aa_dfa_outofband_transition(const struct aa_dfa *dfa,
+				       aa_state_t state);
+aa_state_t aa_dfa_match_until(const struct aa_dfa *dfa, aa_state_t start,
 			      const char *str, const char **retpos);
-aa_state_t aa_dfa_matchn_until(struct aa_dfa *dfa, aa_state_t start,
+aa_state_t aa_dfa_matchn_until(const struct aa_dfa *dfa, aa_state_t start,
 			       const char *str, int n, const char **retpos);
 
 void aa_dfa_free_kref(struct kref *kref);
@@ -152,7 +163,7 @@ struct match_workbuf N = {		\
 	.len = 0,			\
 }
 
-aa_state_t aa_dfa_leftmatch(struct aa_dfa *dfa, aa_state_t start,
+aa_state_t aa_dfa_leftmatch(const struct aa_dfa *dfa, aa_state_t start,
 			    const char *str, unsigned int *count);
 
 /**

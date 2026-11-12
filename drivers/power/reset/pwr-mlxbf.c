@@ -48,7 +48,7 @@ static int pwr_mlxbf_probe(struct platform_device *pdev)
 	const char *hid;
 	int irq, err;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -68,8 +68,6 @@ static int pwr_mlxbf_probe(struct platform_device *pdev)
 		return err;
 
 	err = devm_request_irq(dev, irq, pwr_mlxbf_irq, 0, hid, priv);
-	if (err)
-		dev_err(dev, "Failed request of %s irq\n", priv->hid);
 
 	return err;
 }

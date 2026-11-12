@@ -31,7 +31,7 @@ static int idpf_init_vector_stack(struct idpf_adapter *adapter)
 	stack->base = min_vec;
 	stack->top = min_vec;
 
-	stack->vec_idx = kcalloc(stack->size, sizeof(u16), GFP_KERNEL);
+	stack->vec_idx = kzalloc_objs(u16, stack->size);
 	if (!stack->vec_idx) {
 		mutex_unlock(&adapter->vector_lock);
 
@@ -68,9 +68,11 @@ static void idpf_deinit_vector_stack(struct idpf_adapter *adapter)
  * This will also disable interrupt mode and queue up mailbox task. Mailbox
  * task will reschedule itself if not in interrupt mode.
  */
-static void idpf_mb_intr_rel_irq(struct idpf_adapter *adapter)
+void idpf_mb_intr_rel_irq(struct idpf_adapter *adapter)
 {
-	clear_bit(IDPF_MB_INTR_MODE, adapter->flags);
+	if (!test_and_clear_bit(IDPF_MB_INTR_MODE, adapter->flags))
+		return;
+
 	kfree(free_irq(adapter->msix_entries[0].vector, adapter));
 	queue_delayed_work(adapter->mbx_wq, &adapter->mbx_task, 0);
 }
@@ -139,7 +141,7 @@ static int idpf_mb_intr_req_irq(struct idpf_adapter *adapter)
 	if (err) {
 		dev_err(&adapter->pdev->dev,
 			"IRQ request for mailbox failed, error: %d\n", err);
-
+		kfree(name);
 		return err;
 	}
 
@@ -376,7 +378,7 @@ int idpf_intr_req(struct idpf_adapter *adapter)
 
 	adapter->mb_vector.v_idx = le16_to_cpu(adapter->caps.mailbox_vector_id);
 
-	vecids = kcalloc(actual_vecs, sizeof(u16), GFP_KERNEL);
+	vecids = kzalloc_objs(u16, actual_vecs);
 	if (!vecids) {
 		err = -ENOMEM;
 		goto free_msix;
@@ -815,6 +817,21 @@ static void idpf_attach_and_open(struct idpf_adapter *adapter)
 	}
 }
 
+static void idpf_vport_set_pacing_offload(struct idpf_vport *vport,
+					  struct net_device *netdev)
+{
+	struct idpf_adapter *adapter = vport->adapter;
+	u32 max_horizon = 0;
+
+	if (adapter->edt_caps.time_horizon_ns &&
+	    idpf_is_queue_model_split(vport->dflt_qv_rsrc.txq_model) &&
+	    !idpf_is_cap_ena(adapter, IDPF_OTHER_CAPS,
+			     VIRTCHNL2_CAP_SPLITQ_QSCHED))
+		max_horizon = adapter->edt_caps.time_horizon_ns;
+
+	WRITE_ONCE(netdev->max_pacing_offload_horizon, max_horizon);
+}
+
 /**
  * idpf_cfg_netdev - Allocate, configure and register a netdev
  * @vport: main vport structure
@@ -847,6 +864,8 @@ static int idpf_cfg_netdev(struct idpf_vport *vport)
 		np->vport_id = vport->vport_id;
 		np->max_tx_hdr_size = idpf_get_max_tx_hdr_size(adapter);
 		vport->netdev = netdev;
+
+		idpf_vport_set_pacing_offload(vport, netdev);
 
 		return idpf_init_mac_addr(vport, netdev);
 	}
@@ -887,6 +906,8 @@ static int idpf_cfg_netdev(struct idpf_vport *vport)
 	/* configure default MTU size */
 	netdev->min_mtu = ETH_MIN_MTU;
 	netdev->max_mtu = vport->max_mtu;
+
+	idpf_vport_set_pacing_offload(vport, netdev);
 
 	dflt_features = NETIF_F_SG	|
 			NETIF_F_HIGHDMA;
@@ -1109,8 +1130,6 @@ static void idpf_vport_rel(struct idpf_vport *vport)
 
 	kfree(adapter->vport_params_recvd[idx]);
 	adapter->vport_params_recvd[idx] = NULL;
-	kfree(adapter->vport_params_reqd[idx]);
-	adapter->vport_params_reqd[idx] = NULL;
 
 	kfree(vport);
 	adapter->num_alloc_vports--;
@@ -1279,7 +1298,7 @@ static struct idpf_vport *idpf_vport_alloc(struct idpf_adapter *adapter,
 
 	rsrc = &vport->dflt_qv_rsrc;
 	rsrc->dev = &adapter->pdev->dev;
-	rsrc->q_vector_idxs = kcalloc(num_max_q, sizeof(u16), GFP_KERNEL);
+	rsrc->q_vector_idxs = kzalloc_objs(u16, num_max_q);
 	if (!rsrc->q_vector_idxs)
 		goto free_vport;
 
@@ -1373,6 +1392,7 @@ void idpf_statistics_task(struct work_struct *work)
  */
 void idpf_mbx_task(struct work_struct *work)
 {
+	struct libie_ctlq_xn_recv_params xn_params;
 	struct idpf_adapter *adapter;
 
 	adapter = container_of(work, struct idpf_adapter, mbx_task.work);
@@ -1383,7 +1403,14 @@ void idpf_mbx_task(struct work_struct *work)
 		queue_delayed_work(adapter->mbx_wq, &adapter->mbx_task,
 				   usecs_to_jiffies(300));
 
-	idpf_recv_mb_msg(adapter, adapter->hw.arq);
+	xn_params = (struct libie_ctlq_xn_recv_params) {
+		.xnm = adapter->xnm,
+		.ctlq = adapter->arq,
+		.ctlq_msg_handler = idpf_recv_event_msg,
+		.budget = LIBIE_CTLQ_MAX_XN_ENTRIES,
+	};
+
+	libie_ctlq_xn_recv(&xn_params);
 }
 
 /**
@@ -1849,15 +1876,14 @@ void idpf_deinit_task(struct idpf_adapter *adapter)
 
 /**
  * idpf_check_reset_complete - check that reset is complete
- * @hw: pointer to hw struct
+ * @adapter: adapter to check
  * @reset_reg: struct with reset registers
  *
  * Returns 0 if device is ready to use, or -EBUSY if it's in reset.
  **/
-static int idpf_check_reset_complete(struct idpf_hw *hw,
+static int idpf_check_reset_complete(struct idpf_adapter *adapter,
 				     struct idpf_reset_reg *reset_reg)
 {
-	struct idpf_adapter *adapter = hw->back;
 	int i;
 
 	for (i = 0; i < 2000; i++) {
@@ -1920,7 +1946,7 @@ static void idpf_init_hard_reset(struct idpf_adapter *adapter)
 	}
 
 	/* Wait for reset to complete */
-	err = idpf_check_reset_complete(&adapter->hw, &adapter->reset_reg);
+	err = idpf_check_reset_complete(adapter, &adapter->reset_reg);
 	if (err) {
 		dev_err(dev, "The driver was unable to contact the device's firmware. Check that the FW is running. Driver state= 0x%x\n",
 			adapter->state);
@@ -1934,14 +1960,11 @@ static void idpf_init_hard_reset(struct idpf_adapter *adapter)
 		goto unlock_mutex;
 	}
 
-	queue_delayed_work(adapter->mbx_wq, &adapter->mbx_task, 0);
-
 	/* Initialize the state machine, also allocate memory and request
 	 * resources
 	 */
 	err = idpf_vc_core_init(adapter);
 	if (err) {
-		cancel_delayed_work_sync(&adapter->mbx_task);
 		idpf_deinit_dflt_mbx(adapter);
 		goto unlock_mutex;
 	}
@@ -1987,7 +2010,8 @@ void idpf_vc_event_task(struct work_struct *work)
 	return;
 
 func_reset:
-	idpf_vc_xn_shutdown(adapter->vcxn_mngr);
+	if (adapter->xnm)
+		libie_ctlq_xn_shutdown(adapter->xnm);
 drv_load:
 	set_bit(IDPF_HR_RESET_IN_PROG, adapter->flags);
 	idpf_init_hard_reset(adapter);
@@ -2568,44 +2592,6 @@ unlock_mutex:
 	idpf_vport_ctrl_unlock(netdev);
 
 	return err;
-}
-
-/**
- * idpf_alloc_dma_mem - Allocate dma memory
- * @hw: pointer to hw struct
- * @mem: pointer to dma_mem struct
- * @size: size of the memory to allocate
- */
-void *idpf_alloc_dma_mem(struct idpf_hw *hw, struct idpf_dma_mem *mem, u64 size)
-{
-	struct idpf_adapter *adapter = hw->back;
-	size_t sz = ALIGN(size, 4096);
-
-	/* The control queue resources are freed under a spinlock, contiguous
-	 * pages will avoid IOMMU remapping and the use vmap (and vunmap in
-	 * dma_free_*() path.
-	 */
-	mem->va = dma_alloc_attrs(&adapter->pdev->dev, sz, &mem->pa,
-				  GFP_KERNEL, DMA_ATTR_FORCE_CONTIGUOUS);
-	mem->size = sz;
-
-	return mem->va;
-}
-
-/**
- * idpf_free_dma_mem - Free the allocated dma memory
- * @hw: pointer to hw struct
- * @mem: pointer to dma_mem struct
- */
-void idpf_free_dma_mem(struct idpf_hw *hw, struct idpf_dma_mem *mem)
-{
-	struct idpf_adapter *adapter = hw->back;
-
-	dma_free_attrs(&adapter->pdev->dev, mem->size,
-		       mem->va, mem->pa, DMA_ATTR_FORCE_CONTIGUOUS);
-	mem->size = 0;
-	mem->va = NULL;
-	mem->pa = 0;
 }
 
 static int idpf_hwtstamp_set(struct net_device *netdev,

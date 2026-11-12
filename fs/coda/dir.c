@@ -73,7 +73,7 @@ static struct dentry *coda_lookup(struct inode *dir, struct dentry *entry, unsig
 }
 
 
-int coda_permission(struct mnt_idmap *idmap, struct inode *inode,
+int coda_permission(const struct mnt_idmap *idmap, struct inode *inode,
 		    int mask)
 {
 	int error;
@@ -133,8 +133,8 @@ static inline void coda_dir_drop_nlink(struct inode *dir)
 }
 
 /* creation routines: create, mknod, mkdir, link, symlink */
-static int coda_create(struct mnt_idmap *idmap, struct inode *dir,
-		       struct dentry *de, umode_t mode, bool excl)
+static int coda_create(const struct mnt_idmap *idmap, struct inode *dir,
+		       struct dentry *de, umode_t mode)
 {
 	int error;
 	const char *name=de->d_name.name;
@@ -166,7 +166,7 @@ err_out:
 	return error;
 }
 
-static struct dentry *coda_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+static struct dentry *coda_mkdir(const struct mnt_idmap *idmap, struct inode *dir,
 				 struct dentry *de, umode_t mode)
 {
 	struct inode *inode;
@@ -179,7 +179,12 @@ static struct dentry *coda_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	if (is_root_inode(dir) && coda_iscontrol(name, len))
 		return ERR_PTR(-EPERM);
 
-	attrs.va_mode = mode;
+	/*
+	 * vfs_mkdir() now passes S_IFDIR in @mode, but @mode is forwarded
+	 * verbatim to userspace, which has only ever been given the permission
+	 * bits. Strip the type bit until venus is known to cope with it.
+	 */
+	attrs.va_mode = mode & ~S_IFDIR;
 	error = venus_mkdir(dir->i_sb, coda_i2f(dir),
 			       name, len, &newfid, &attrs);
 	if (error)
@@ -228,7 +233,7 @@ static int coda_link(struct dentry *source_de, struct inode *dir_inode,
 }
 
 
-static int coda_symlink(struct mnt_idmap *idmap,
+static int coda_symlink(const struct mnt_idmap *idmap,
 			struct inode *dir_inode, struct dentry *de,
 			const char *symname)
 {
@@ -295,7 +300,7 @@ static int coda_rmdir(struct inode *dir, struct dentry *de)
 }
 
 /* rename */
-static int coda_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+static int coda_rename(const struct mnt_idmap *idmap, struct inode *old_dir,
 		       struct dentry *old_dentry, struct inode *new_dir,
 		       struct dentry *new_dentry, unsigned int flags)
 {

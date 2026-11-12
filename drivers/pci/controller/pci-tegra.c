@@ -36,6 +36,7 @@
 #include <linux/phy/phy.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/reset.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
@@ -1349,15 +1350,14 @@ static int tegra_pcie_port_get_phys(struct tegra_pcie_port *port)
 	unsigned int i;
 	int err;
 
-	port->phys = devm_kcalloc(dev, port->lanes, sizeof(phy), GFP_KERNEL);
+	port->phys = devm_kzalloc_objs(dev, phy, port->lanes);
 	if (!port->phys)
 		return -ENOMEM;
 
 	for (i = 0; i < port->lanes; i++) {
 		phy = devm_of_phy_optional_get_index(dev, port->np, "pcie", i);
 		if (IS_ERR(phy)) {
-			dev_err(dev, "failed to get PHY#%u: %ld\n", i,
-				PTR_ERR(phy));
+			dev_err(dev, "failed to get PHY#%u: %pe\n", i, phy);
 			return PTR_ERR(phy);
 		}
 
@@ -1950,9 +1950,8 @@ static int tegra_pcie_get_legacy_regulators(struct tegra_pcie *pcie)
 		return -ENODEV;
 	}
 
-	pcie->supplies = devm_kcalloc(dev, pcie->num_supplies,
-				      sizeof(*pcie->supplies),
-				      GFP_KERNEL);
+	pcie->supplies = devm_kzalloc_objs(dev, *pcie->supplies,
+					   pcie->num_supplies);
 	if (!pcie->supplies)
 		return -ENOMEM;
 
@@ -1983,9 +1982,8 @@ static int tegra_pcie_get_regulators(struct tegra_pcie *pcie, u32 lane_mask)
 	if (of_device_is_compatible(np, "nvidia,tegra186-pcie")) {
 		pcie->num_supplies = 4;
 
-		pcie->supplies = devm_kcalloc(pcie->dev, pcie->num_supplies,
-					      sizeof(*pcie->supplies),
-					      GFP_KERNEL);
+		pcie->supplies = devm_kzalloc_objs(pcie->dev, *pcie->supplies,
+						   pcie->num_supplies);
 		if (!pcie->supplies)
 			return -ENOMEM;
 
@@ -1996,9 +1994,8 @@ static int tegra_pcie_get_regulators(struct tegra_pcie *pcie, u32 lane_mask)
 	} else if (of_device_is_compatible(np, "nvidia,tegra210-pcie")) {
 		pcie->num_supplies = 3;
 
-		pcie->supplies = devm_kcalloc(pcie->dev, pcie->num_supplies,
-					      sizeof(*pcie->supplies),
-					      GFP_KERNEL);
+		pcie->supplies = devm_kzalloc_objs(pcie->dev, *pcie->supplies,
+						   pcie->num_supplies);
 		if (!pcie->supplies)
 			return -ENOMEM;
 
@@ -2008,9 +2005,8 @@ static int tegra_pcie_get_regulators(struct tegra_pcie *pcie, u32 lane_mask)
 	} else if (of_device_is_compatible(np, "nvidia,tegra124-pcie")) {
 		pcie->num_supplies = 4;
 
-		pcie->supplies = devm_kcalloc(dev, pcie->num_supplies,
-					      sizeof(*pcie->supplies),
-					      GFP_KERNEL);
+		pcie->supplies = devm_kzalloc_objs(dev, *pcie->supplies,
+						   pcie->num_supplies);
 		if (!pcie->supplies)
 			return -ENOMEM;
 
@@ -2032,9 +2028,8 @@ static int tegra_pcie_get_regulators(struct tegra_pcie *pcie, u32 lane_mask)
 		pcie->num_supplies = 4 + (need_pexa ? 2 : 0) +
 					 (need_pexb ? 2 : 0);
 
-		pcie->supplies = devm_kcalloc(dev, pcie->num_supplies,
-					      sizeof(*pcie->supplies),
-					      GFP_KERNEL);
+		pcie->supplies = devm_kzalloc_objs(dev, *pcie->supplies,
+						   pcie->num_supplies);
 		if (!pcie->supplies)
 			return -ENOMEM;
 
@@ -2055,9 +2050,8 @@ static int tegra_pcie_get_regulators(struct tegra_pcie *pcie, u32 lane_mask)
 	} else if (of_device_is_compatible(np, "nvidia,tegra20-pcie")) {
 		pcie->num_supplies = 5;
 
-		pcie->supplies = devm_kcalloc(dev, pcie->num_supplies,
-					      sizeof(*pcie->supplies),
-					      GFP_KERNEL);
+		pcie->supplies = devm_kzalloc_objs(dev, *pcie->supplies,
+						   pcie->num_supplies);
 		if (!pcie->supplies)
 			return -ENOMEM;
 
@@ -2133,7 +2127,7 @@ static int tegra_pcie_parse_dt(struct tegra_pcie *pcie)
 		mask |= ((1 << value) - 1) << lane;
 		lane += value;
 
-		rp = devm_kzalloc(dev, sizeof(*rp), GFP_KERNEL);
+		rp = devm_kzalloc_obj(dev, *rp);
 		if (!rp)
 			return -ENOMEM;
 

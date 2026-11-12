@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
  * Copyright (C) 2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2023, 2025 Intel Corporation
+ * Copyright (C) 2018-2023, 2025-2026 Intel Corporation
  */
 #ifndef __iwl_fw_acpi__
 #define __iwl_fw_acpi__
@@ -14,6 +14,8 @@
 
 #define ACPI_WRDS_METHOD	"WRDS"
 #define ACPI_EWRD_METHOD	"EWRD"
+#define ACPI_WSSS_METHOD	"WSSS"
+#define ACPI_EWSS_METHOD	"EWSS"
 #define ACPI_WGDS_METHOD	"WGDS"
 #define ACPI_WRDD_METHOD	"WRDD"
 #define ACPI_SPLC_METHOD	"SPLC"
@@ -89,7 +91,6 @@
  * and one for the status
  */
 #define ACPI_GLAI_WIFI_DATA_SIZE	2
-#define ACPI_GLAI_MAX_STATUS		2
 /*
  * TAS size: 1 elelment for type,
  *	     1 element for enabled field,
@@ -110,12 +111,6 @@
 /* used for ACPI PPAG table rev 5 */
 #define ACPI_PPAG_WIFI_DATA_SIZE_V3	((ACPI_PPAG_NUM_CHAINS * \
 					  ACPI_PPAG_NUM_BANDS_V3) + 2)
-
-#define IWL_SAR_ENABLE_MSK		BIT(0)
-#define IWL_REDUCE_POWER_FLAGS_POS	1
-
-/* The Inidcator whether UEFI WIFI GUID tables are locked is read from ACPI */
-#define UEFI_WIFI_GUID_UNLOCKED		0
 
 #define ACPI_DSM_REV 0
 
@@ -182,6 +177,10 @@ int iwl_acpi_get_wrds_table(struct iwl_fw_runtime *fwrt);
 
 int iwl_acpi_get_ewrd_table(struct iwl_fw_runtime *fwrt);
 
+int iwl_acpi_get_wsss_table(struct iwl_fw_runtime *fwrt);
+
+int iwl_acpi_get_ewss_table(struct iwl_fw_runtime *fwrt);
+
 int iwl_acpi_get_wgds_table(struct iwl_fw_runtime *fwrt);
 
 int iwl_acpi_get_tas_table(struct iwl_fw_runtime *fwrt,
@@ -232,6 +231,16 @@ static inline int iwl_acpi_get_wrds_table(struct iwl_fw_runtime *fwrt)
 }
 
 static inline int iwl_acpi_get_ewrd_table(struct iwl_fw_runtime *fwrt)
+{
+	return -ENOENT;
+}
+
+static inline int iwl_acpi_get_wsss_table(struct iwl_fw_runtime *fwrt)
+{
+	return -ENOENT;
+}
+
+static inline int iwl_acpi_get_ewss_table(struct iwl_fw_runtime *fwrt)
 {
 	return -ENOENT;
 }

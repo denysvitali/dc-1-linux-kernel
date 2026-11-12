@@ -79,7 +79,10 @@ static int create_strip_zones(struct mddev *mddev, struct r0conf **private_conf)
 	*private_conf = ERR_PTR(-ENOMEM);
 	if (!conf)
 		return -ENOMEM;
+
+	cnt = 0;
 	rdev_for_each(rdev1, mddev) {
+		cnt++;
 		pr_debug("md/raid0:%s: looking at %pg\n",
 			 mdname(mddev),
 			 rdev1->bdev);
@@ -144,6 +147,14 @@ static int create_strip_zones(struct mddev *mddev, struct r0conf **private_conf)
 	}
 
 	err = -ENOMEM;
+
+	if (cnt != mddev->raid_disks) {
+		pr_warn("md/raid0:%s: too few disks (%d of %d) - aborting!\n",
+			mdname(mddev), cnt, mddev->raid_disks);
+		err = -EINVAL;
+		goto abort;
+	}
+
 	conf->strip_zone = kvzalloc_objs(struct strip_zone, conf->nr_strip_zones);
 	if (!conf->strip_zone)
 		goto abort;
@@ -199,11 +210,6 @@ static int create_strip_zones(struct mddev *mddev, struct r0conf **private_conf)
 		if (!smallest || (rdev1->sectors < smallest->sectors))
 			smallest = rdev1;
 		cnt++;
-	}
-	if (cnt != mddev->raid_disks) {
-		pr_warn("md/raid0:%s: too few disks (%d of %d) - aborting!\n",
-			mdname(mddev), cnt, mddev->raid_disks);
-		goto abort;
 	}
 	zone->nb_dev = cnt;
 	zone->zone_end = smallest->sectors * cnt;
@@ -385,6 +391,7 @@ static int raid0_set_limits(struct mddev *mddev)
 	int err;
 
 	md_init_stacking_limits(&lim);
+	lim.features |= BLK_FEAT_NOWAIT;
 	lim.max_hw_sectors = mddev->chunk_sectors;
 	lim.max_write_zeroes_sectors = mddev->chunk_sectors;
 	lim.max_hw_wzeroes_unmap_sectors = mddev->chunk_sectors;

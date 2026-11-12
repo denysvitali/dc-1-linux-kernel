@@ -22,6 +22,7 @@
  */
 
 #include "amdgpu.h"
+#include "amdgpu_ip.h"
 #include "amdgpu_jpeg.h"
 #include "soc15.h"
 #include "soc15d.h"
@@ -119,6 +120,19 @@ static int jpeg_v4_0_3_early_init(struct amdgpu_ip_block *ip_block)
 {
 	struct amdgpu_device *adev = ip_block->adev;
 
+	switch (amdgpu_user_queue) {
+	case -1:
+	case 0:
+	default:
+		adev->jpeg.disable_kq = false;
+		adev->jpeg.disable_uq = true;
+		break;
+	case 2:
+		adev->jpeg.disable_kq = true;
+		adev->jpeg.disable_uq = true;
+		break;
+	}
+
 	adev->jpeg.num_jpeg_rings = AMDGPU_MAX_JPEG_RINGS_4_0_3;
 
 	jpeg_v4_0_3_set_dec_ring_funcs(adev);
@@ -175,6 +189,10 @@ static int jpeg_v4_0_3_sw_init(struct amdgpu_ip_block *ip_block)
 		for (j = 0; j < adev->jpeg.num_jpeg_rings; ++j) {
 			ring = &adev->jpeg.inst[i].ring_dec[j];
 			ring->use_doorbell = true;
+			if (adev->jpeg.disable_kq) {
+				ring->no_scheduler = true;
+				ring->no_user_submission = true;
+			}
 			ring->vm_hub = AMDGPU_MMHUB0(adev->jpeg.inst[i].aid_id);
 			if (!amdgpu_sriov_vf(adev)) {
 				ring->doorbell_index =
@@ -230,16 +248,12 @@ static int jpeg_v4_0_3_sw_init(struct amdgpu_ip_block *ip_block)
  *
  * @ip_block: Pointer to the amdgpu_ip_block for this hw instance.
  *
- * JPEG suspend and free up sw allocation
+ * Free up JPEG sw allocation
  */
 static int jpeg_v4_0_3_sw_fini(struct amdgpu_ip_block *ip_block)
 {
 	struct amdgpu_device *adev = ip_block->adev;
 	int r;
-
-	r = amdgpu_jpeg_suspend(adev);
-	if (r)
-		return r;
 
 	amdgpu_jpeg_sysfs_reset_mask_fini(adev);
 
@@ -417,12 +431,16 @@ static int jpeg_v4_0_3_hw_init(struct amdgpu_ip_block *ip_block)
 							VCN_JPEG_DB_CTRL__EN_MASK);
 				r = amdgpu_ring_test_helper(ring);
 				if (r)
-					return r;
+					goto error;
 			}
 		}
 	}
 
 	return 0;
+
+error:
+	amdgpu_jpeg_cancel_idle_work(adev);
+	return r;
 }
 
 /**
@@ -437,7 +455,9 @@ static int jpeg_v4_0_3_hw_fini(struct amdgpu_ip_block *ip_block)
 	struct amdgpu_device *adev = ip_block->adev;
 	int ret = 0;
 
-	cancel_delayed_work_sync(&adev->jpeg.idle_work);
+	/* Teardown cancelled it synchronously in early_fini */
+	if (!adev->shutdown)
+		amdgpu_jpeg_cancel_idle_work(adev);
 
 	if (!amdgpu_sriov_vf(adev)) {
 		if (adev->jpeg.cur_state != AMD_PG_STATE_GATE)
@@ -459,15 +479,7 @@ static int jpeg_v4_0_3_hw_fini(struct amdgpu_ip_block *ip_block)
  */
 static int jpeg_v4_0_3_suspend(struct amdgpu_ip_block *ip_block)
 {
-	int r;
-
-	r = jpeg_v4_0_3_hw_fini(ip_block);
-	if (r)
-		return r;
-
-	r = amdgpu_jpeg_suspend(ip_block->adev);
-
-	return r;
+	return jpeg_v4_0_3_hw_fini(ip_block);
 }
 
 /**
@@ -1204,11 +1216,11 @@ static const struct amd_ip_funcs jpeg_v4_0_3_ip_funcs = {
 	.early_init = jpeg_v4_0_3_early_init,
 	.sw_init = jpeg_v4_0_3_sw_init,
 	.sw_fini = jpeg_v4_0_3_sw_fini,
+	.early_fini = amdgpu_jpeg_early_fini,
 	.hw_init = jpeg_v4_0_3_hw_init,
 	.hw_fini = jpeg_v4_0_3_hw_fini,
 	.suspend = jpeg_v4_0_3_suspend,
 	.resume = jpeg_v4_0_3_resume,
-	.is_idle = jpeg_v4_0_3_is_idle,
 	.wait_for_idle = jpeg_v4_0_3_wait_for_idle,
 	.set_clockgating_state = jpeg_v4_0_3_set_clockgating_state,
 	.set_powergating_state = jpeg_v4_0_3_set_powergating_state,
@@ -1425,72 +1437,6 @@ static const struct amdgpu_ras_block_hw_ops jpeg_v4_0_3_ras_hw_ops = {
 	.query_poison_status = jpeg_v4_0_3_query_ras_poison_status,
 };
 
-static int jpeg_v4_0_3_aca_bank_parser(struct aca_handle *handle, struct aca_bank *bank,
-				      enum aca_smu_type type, void *data)
-{
-	struct aca_bank_info info;
-	u64 misc0;
-	int ret;
-
-	ret = aca_bank_info_decode(bank, &info);
-	if (ret)
-		return ret;
-
-	misc0 = bank->regs[ACA_REG_IDX_MISC0];
-	switch (type) {
-	case ACA_SMU_TYPE_UE:
-		bank->aca_err_type = ACA_ERROR_TYPE_UE;
-		ret = aca_error_cache_log_bank_error(handle, &info, ACA_ERROR_TYPE_UE,
-						     1ULL);
-		break;
-	case ACA_SMU_TYPE_CE:
-		bank->aca_err_type = ACA_ERROR_TYPE_CE;
-		ret = aca_error_cache_log_bank_error(handle, &info, bank->aca_err_type,
-						     ACA_REG__MISC0__ERRCNT(misc0));
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	return ret;
-}
-
-/* reference to smu driver if header file */
-static int jpeg_v4_0_3_err_codes[] = {
-	16, 17, 18, 19, 20, 21, 22, 23, /* JPEG[0-7][S|D] */
-	24, 25, 26, 27, 28, 29, 30, 31
-};
-
-static bool jpeg_v4_0_3_aca_bank_is_valid(struct aca_handle *handle, struct aca_bank *bank,
-					 enum aca_smu_type type, void *data)
-{
-	u32 instlo;
-
-	instlo = ACA_REG__IPID__INSTANCEIDLO(bank->regs[ACA_REG_IDX_IPID]);
-	instlo &= GENMASK(31, 1);
-
-	if (instlo != mmSMNAID_AID0_MCA_SMU)
-		return false;
-
-	if (aca_bank_check_error_codes(handle->adev, bank,
-				       jpeg_v4_0_3_err_codes,
-				       ARRAY_SIZE(jpeg_v4_0_3_err_codes)))
-		return false;
-
-	return true;
-}
-
-static const struct aca_bank_ops jpeg_v4_0_3_aca_bank_ops = {
-	.aca_bank_parser = jpeg_v4_0_3_aca_bank_parser,
-	.aca_bank_is_valid = jpeg_v4_0_3_aca_bank_is_valid,
-};
-
-static const struct aca_info jpeg_v4_0_3_aca_info = {
-	.hwip = ACA_HWIP_TYPE_SMU,
-	.mask = ACA_ERROR_UE_MASK,
-	.bank_ops = &jpeg_v4_0_3_aca_bank_ops,
-};
-
 static int jpeg_v4_0_3_ras_late_init(struct amdgpu_device *adev, struct ras_common_if *ras_block)
 {
 	int r;
@@ -1505,11 +1451,6 @@ static int jpeg_v4_0_3_ras_late_init(struct amdgpu_device *adev, struct ras_comm
 		if (r)
 			goto late_fini;
 	}
-
-	r = amdgpu_ras_bind_aca(adev, AMDGPU_RAS_BLOCK__JPEG,
-				&jpeg_v4_0_3_aca_info, NULL);
-	if (r)
-		goto late_fini;
 
 	return 0;
 

@@ -122,7 +122,7 @@ static int pca9570_probe(struct i2c_client *client)
 	struct pca9570 *gpio;
 	int ret;
 
-	gpio = devm_kzalloc(&client->dev, sizeof(*gpio), GFP_KERNEL);
+	gpio = devm_kzalloc_obj(&client->dev, *gpio);
 	if (!gpio)
 		return -ENOMEM;
 
@@ -133,7 +133,7 @@ static int pca9570_probe(struct i2c_client *client)
 	gpio->chip.get = pca9570_get;
 	gpio->chip.set = pca9570_set;
 	gpio->chip.base = -1;
-	gpio->chip_data = device_get_match_data(&client->dev);
+	gpio->chip_data = i2c_get_match_data(client);
 	gpio->chip.ngpio = gpio->chip_data->ngpio;
 	gpio->chip.can_sleep = true;
 

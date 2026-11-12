@@ -14,6 +14,7 @@ struct fuse_dev;
 struct fuse_args;
 struct fuse_copy_state;
 struct fuse_backing_map;
+struct fuse_backing_create_in;
 struct file;
 struct folio;
 enum fuse_notify_code;
@@ -22,6 +23,7 @@ struct fuse_chan_param {
 	unsigned int minor;
 	unsigned int max_write;
 	unsigned int max_pages;
+	bool io_uring_enabled;
 };
 
 struct fuse_chan *fuse_chan_new(void);
@@ -34,7 +36,6 @@ void fuse_chan_max_background_set(struct fuse_chan *fch, unsigned int val);
 unsigned int fuse_chan_num_waiting(struct fuse_chan *fch);
 void fuse_chan_set_fc(struct fuse_chan *fch, struct fuse_conn *fc);
 void fuse_chan_set_initialized(struct fuse_chan *fch, struct fuse_chan_param *param);
-void fuse_chan_io_uring_enable(struct fuse_chan *fch);
 ssize_t fuse_chan_send(struct fuse_chan *fch, struct fuse_args *args);
 int fuse_chan_send_bg(struct fuse_chan *fch, struct fuse_args *args, gfp_t gfp_flags);
 int fuse_chan_send_notify_reply(struct fuse_chan *fch, struct fuse_args *args, u64 unique);
@@ -87,10 +88,12 @@ int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 
 int fuse_backing_open(struct fuse_conn *fc, struct fuse_backing_map *map);
 int fuse_backing_close(struct fuse_conn *fc, int backing_id);
+int fuse_backing_open_64(struct fuse_conn *fc, struct fuse_backing_create_in *map);
+int fuse_backing_close_64(struct fuse_conn *fc, u64 backing_id);
 
 int fuse_copy_one(struct fuse_copy_state *cs, void *val, unsigned size);
 int fuse_copy_folio(struct fuse_copy_state *cs, struct folio **foliop,
-		    unsigned offset, unsigned count, int zeroing);
+		    unsigned offset, unsigned count);
 void fuse_copy_finish(struct fuse_copy_state *cs);
 
 #ifdef CONFIG_FUSE_IO_URING

@@ -342,9 +342,9 @@ static int tegra_gpio_irq_set_type(struct irq_data *d, unsigned int type)
 		return ret;
 	}
 
-	if (type & (IRQ_TYPE_LEVEL_LOW | IRQ_TYPE_LEVEL_HIGH))
+	if (type & IRQ_TYPE_LEVEL_MASK)
 		irq_set_handler_locked(d, handle_level_irq);
-	else if (type & (IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING))
+	else if (type & IRQ_TYPE_EDGE_BOTH)
 		irq_set_handler_locked(d, handle_edge_irq);
 
 	if (d->parent_data)
@@ -682,7 +682,7 @@ static int tegra_gpio_probe(struct platform_device *pdev)
 	unsigned int i, j;
 	int ret;
 
-	tgi = devm_kzalloc(&pdev->dev, sizeof(*tgi), GFP_KERNEL);
+	tgi = devm_kzalloc_obj(&pdev->dev, *tgi);
 	if (!tgi)
 		return -ENOMEM;
 
@@ -717,13 +717,12 @@ static int tegra_gpio_probe(struct platform_device *pdev)
 	if (tgi->soc->debounce_supported)
 		tgi->gc.set_config = tegra_gpio_set_config;
 
-	tgi->bank_info = devm_kcalloc(&pdev->dev, tgi->bank_count,
-				      sizeof(*tgi->bank_info), GFP_KERNEL);
+	tgi->bank_info = devm_kzalloc_objs(&pdev->dev, *tgi->bank_info,
+					   tgi->bank_count);
 	if (!tgi->bank_info)
 		return -ENOMEM;
 
-	tgi->irqs = devm_kcalloc(&pdev->dev, tgi->bank_count,
-				 sizeof(*tgi->irqs), GFP_KERNEL);
+	tgi->irqs = devm_kzalloc_objs(&pdev->dev, *tgi->irqs, tgi->bank_count);
 	if (!tgi->irqs)
 		return -ENOMEM;
 

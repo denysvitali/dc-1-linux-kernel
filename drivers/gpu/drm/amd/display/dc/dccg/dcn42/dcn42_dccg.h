@@ -247,6 +247,7 @@ void dccg42_otg_add_pixel(struct dccg *dccg,
 void dccg42_otg_drop_pixel(struct dccg *dccg,
 		uint32_t otg_inst);
 void dccg42_enable_global_fgcg(struct dccg *dccg, bool value);
+bool dccg42_get_global_fgcg_status(struct dccg *dccg);
 
 void dccg42_set_physymclk(
 		struct dccg *dccg,
@@ -261,7 +262,7 @@ void dccg42_set_pixel_rate_div(
 		enum pixel_rate_div unused);
 
 void dccg42_trigger_dio_fifo_resync(struct dccg *dccg);
-
+void dccg42_set_hdmistreamclk_root_clock_gating(struct dccg *dccg, bool enable);
 struct dccg *dccg42_create(
 	struct dc_context *ctx,
 	const struct dccg_registers *regs,

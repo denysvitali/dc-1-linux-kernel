@@ -35,6 +35,7 @@ int mal_register_commac(struct mal_instance *mal, struct mal_commac *commac)
 {
 	unsigned long flags;
 
+	netdev_lock(mal->napi.dev);
 	spin_lock_irqsave(&mal->lock, flags);
 
 	MAL_DBG(mal, "reg(%08x, %08x)" NL,
@@ -44,18 +45,20 @@ int mal_register_commac(struct mal_instance *mal, struct mal_commac *commac)
 	if ((mal->tx_chan_mask & commac->tx_chan_mask) ||
 	    (mal->rx_chan_mask & commac->rx_chan_mask)) {
 		spin_unlock_irqrestore(&mal->lock, flags);
+		netdev_unlock(mal->napi.dev);
 		printk(KERN_WARNING "mal%d: COMMAC channels conflict!\n",
 		       mal->index);
 		return -EBUSY;
 	}
 
 	if (list_empty(&mal->list))
-		napi_enable(&mal->napi);
+		napi_enable_locked(&mal->napi);
 	mal->tx_chan_mask |= commac->tx_chan_mask;
 	mal->rx_chan_mask |= commac->rx_chan_mask;
 	list_add(&commac->list, &mal->list);
 
 	spin_unlock_irqrestore(&mal->lock, flags);
+	netdev_unlock(mal->napi.dev);
 
 	return 0;
 }
@@ -64,7 +67,9 @@ void mal_unregister_commac(struct mal_instance	*mal,
 		struct mal_commac *commac)
 {
 	unsigned long flags;
+	bool disable_napi;
 
+	netdev_lock(mal->napi.dev);
 	spin_lock_irqsave(&mal->lock, flags);
 
 	MAL_DBG(mal, "unreg(%08x, %08x)" NL,
@@ -73,10 +78,12 @@ void mal_unregister_commac(struct mal_instance	*mal,
 	mal->tx_chan_mask &= ~commac->tx_chan_mask;
 	mal->rx_chan_mask &= ~commac->rx_chan_mask;
 	list_del_init(&commac->list);
-	if (list_empty(&mal->list))
-		napi_disable(&mal->napi);
+	disable_napi = list_empty(&mal->list);
 
 	spin_unlock_irqrestore(&mal->lock, flags);
+	if (disable_napi)
+		napi_disable_locked(&mal->napi);
+	netdev_unlock(mal->napi.dev);
 }
 
 int mal_set_rcbs(struct mal_instance *mal, int channel, unsigned long size)
@@ -524,8 +531,7 @@ static int mal_probe(struct platform_device *ofdev)
 	unsigned long irqflags;
 	irq_handler_t hdlr_serr, hdlr_txde, hdlr_rxde;
 
-	mal = devm_kzalloc(&ofdev->dev, sizeof(struct mal_instance),
-			   GFP_KERNEL);
+	mal = devm_kzalloc_obj(&ofdev->dev, struct mal_instance);
 	if (!mal)
 		return -ENOMEM;
 
@@ -658,26 +664,26 @@ static int mal_probe(struct platform_device *ofdev)
 		hdlr_rxde = mal_rxde;
 	}
 
-	err = devm_request_irq(&ofdev->dev, mal->serr_irq, hdlr_serr, irqflags,
-			       "MAL SERR", mal);
+	err = request_irq(mal->serr_irq, hdlr_serr, irqflags,
+			  "MAL SERR", mal);
 	if (err)
 		goto fail2;
-	err = devm_request_irq(&ofdev->dev, mal->txde_irq, hdlr_txde, irqflags,
-			       "MAL TX DE", mal);
+	err = request_irq(mal->txde_irq, hdlr_txde, irqflags,
+			  "MAL TX DE", mal);
 	if (err)
-		goto fail2;
-	err = devm_request_irq(&ofdev->dev, mal->txeob_irq, mal_txeob, 0,
-			       "MAL TX EOB", mal);
+		goto fail_serr_irq;
+	err = request_irq(mal->txeob_irq, mal_txeob, 0,
+			  "MAL TX EOB", mal);
 	if (err)
-		goto fail2;
-	err = devm_request_irq(&ofdev->dev, mal->rxde_irq, hdlr_rxde, irqflags,
-			       "MAL RX DE", mal);
+		goto fail_txde_irq;
+	err = request_irq(mal->rxde_irq, hdlr_rxde, irqflags,
+			  "MAL RX DE", mal);
 	if (err)
-		goto fail2;
-	err = devm_request_irq(&ofdev->dev, mal->rxeob_irq, mal_rxeob, 0,
-			       "MAL RX EOB", mal);
+		goto fail_txeob_irq;
+	err = request_irq(mal->rxeob_irq, mal_rxeob, 0,
+			  "MAL RX EOB", mal);
 	if (err)
-		goto fail2;
+		goto fail_rxde_irq;
 
 	/* Enable all MAL SERR interrupt sources */
 	set_mal_dcrn(mal, MAL_IER, MAL_IER_EVENTS);
@@ -696,6 +702,14 @@ static int mal_probe(struct platform_device *ofdev)
 
 	return 0;
 
+ fail_rxde_irq:
+	free_irq(mal->rxde_irq, mal);
+ fail_txeob_irq:
+	free_irq(mal->txeob_irq, mal);
+ fail_txde_irq:
+	free_irq(mal->txde_irq, mal);
+ fail_serr_irq:
+	free_irq(mal->serr_irq, mal);
  fail2:
 	dma_free_coherent(&ofdev->dev, bd_size, mal->bd_virt, mal->bd_dma);
  fail_dummy:
@@ -721,6 +735,13 @@ static void mal_remove(struct platform_device *ofdev)
 	}
 
 	mal_reset(mal);
+
+	/* Free IRQs before freeing resources they access */
+	free_irq(mal->serr_irq, mal);
+	free_irq(mal->txde_irq, mal);
+	free_irq(mal->txeob_irq, mal);
+	free_irq(mal->rxde_irq, mal);
+	free_irq(mal->rxeob_irq, mal);
 
 	free_netdev(mal->dummy_dev);
 

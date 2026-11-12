@@ -12,8 +12,10 @@
  */
 
 #include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/err.h>
 #include <linux/gpio/driver.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
@@ -214,7 +216,7 @@ static int mtk_eint_set_type(struct irq_data *d, unsigned int type)
 		writel(mask, reg);
 	}
 
-	if (type & (IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING)) {
+	if (type & IRQ_TYPE_EDGE_BOTH) {
 		reg = mtk_eint_get_offset(eint, d->hwirq, eint->regs->sens_clr);
 		writel(mask, reg);
 	} else {
@@ -509,6 +511,27 @@ int mtk_eint_find_irq(struct mtk_eint *eint, unsigned long eint_n)
 }
 EXPORT_SYMBOL_GPL(mtk_eint_find_irq);
 
+static void mtk_eint_teardown(void *data)
+{
+	struct mtk_eint *eint = data;
+	unsigned int i, virq;
+
+	/* Detach the demux handler so it can no longer reference freed data. */
+	irq_set_chained_handler_and_data(eint->irq, NULL, NULL);
+
+	/* Wait for any in-flight handler to finish before tearing down. */
+	synchronize_irq(eint->irq);
+
+	/* Dispose of all child mappings before the domain is removed. */
+	for (i = 0; i < eint->hw->ap_num; i++) {
+		virq = irq_find_mapping(eint->domain, i);
+		if (virq)
+			irq_dispose_mapping(virq);
+	}
+
+	irq_domain_remove(eint->domain);
+}
+
 int mtk_eint_do_init(struct mtk_eint *eint, struct mtk_eint_pin *eint_pin)
 {
 	unsigned int size, i, port, virq, inst = 0;
@@ -517,8 +540,8 @@ int mtk_eint_do_init(struct mtk_eint *eint, struct mtk_eint_pin *eint_pin)
 	if (!eint->regs)
 		eint->regs = &mtk_generic_eint_regs;
 
-	eint->base_pin_num = devm_kmalloc_array(eint->dev, eint->nbase, sizeof(u16),
-						GFP_KERNEL | __GFP_ZERO);
+	eint->base_pin_num = devm_kmalloc_objs(eint->dev, u16, eint->nbase,
+					       GFP_KERNEL | __GFP_ZERO);
 	if (!eint->base_pin_num)
 		return -ENOMEM;
 
@@ -544,18 +567,18 @@ int mtk_eint_do_init(struct mtk_eint *eint, struct mtk_eint_pin *eint_pin)
 		}
 	}
 
-	eint->pin_list = devm_kcalloc(eint->dev, eint->nbase,
-				      sizeof(*eint->pin_list), GFP_KERNEL);
+	eint->pin_list = devm_kzalloc_objs(eint->dev, *eint->pin_list,
+					   eint->nbase);
 	if (!eint->pin_list)
 		goto err_pin_list;
 
-	eint->wake_mask = devm_kcalloc(eint->dev, eint->nbase,
-				       sizeof(*eint->wake_mask), GFP_KERNEL);
+	eint->wake_mask = devm_kzalloc_objs(eint->dev, *eint->wake_mask,
+					    eint->nbase);
 	if (!eint->wake_mask)
 		goto err_wake_mask;
 
-	eint->cur_mask = devm_kcalloc(eint->dev, eint->nbase,
-				      sizeof(*eint->cur_mask), GFP_KERNEL);
+	eint->cur_mask = devm_kzalloc_objs(eint->dev, *eint->cur_mask,
+					   eint->nbase);
 	if (!eint->cur_mask)
 		goto err_cur_mask;
 
@@ -601,7 +624,7 @@ int mtk_eint_do_init(struct mtk_eint *eint, struct mtk_eint_pin *eint_pin)
 	irq_set_chained_handler_and_data(eint->irq, mtk_eint_irq_handler,
 					 eint);
 
-	return 0;
+	return devm_add_action_or_reset(eint->dev, mtk_eint_teardown, eint);
 
 err_eint:
 	for (i = 0; i < eint->nbase; i++) {

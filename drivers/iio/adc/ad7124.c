@@ -1228,13 +1228,11 @@ static int ad7124_parse_channel_config(struct iio_dev *indio_dev,
 	/* Add one for temperature */
 	st->num_channels = min(num_channels + 1, AD7124_MAX_CHANNELS);
 
-	chan = devm_kcalloc(dev, st->num_channels,
-			    sizeof(*chan), GFP_KERNEL);
+	chan = devm_kzalloc_objs(dev, *chan, st->num_channels);
 	if (!chan)
 		return -ENOMEM;
 
-	channels = devm_kcalloc(dev, st->num_channels, sizeof(*channels),
-				GFP_KERNEL);
+	channels = devm_kzalloc_objs(dev, *channels, st->num_channels);
 	if (!channels)
 		return -ENOMEM;
 
@@ -1683,8 +1681,8 @@ static const struct of_device_id ad7124_of_match[] = {
 MODULE_DEVICE_TABLE(of, ad7124_of_match);
 
 static const struct spi_device_id ad71124_ids[] = {
-	{ "ad7124-4", (kernel_ulong_t)&ad7124_4_chip_info },
-	{ "ad7124-8", (kernel_ulong_t)&ad7124_8_chip_info },
+	{ .name = "ad7124-4", .driver_data = (kernel_ulong_t)&ad7124_4_chip_info },
+	{ .name = "ad7124-8", .driver_data = (kernel_ulong_t)&ad7124_8_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad71124_ids);

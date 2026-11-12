@@ -684,11 +684,11 @@ static void build_vrr_infopacket_data_v3(const struct mod_vrr_params *vrr,
 	/* PB8 = FreeSync Maximum refresh rate (Hz) */
 	infopacket->sb[8] = max_refresh & 0xFF;
 
-	/* PB11 : MSB FreeSync Minimum refresh rate [Hz] - bits 9:8 */
-	infopacket->sb[11] = (min_programmed >> 8) & 0x03;
+	/* PB11 : MSB FreeSync Minimum refresh rate [Hz] - bits 11:8 */
+	infopacket->sb[11] = (min_programmed >> 8) & 0x0F;
 
-	/* PB12 : MSB FreeSync Maximum refresh rate [Hz] - bits 9:8 */
-	infopacket->sb[12] = (max_refresh >> 8) & 0x03;
+	/* PB12 : MSB FreeSync Maximum refresh rate [Hz] - bits 11:8 */
+	infopacket->sb[12] = (max_refresh >> 8) & 0x0F;
 
 	/* PB16 : Reserved bits 7:1, FixedRate bit 0 */
 	infopacket->sb[16] = (vrr->state == VRR_STATE_ACTIVE_FIXED) ? 1 : 0;
@@ -1281,10 +1281,8 @@ void mod_freesync_handle_v_update(struct mod_freesync *mod_freesync,
 	 * If VRR is inactive, set vtotal min and max to nominal vtotal
 	 */
 	 if (in_out_vrr->state == VRR_STATE_INACTIVE) {
-		in_out_vrr->adjust.v_total_min =
-			mod_freesync_calc_v_total_from_refresh(stream,
-				in_out_vrr->max_refresh_in_uhz);
-		in_out_vrr->adjust.v_total_max = in_out_vrr->adjust.v_total_min;
+		in_out_vrr->adjust.v_total_min = stream->timing.v_total;
+		in_out_vrr->adjust.v_total_max = stream->timing.v_total;
 		return;
 	}
 }

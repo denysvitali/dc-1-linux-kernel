@@ -538,6 +538,42 @@ no_change:
 }
 
 /*
+ * Queue the inode of a file that was just closed for a cap check
+ * caps_wanted_delay_min seconds from now, when __ceph_caps_file_wanted()
+ * stops wanting the caps it was opened for.  These inodes go on a list of
+ * their own, as cap_delay_list is in caps_wanted_delay_max order.
+ *
+ * Caller holds i_ceph_lock
+ *    -> we take mdsc->cap_delay_lock
+ */
+static void __cap_delay_requeue_idle(struct ceph_mds_client *mdsc,
+				     struct ceph_inode_info *ci)
+{
+	struct inode *inode = &ci->netfs.inode;
+	struct ceph_mount_options *opt = mdsc->fsc->mount_options;
+
+	if (mdsc->stopping)
+		return;
+	spin_lock(&mdsc->cap_delay_lock);
+	if (!list_empty(&ci->i_cap_delay_list)) {
+		if (ci->i_ceph_flags & CEPH_I_FLUSH)
+			goto no_change;
+		list_del_init(&ci->i_cap_delay_list);
+	}
+	/*
+	 * Round up, so that the check does not come before the last
+	 * read or write is caps_wanted_delay_min seconds old.
+	 */
+	ci->i_hold_caps_max = round_jiffies_up(jiffies +
+					       opt->caps_wanted_delay_min * HZ);
+	doutc(mdsc->fsc->client, "%p %llx.%llx at %lu\n", inode,
+	      ceph_vinop(inode), ci->i_hold_caps_max);
+	list_add_tail(&ci->i_cap_delay_list, &mdsc->cap_idle_delay_list);
+no_change:
+	spin_unlock(&mdsc->cap_delay_lock);
+}
+
+/*
  * Queue an inode for immediate writeback.  Mark inode with I_FLUSH,
  * indicating we should send a cap message to flush dirty metadata
  * asap, and move to the front of the delayed cap list.
@@ -730,7 +766,7 @@ void ceph_add_cap(struct inode *inode,
 			ceph_change_snap_realm(inode, realm);
 		else
 			WARN(1, "%s: couldn't find snap realm 0x%llx (ino 0x%llx oldrealm 0x%llx)\n",
-			     __func__, realmino, ci->i_vino.ino,
+			     __func__, realmino, ceph_ino(inode),
 			     ci->i_snap_realm ? ci->i_snap_realm->ino : 0);
 	}
 
@@ -785,9 +821,9 @@ void ceph_add_cap(struct inode *inode,
  * generation of the MDS session (i.e. has not gone 'stale' due to
  * us losing touch with the mds).
  */
-static int __cap_is_valid(struct ceph_cap *cap)
+static int __cap_is_valid(struct ceph_inode_info *ci, struct ceph_cap *cap)
 {
-	struct inode *inode = &cap->ci->netfs.inode;
+	struct inode *inode = &ci->netfs.inode;
 	struct ceph_client *cl = cap->session->s_mdsc->fsc->client;
 	unsigned long ttl;
 	u32 gen;
@@ -822,7 +858,7 @@ int __ceph_caps_issued(struct ceph_inode_info *ci, int *implemented)
 		*implemented = 0;
 	for (p = rb_first(&ci->i_caps); p; p = rb_next(p)) {
 		cap = rb_entry(p, struct ceph_cap, ci_node);
-		if (!__cap_is_valid(cap))
+		if (!__cap_is_valid(ci, cap))
 			continue;
 		doutc(cl, "%p %llx.%llx cap %p issued %s\n", inode,
 		      ceph_vinop(inode), cap, ceph_cap_string(cap->issued));
@@ -855,7 +891,7 @@ int __ceph_caps_issued_other(struct ceph_inode_info *ci, struct ceph_cap *ocap)
 		cap = rb_entry(p, struct ceph_cap, ci_node);
 		if (cap == ocap)
 			continue;
-		if (!__cap_is_valid(cap))
+		if (!__cap_is_valid(ci, cap))
 			continue;
 		have |= cap->issued;
 	}
@@ -866,11 +902,19 @@ int __ceph_caps_issued_other(struct ceph_inode_info *ci, struct ceph_cap *ocap)
  * Move a cap to the end of the LRU (oldest caps at list head, newest
  * at list tail).
  */
-static void __touch_cap(struct ceph_cap *cap)
+static void __touch_cap(struct ceph_inode_info *ci, struct ceph_cap *cap)
 {
-	struct inode *inode = &cap->ci->netfs.inode;
+	struct inode *inode = &ci->netfs.inode;
 	struct ceph_mds_session *s = cap->session;
 	struct ceph_client *cl = s->s_mdsc->fsc->client;
+	static u8 skip_counter;
+
+	if (data_race(++skip_counter))
+		/* skip this call most of the time to reduce lock
+		 * contention; the LRU list is still accurate enough
+		 * for ceph_trim_caps()
+		 */
+		return;
 
 	spin_lock(&s->s_cap_lock);
 	if (!s->s_cap_iterator) {
@@ -906,7 +950,7 @@ int __ceph_caps_issued_mask(struct ceph_inode_info *ci, int mask, int touch)
 
 	for (p = rb_first(&ci->i_caps); p; p = rb_next(p)) {
 		cap = rb_entry(p, struct ceph_cap, ci_node);
-		if (!__cap_is_valid(cap))
+		if (!__cap_is_valid(ci, cap))
 			continue;
 		if ((cap->issued & mask) == mask) {
 			doutc(cl, "mask %p %llx.%llx cap %p issued %s (mask %s)\n",
@@ -914,7 +958,7 @@ int __ceph_caps_issued_mask(struct ceph_inode_info *ci, int mask, int touch)
 			      ceph_cap_string(cap->issued),
 			      ceph_cap_string(mask));
 			if (touch)
-				__touch_cap(cap);
+				__touch_cap(ci, cap);
 			return 1;
 		}
 
@@ -929,15 +973,15 @@ int __ceph_caps_issued_mask(struct ceph_inode_info *ci, int mask, int touch)
 				struct rb_node *q;
 
 				/* touch this + preceding caps */
-				__touch_cap(cap);
+				__touch_cap(ci, cap);
 				for (q = rb_first(&ci->i_caps); q != p;
 				     q = rb_next(q)) {
 					cap = rb_entry(q, struct ceph_cap,
 						       ci_node);
-					if (!__cap_is_valid(cap))
+					if (!__cap_is_valid(ci, cap))
 						continue;
 					if (cap->issued & mask)
-						__touch_cap(cap);
+						__touch_cap(ci, cap);
 				}
 			}
 			return 1;
@@ -979,6 +1023,27 @@ int __ceph_caps_revoking_other(struct ceph_inode_info *ci,
 	return 0;
 }
 
+/*
+ * Return true if any cap of this inode holds caps which the MDS has
+ * revoked, but which we have not released yet.
+ */
+static bool __ceph_is_any_revoking(const struct ceph_inode_info *ci)
+{
+	const struct rb_node *p;
+
+	lockdep_assert_held(&ci->i_ceph_lock);
+
+	for (p = rb_first(&ci->i_caps); p; p = rb_next(p)) {
+		const struct ceph_cap *cap =
+			rb_entry(p, struct ceph_cap, ci_node);
+
+		if (cap->implemented & ~cap->issued)
+			return true;
+	}
+
+	return false;
+}
+
 int __ceph_caps_used(struct ceph_inode_info *ci)
 {
 	int used = 0;
@@ -996,6 +1061,53 @@ int __ceph_caps_used(struct ceph_inode_info *ci)
 		used |= CEPH_CAP_FILE_BUFFER;
 	if (ci->i_fx_ref)
 		used |= CEPH_CAP_FILE_EXCL;
+	return used;
+}
+
+/*
+ * Substitute LAZYIO for CACHE/BUFFER when they are not issued.
+ * If we have LAZYIO but not CACHE/BUFFER, report LAZYIO as used instead
+ * so the MDS knows we're fine with the weaker consistency guarantee.
+ *
+ * Base the substitution on "implemented" rather than "issued": while
+ * LAZYIO is being revoked, "issued" no longer contains it but
+ * "implemented" still does.  If used reverted to CACHE/BUFFER at that
+ * point, ceph_check_caps() would see (revoking & cap_used) == 0 and
+ * ACK the revoke while dirty or stale pages were still present.  Only
+ * once the revoke is ACKed does "implemented" drop LAZYIO.
+ *
+ * Caller must hold i_ceph_lock.
+ */
+static inline int ceph_adjust_caps_used_for_lazyio(struct ceph_inode_info *ci,
+						   int used, int issued,
+						   int implemented)
+{
+	if (!(used & (CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_BUFFER)))
+		return used;
+	if (!(implemented & CEPH_CAP_FILE_LAZYIO))
+		return used;
+	/*
+	 * While LAZYIO is still issued, it only covers the cached data if
+	 * every opener has accepted the lazy semantics.  With a non-lazy
+	 * opener around, keep reporting CACHE/BUFFER so that a pending
+	 * revocation is not ACKed before the invalidation queued by
+	 * handle_cap_grant() has emptied the page cache.
+	 *
+	 * Once LAZYIO is itself being revoked ("implemented" has it but
+	 * "issued" no longer does) the substitution is unconditional: the
+	 * revoke must not be ACKed while pages are still around, no matter
+	 * who has the file open.
+	 */
+	if ((issued & CEPH_CAP_FILE_LAZYIO) && !__ceph_all_opens_lazy(ci))
+		return used;
+	if (!(issued & CEPH_CAP_FILE_CACHE)) {
+		used &= ~CEPH_CAP_FILE_CACHE;
+		used |= CEPH_CAP_FILE_LAZYIO;
+	}
+	if (!(issued & CEPH_CAP_FILE_BUFFER)) {
+		used &= ~CEPH_CAP_FILE_BUFFER;
+		used |= CEPH_CAP_FILE_LAZYIO;
+	}
 	return used;
 }
 
@@ -1091,7 +1203,7 @@ int __ceph_caps_mds_wanted(struct ceph_inode_info *ci, bool check)
 
 	for (p = rb_first(&ci->i_caps); p; p = rb_next(p)) {
 		cap = rb_entry(p, struct ceph_cap, ci_node);
-		if (check && !__cap_is_valid(cap))
+		if (check && !__cap_is_valid(ci, cap))
 			continue;
 		if (cap == ci->i_auth_cap)
 			mds_wanted |= cap->mds_wanted;
@@ -1119,20 +1231,20 @@ int ceph_is_any_caps(struct inode *inode)
  * caller should hold i_ceph_lock.
  * caller will not hold session s_mutex if called from destroy_inode.
  */
-void __ceph_remove_cap(struct ceph_cap *cap, bool queue_release)
+static void __ceph_remove_cap(struct ceph_inode_info *ci, struct ceph_cap *cap, bool queue_release)
 {
-	struct ceph_mds_session *session = cap->session;
-	struct ceph_client *cl = session->s_mdsc->fsc->client;
-	struct ceph_inode_info *ci = cap->ci;
-	struct inode *inode = &ci->netfs.inode;
+	struct ceph_mds_session *session;
+	struct ceph_client *cl;
+	struct inode *inode;
 	struct ceph_mds_client *mdsc;
 	int removed = 0;
 
-	/* 'ci' being NULL means the remove have already occurred */
-	if (!ci) {
-		doutc(cl, "inode is NULL\n");
+	if (ceph_cap_is_removed(cap))
 		return;
-	}
+
+	session = cap->session;
+	cl = session->s_mdsc->fsc->client;
+	inode = &ci->netfs.inode;
 
 	lockdep_assert_held(&ci->i_ceph_lock);
 
@@ -1158,8 +1270,11 @@ void __ceph_remove_cap(struct ceph_cap *cap, bool queue_release)
 		cap->session = NULL;
 		removed = 1;
 	}
-	/* protect backpointer with s_cap_lock: see iterate_session_caps */
-	cap->ci = NULL;
+
+	/* protect removal marker with both i_ceph_lock and
+	   s_cap_lock, so either one can be used to check for
+	   removal */
+	RB_CLEAR_NODE(&cap->ci_node);
 
 	/*
 	 * s_cap_reconnect is protected by s_cap_lock. no one changes
@@ -1176,7 +1291,7 @@ void __ceph_remove_cap(struct ceph_cap *cap, bool queue_release)
 	} else {
 		cap->queue_release = 0;
 	}
-	cap->cap_ino = ci->i_vino.ino;
+	cap->cap_ino = ceph_ino(inode);
 
 	spin_unlock(&session->s_cap_lock);
 
@@ -1196,13 +1311,12 @@ void __ceph_remove_cap(struct ceph_cap *cap, bool queue_release)
 }
 
 void ceph_remove_cap(struct ceph_mds_client *mdsc, struct ceph_cap *cap,
+		     struct ceph_inode_info *ci,
 		     bool queue_release)
 {
-	struct ceph_inode_info *ci = cap->ci;
 	struct ceph_fs_client *fsc;
 
-	/* 'ci' being NULL means the remove have already occurred */
-	if (!ci) {
+	if (ceph_cap_is_removed(cap)) {
 		doutc(mdsc->fsc->client, "inode is NULL\n");
 		return;
 	}
@@ -1215,7 +1329,7 @@ void ceph_remove_cap(struct ceph_mds_client *mdsc, struct ceph_cap *cap,
 		     !fsc->blocklisted &&
 		     !ceph_inode_is_shutdown(&ci->netfs.inode));
 
-	__ceph_remove_cap(cap, queue_release);
+	__ceph_remove_cap(ci, cap, queue_release);
 }
 
 struct cap_msg_args {
@@ -1375,7 +1489,7 @@ void __ceph_remove_caps(struct ceph_inode_info *ci)
 	while (p) {
 		struct ceph_cap *cap = rb_entry(p, struct ceph_cap, ci_node);
 		p = rb_next(p);
-		ceph_remove_cap(mdsc, cap, true);
+		ceph_remove_cap(mdsc, cap, ci, true);
 	}
 	spin_unlock(&ci->i_ceph_lock);
 }
@@ -1388,11 +1502,11 @@ void __ceph_remove_caps(struct ceph_inode_info *ci)
  * Make note of max_size reported/requested from mds, revoked caps
  * that have now been implemented.
  */
-static void __prep_cap(struct cap_msg_args *arg, struct ceph_cap *cap,
+static void __prep_cap(struct cap_msg_args *arg, struct ceph_inode_info *ci,
+		       struct ceph_cap *cap,
 		       int op, int flags, int used, int want, int retain,
 		       int flushing, u64 flush_tid, u64 oldest_flush_tid)
 {
-	struct ceph_inode_info *ci = cap->ci;
 	struct inode *inode = &ci->netfs.inode;
 	struct ceph_client *cl = ceph_inode_to_client(inode);
 	int held, revoking;
@@ -1418,8 +1532,25 @@ static void __prep_cap(struct cap_msg_args *arg, struct ceph_cap *cap,
 	 * dirty pages _before_ allowing sync writes to avoid reordering.
 	 */
 	arg->wake = cap->implemented & ~cap->issued;
+	/*
+	 * "used" decides which of the revoked caps stay in cap->implemented,
+	 * i.e. which revocations this message does _not_ ack yet.  Callers on
+	 * the flush paths (try_flush_caps(), __kick_flushing_caps()) hand us
+	 * the raw __ceph_caps_used(), which reports CACHE/BUFFER as long as
+	 * the page cache is populated.  While LAZYIO is being revoked it is no
+	 * longer in cap->issued, so a raw used set would drop it from
+	 * cap->implemented and implicitly ack the revoke with pages still
+	 * cached -- the MDS could then hand CACHE to another client.  Report
+	 * LAZYIO as used instead, and only stop doing so once writeback and
+	 * invalidation have emptied the page cache.
+	 */
+	used = ceph_adjust_caps_used_for_lazyio(ci, used, cap->issued,
+						cap->implemented);
 	cap->implemented &= cap->issued | used;
 	cap->mds_wanted = want;
+
+	if ((ci->i_ceph_flags & CEPH_I_FLUSH_FORCE) != 0 && !__ceph_is_any_revoking(ci))
+		clear_bit(CEPH_I_FLUSH_FORCE_BIT, &ci->i_ceph_flags);
 
 	arg->session = cap->session;
 	arg->ino = ceph_vino(inode).ino;
@@ -1466,7 +1597,7 @@ static void __prep_cap(struct cap_msg_args *arg, struct ceph_cap *cap,
 	arg->gid = inode->i_gid;
 	arg->mode = inode->i_mode;
 
-	arg->inline_data = ci->i_inline_version != CEPH_INLINE_NONE;
+	arg->inline_data = ceph_inline_version(ci) != CEPH_INLINE_NONE;
 	if (!(flags & CEPH_CLIENT_CAPS_PENDING_CAPSNAP) &&
 	    !list_empty(&ci->i_cap_snaps)) {
 		struct ceph_cap_snap *capsnap;
@@ -1535,6 +1666,8 @@ static void __send_cap(struct cap_msg_args *arg, struct ceph_inode_info *ci)
 		spin_lock(&ci->i_ceph_lock);
 		__cap_delay_requeue(arg->session->s_mdsc, ci);
 		spin_unlock(&ci->i_ceph_lock);
+		ceph_buffer_put(arg->old_xattr_buf);
+		ceph_buffer_put(arg->xattr_buf);
 		return;
 	}
 
@@ -1842,7 +1975,7 @@ struct ceph_cap_flush *ceph_alloc_cap_flush(void)
 {
 	struct ceph_cap_flush *cf;
 
-	cf = kmem_cache_alloc(ceph_cap_flush_cachep, GFP_KERNEL);
+	cf = kmem_cache_alloc(ceph_cap_flush_cachep, GFP_NOFS);
 	if (!cf)
 		return NULL;
 
@@ -2038,6 +2171,14 @@ void ceph_check_caps(struct ceph_inode_info *ci, int flags)
 
 	if (ci->i_ceph_flags & CEPH_I_FLUSH)
 		flags |= CHECK_CAPS_FLUSH;
+	/*
+	 * A revoke whose response was deferred (see handle_cap_grant()) must
+	 * still be acknowledged.  Replay the forced flush here so that even a
+	 * check triggered by writeback/invalidation completion sends a cap
+	 * message to the MDS.
+	 */
+	if (ci->i_ceph_flags & CEPH_I_FLUSH_FORCE)
+		flags |= CHECK_CAPS_FLUSH_FORCE;
 retry:
 	/* Caps wanted by virtue of active open files. */
 	file_wanted = __ceph_caps_file_wanted(ci);
@@ -2052,6 +2193,7 @@ retry:
 	 * usually because they have outstanding references).
 	 */
 	issued = __ceph_caps_issued(ci, &implemented);
+
 	revoking = implemented & ~issued;
 
 	want = file_wanted;
@@ -2143,6 +2285,19 @@ retry:
 		if (ci->i_auth_cap && cap != ci->i_auth_cap)
 			cap_used &= ~ci->i_auth_cap->issued;
 
+		/*
+		 * Substitute LAZYIO for CACHE/BUFFER when they are not issued.
+		 * Do this per cap and not once for the whole inode: only the
+		 * cap that actually holds LAZYIO may report it as used.  A cap
+		 * that is revoking CACHE without holding LAZYIO must keep
+		 * reporting CACHE as used, or the (revoking & cap_used) test
+		 * below would treat the revocation as completed while the page
+		 * cache is still populated.
+		 */
+		cap_used = ceph_adjust_caps_used_for_lazyio(ci, cap_used,
+							   cap->issued,
+							   cap->implemented);
+
 		revoking = cap->implemented & ~cap->issued;
 		doutc(cl, " mds%d cap %p used %s issued %s implemented %s revoking %s\n",
 		      cap->mds, cap, ceph_cap_string(cap_used),
@@ -2167,10 +2322,13 @@ retry:
 			 * at most 5 seconds. That means the MDS needs to wait at
 			 * most 5 seconds to finished the Fb capability's revocation.
 			 *
-			 * Let's queue a writeback for it.
+			 * Let's queue a writeback for it.  The same applies when
+			 * LAZYIO is revoked while it was covering for BUFFER
+			 * (dirty pages exist, but BUFFER isn't issued).
 			 */
 			if (S_ISREG(inode->i_mode) && ci->i_wrbuffer_ref &&
-			    (revoking & CEPH_CAP_FILE_BUFFER))
+			    (revoking & (CEPH_CAP_FILE_BUFFER |
+					 CEPH_CAP_FILE_LAZYIO)))
 				queue_writeback = true;
 		}
 
@@ -2210,7 +2368,7 @@ retry:
 		if (want & ~cap->mds_wanted) {
 			if (want & ~(cap->mds_wanted | cap->issued))
 				goto ack;
-			if (!__cap_is_valid(cap))
+			if (!__cap_is_valid(ci, cap))
 				goto ack;
 		}
 
@@ -2252,7 +2410,7 @@ ack:
 
 		mds = cap->mds;  /* remember mds, so we don't repeat */
 
-		__prep_cap(&arg, cap, CEPH_CAP_OP_UPDATE, mflags, cap_used,
+		__prep_cap(&arg, ci, cap, CEPH_CAP_OP_UPDATE, mflags, cap_used,
 			   want, retain, flushing, flush_tid, oldest_flush_tid);
 
 		spin_unlock(&ci->i_ceph_lock);
@@ -2314,7 +2472,7 @@ retry_locked:
 		flush_tid = __mark_caps_flushing(inode, session, true,
 						 &oldest_flush_tid);
 
-		__prep_cap(&arg, cap, CEPH_CAP_OP_FLUSH, CEPH_CLIENT_CAPS_SYNC,
+		__prep_cap(&arg, ci, cap, CEPH_CAP_OP_FLUSH, CEPH_CLIENT_CAPS_SYNC,
 			   __ceph_caps_used(ci), __ceph_caps_wanted(ci),
 			   (cap->issued | cap->implemented),
 			   flushing, flush_tid, oldest_flush_tid);
@@ -2589,9 +2747,14 @@ static void __kick_flushing_caps(struct ceph_mds_client *mdsc,
 		}
 	}
 
-	list_for_each_entry(cf, &ci->i_cap_flush_list, i_list) {
-		if (cf->tid < first_tid)
+	cf = list_first_entry(&ci->i_cap_flush_list, struct ceph_cap_flush, i_list);
+	while (&cf->i_list != &ci->i_cap_flush_list) {
+		struct ceph_cap_flush *next;
+
+		if (cf->tid < first_tid) {
+			cf = list_next_entry(cf, i_list);
 			continue;
+		}
 
 		cap = ci->i_auth_cap;
 		if (!(cap && cap->session == session)) {
@@ -2601,6 +2764,7 @@ static void __kick_flushing_caps(struct ceph_mds_client *mdsc,
 		}
 
 		first_tid = cf->tid + 1;
+		next = list_next_entry(cf, i_list);
 
 		if (!cf->is_capsnap) {
 			struct cap_msg_args arg;
@@ -2608,7 +2772,7 @@ static void __kick_flushing_caps(struct ceph_mds_client *mdsc,
 			doutc(cl, "%p %llx.%llx cap %p tid %llu %s\n",
 			      inode, ceph_vinop(inode), cap, cf->tid,
 			      ceph_cap_string(cf->caps));
-			__prep_cap(&arg, cap, CEPH_CAP_OP_FLUSH,
+			__prep_cap(&arg, ci, cap, CEPH_CAP_OP_FLUSH,
 					 (cf->tid < last_snap_flush ?
 					  CEPH_CLIENT_CAPS_PENDING_CAPSNAP : 0),
 					  __ceph_caps_used(ci),
@@ -2641,6 +2805,7 @@ static void __kick_flushing_caps(struct ceph_mds_client *mdsc,
 		}
 
 		spin_lock(&ci->i_ceph_lock);
+		cf = next;
 	}
 }
 
@@ -2840,6 +3005,10 @@ again:
 	}
 
 	/* finish pending truncate */
+	if (ci->i_truncate_pending && (flags & NON_BLOCKING)) {
+		ret = -EAGAIN;
+		goto out_unlock;
+	}
 	while (ci->i_truncate_pending) {
 		spin_unlock(&ci->i_ceph_lock);
 		if (snap_rwsem_locked) {
@@ -2908,9 +3077,45 @@ again:
 				}
 				snap_rwsem_locked = true;
 			}
-			if ((have & want) == want)
+			/*
+			 * Allow LAZYIO to act as a substitute for
+			 * CACHE or BUFFER when those caps are not
+			 * issued, but only for callers that
+			 * explicitly requested LAZYIO.  This
+			 * prevents a non-lazy fd from having its
+			 * CACHE/BUFFER wants satisfied by LAZYIO
+			 * on an inode where a different fd is lazy.
+			 *
+			 * A missing LAZYIO cap, however, must never
+			 * cost us the CACHE/BUFFER refs that are
+			 * actually issued: the MDS only grants
+			 * LAZYIO for files opened with CEPH_O_LAZY
+			 * and it can be revoked at any time.  If we
+			 * made the whole want unsatisfiable without
+			 * it, the I/O paths would silently drop
+			 * CACHE/BUFFER (e.g. take no wrbuffer refs)
+			 * and degrade to synchronous writes.
+			 */
+			if ((have & (want & ~CEPH_CAP_FILE_LAZYIO)) ==
+			    (want & ~CEPH_CAP_FILE_LAZYIO)) {
+				*got = need | (want & ~exclude &
+					       ~CEPH_CAP_FILE_LAZYIO);
+				if ((want & CEPH_CAP_FILE_LAZYIO) &&
+				    (have & CEPH_CAP_FILE_LAZYIO) &&
+				    !(exclude & CEPH_CAP_FILE_LAZYIO))
+					*got |= CEPH_CAP_FILE_LAZYIO;
+			} else if ((want & CEPH_CAP_FILE_LAZYIO) &&
+				   (have & CEPH_CAP_FILE_LAZYIO) &&
+				   !(exclude & CEPH_CAP_FILE_LAZYIO) &&
+				   ((have & want) ==
+				    (want & ~(CEPH_CAP_FILE_CACHE |
+					      CEPH_CAP_FILE_BUFFER)))) {
+				/*
+				 * LAZYIO substitutes for missing CACHE/BUFFER;
+				 * it is already included via (want & ~exclude).
+				 */
 				*got = need | (want & ~exclude);
-			else
+			} else
 				*got = need;
 			ceph_take_cap_refs(ci, *got, true);
 			ret = 1;
@@ -2999,6 +3204,14 @@ static void check_max_size(struct inode *inode, loff_t endoff)
 		ceph_check_caps(ci, CHECK_CAPS_AUTHONLY);
 }
 
+/*
+ * The inverse of ceph_caps_for_mode().  LAZYIO has to be mapped back as
+ * well: __ceph_get_caps() feeds the result to ceph_get_fmode() to bias
+ * i_nr_by_mode[] by FMODE_WAIT_BIAS while it waits, and dropping LAZY
+ * here would bias the open count without biasing the lazy count, making
+ * __ceph_all_opens_lazy() report a phantom non-lazy opener for as long
+ * as a lazy fd is waiting for caps.
+ */
 static inline int get_used_fmode(int caps)
 {
 	int fmode = 0;
@@ -3006,6 +3219,8 @@ static inline int get_used_fmode(int caps)
 		fmode |= CEPH_FILE_MODE_RD;
 	if (caps & CEPH_CAP_FILE_WR)
 		fmode |= CEPH_FILE_MODE_WR;
+	if (caps & CEPH_CAP_FILE_LAZYIO)
+		fmode |= CEPH_FILE_MODE_LAZY;
 	return fmode;
 }
 
@@ -3153,12 +3368,12 @@ int __ceph_get_caps(struct inode *inode, struct ceph_file_info *fi, int need,
 		    ceph_has_inline_data(ci) &&
 		    (_got & (CEPH_CAP_FILE_CACHE|CEPH_CAP_FILE_LAZYIO)) &&
 		    i_size_read(inode) > 0) {
-			struct page *page =
-				find_get_page(inode->i_mapping, 0);
-			if (page) {
-				bool uptodate = PageUptodate(page);
+			struct folio *folio =
+				filemap_get_folio(inode->i_mapping, 0);
+			if (!IS_ERR(folio)) {
+				bool uptodate = folio_test_uptodate(folio);
 
-				put_page(page);
+				folio_put(folio);
 				if (uptodate)
 					break;
 			}
@@ -3304,7 +3519,7 @@ static void __ceph_put_cap_refs(struct ceph_inode_info *ci, int had,
 					struct ceph_cap_snap,
 					ci_item);
 
-		capsnap->writing = 0;
+		capsnap->writing = false;
 		if (ceph_try_drop_cap_snap(ci, capsnap))
 			/* put the ref held by ceph_queue_cap_snap() */
 			put++;
@@ -3493,6 +3708,32 @@ struct cap_extra_info {
 };
 
 /*
+ * Cap grant messages (msg_version >= 4) always carry inline_version
+ * followed by inline_data.  With inline data support disabled we still
+ * have to consume the fields, we just don't keep the data around.
+ */
+static int parse_inline_data(void **p, void *end,
+			     struct cap_extra_info *extra_info)
+{
+#ifdef CONFIG_CEPH_FS_INLINE_DATA
+	ceph_decode_64_safe(p, end, extra_info->inline_version, bad);
+	ceph_decode_32_safe(p, end, extra_info->inline_len, bad);
+	ceph_decode_need(p, end, extra_info->inline_len, bad);
+	extra_info->inline_data = *p;
+	*p += extra_info->inline_len;
+#else
+	u32 len;
+
+	ceph_decode_skip_64(p, end, bad);
+	ceph_decode_32_safe(p, end, len, bad);
+	ceph_decode_skip_n(p, end, len, bad);
+#endif
+	return 0;
+bad:
+	return -EIO;
+}
+
+/*
  * Handle a cap GRANT message from the MDS.  (Note that a GRANT may
  * actually be a revocation if it specifies a smaller cap set.)
  *
@@ -3541,17 +3782,74 @@ static void handle_cap_grant(struct inode *inode,
 
 
 	/*
-	 * If CACHE is being revoked, and we have no dirty buffers,
-	 * try to invalidate (once).  (If there are dirty buffers, we
-	 * will invalidate _after_ writeback.)
+	 * Check the revocation of *both* CACHE and LAZYIO, because
+	 * CACHE may have been revoked earlier and cap->issued no
+	 * longer contains it -- at that point only LAZYIO was
+	 * covering us.  If LAZYIO is now also being revoked and no
+	 * cache cap remains, we must invalidate the page cache.
+	 * Without this, a CACHE-revoked-then-LAZYIO-revoked sequence
+	 * leaves stale pages in memory until the next periodic
+	 * check_caps (up to 60s).  Also invalidate when we have no
+	 * dirty buffers (if dirty, invalidate after writeback).
+	 *
+	 * Keeping the page cache alive on a remaining LAZYIO is only
+	 * safe if every opener has accepted the lazy semantics: those
+	 * pages are retained for the lazy fds alone, and a non-lazy
+	 * reader (mmap, or an fd that never asked for LAZYIO) must not
+	 * be served from them.  So drop the cache as well whenever a
+	 * non-lazy opener is around.
 	 */
 	if (S_ISREG(inode->i_mode) && /* don't invalidate readdir cache */
-	    ((cap->issued & ~newcaps) & CEPH_CAP_FILE_CACHE) &&
-	    (newcaps & CEPH_CAP_FILE_LAZYIO) == 0 &&
+	    ((cap->issued & ~newcaps) &
+	     (CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_LAZYIO)) &&
+	    !(newcaps & CEPH_CAP_FILE_CACHE) &&
+	    (!(newcaps & CEPH_CAP_FILE_LAZYIO) ||
+	     !__ceph_all_opens_lazy(ci)) &&
 	    !(ci->i_wrbuffer_ref || ci->i_wb_ref)) {
 		if (try_nonblocking_invalidate(inode)) {
 			/* there were locked pages.. invalidate later
 			   in a separate thread. */
+			if (ci->i_rdcache_revoking != ci->i_rdcache_gen) {
+				queue_invalidate = true;
+				ci->i_rdcache_revoking = ci->i_rdcache_gen;
+			}
+		}
+	}
+
+	/*
+	 * The counterpart on the grant arm: pages that survived a CACHE
+	 * revocation are only kept alive by LAZYIO, and they may have
+	 * gone stale while CACHE was away.  Once a later grant brings
+	 * CACHE back, ceph_pages_retained_for_lazyio() (addr.c) turns
+	 * false the moment CACHE shows up in the implemented set, and a
+	 * non-lazy opener would be served those folios as coherent
+	 * CACHE data.  Drop the cache here, before a non-lazy
+	 * read_iter/fault can use it.
+	 *
+	 * The aggregate check below still sees the pre-grant state:
+	 * cap->issued and cap->implemented are only updated further
+	 * down, so CACHE is absent from "implemented" here, exactly
+	 * as it was when the pages were retained.
+	 *
+	 * Dirty folios (this client's own lazy writes) are not
+	 * droppable -- ceph has no launder_folio() -- and are left in
+	 * place by the invalidate, which is fine: they hold current
+	 * local data.
+	 */
+	if (S_ISREG(inode->i_mode) &&
+	    ((newcaps & ~cap->issued) & CEPH_CAP_FILE_CACHE) &&
+	    inode->i_data.nrpages) {
+		int have, implemented;
+
+		have = __ceph_caps_issued(ci, &implemented);
+		implemented |= have;
+		if (!(implemented & CEPH_CAP_FILE_CACHE) &&
+		    (implemented & CEPH_CAP_FILE_LAZYIO) &&
+		    try_nonblocking_invalidate(inode)) {
+			/*
+			 * There were locked pages.. invalidate later in
+			 * a separate thread.
+			 */
 			if (ci->i_rdcache_revoking != ci->i_rdcache_gen) {
 				queue_invalidate = true;
 				ci->i_rdcache_revoking = ci->i_rdcache_gen;
@@ -3691,6 +3989,8 @@ static void handle_cap_grant(struct inode *inode,
 	/* check cap bits */
 	wanted = __ceph_caps_wanted(ci);
 	used = __ceph_caps_used(ci);
+	used = ceph_adjust_caps_used_for_lazyio(ci, used, cap->issued,
+						cap->implemented);
 	dirty = __ceph_caps_dirty(ci);
 	doutc(cl, " my wanted = %s, used = %s, dirty %s\n",
 	      ceph_cap_string(wanted), ceph_cap_string(used),
@@ -3718,13 +4018,26 @@ static void handle_cap_grant(struct inode *inode,
 		doutc(cl, "revocation: %s -> %s (revoking %s)\n",
 		      ceph_cap_string(cap->issued), ceph_cap_string(newcaps),
 		      ceph_cap_string(revoking));
+		/*
+		 * If BUFFER is being revoked and we have dirty data,
+		 * trigger writeback before acking.  When LAZYIO was
+		 * covering for BUFFER (BUFFER not issued, dirty refs
+		 * held), also trigger writeback.  Clean cached pages
+		 * under LAZYIO are handled by queue_invalidate below.
+		 */
 		if (S_ISREG(inode->i_mode) &&
 		    (revoking & used & CEPH_CAP_FILE_BUFFER)) {
 			writeback = true;  /* initiate writeback; will delay ack */
 			revoke_wait = true;
+		} else if (S_ISREG(inode->i_mode) &&
+			   (revoking & used & CEPH_CAP_FILE_LAZYIO) &&
+			   (ci->i_wrbuffer_ref || ci->i_wb_ref)) {
+			/* LAZYIO was covering for dirty data — flush first */
+			writeback = true;
+			revoke_wait = true;
 		} else if (queue_invalidate &&
-			 revoking == CEPH_CAP_FILE_CACHE &&
-			 (newcaps & CEPH_CAP_FILE_LAZYIO) == 0) {
+			 (revoking & (CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_LAZYIO)) &&
+			 !(newcaps & (CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_LAZYIO))) {
 			revoke_wait = true; /* do nothing yet, invalidation will be queued */
 		} else if (cap == ci->i_auth_cap) {
 			check_caps = 1; /* check auth cap only */
@@ -3757,19 +4070,36 @@ static void handle_cap_grant(struct inode *inode,
 	BUG_ON(cap->issued & ~cap->implemented);
 
 	/* don't let check_caps skip sending a response to MDS for revoke msgs */
-	if (!revoke_wait && le32_to_cpu(grant->op) == CEPH_CAP_OP_REVOKE) {
-		cap->mds_wanted = 0;
-		flags |= CHECK_CAPS_FLUSH_FORCE;
-		if (cap == ci->i_auth_cap)
-			check_caps = 1; /* check auth cap only */
-		else
-			check_caps = 2; /* check all caps */
+	if (le32_to_cpu(grant->op) == CEPH_CAP_OP_REVOKE) {
+		if (revoke_wait) {
+			/*
+			 * We can't ack the revoke yet: the response is deferred
+			 * until the writeback or cache invalidation queued above
+			 * completes.  Set the CEPH_I_FLUSH_FORCE flag to remember
+			 * that a forced cap message is owed so that deferred
+			 * completion (ceph_put_wrbuffer_cap_refs() or the
+			 * invalidate worker, both of which call ceph_check_caps())
+			 * actually sends one, even if by then the revoked caps look
+			 * unused, the inode is retaining caps, or the MDS has
+			 * re-granted them.  Without this, the cap message is never
+			 * sent and the MDS hangs ("isn't responding to
+			 * mclientcaps(revoke)").
+			 */
+			set_bit(CEPH_I_FLUSH_FORCE_BIT, &ci->i_ceph_flags);
+		} else {
+			cap->mds_wanted = 0;
+			flags |= CHECK_CAPS_FLUSH_FORCE;
+			if (cap == ci->i_auth_cap)
+				check_caps = 1; /* check auth cap only */
+			else
+				check_caps = 2; /* check all caps */
+		}
 	}
 
 	if (extra_info->inline_version > 0 &&
-	    extra_info->inline_version >= ci->i_inline_version) {
-		ci->i_inline_version = extra_info->inline_version;
-		if (ci->i_inline_version != CEPH_INLINE_NONE &&
+	    extra_info->inline_version >= ceph_inline_version(ci)) {
+		ceph_set_inline_version(ci, extra_info->inline_version);
+		if (extra_info->inline_version != CEPH_INLINE_NONE &&
 		    (newcaps & (CEPH_CAP_FILE_CACHE|CEPH_CAP_FILE_LAZYIO)))
 			fill_inline = true;
 	}
@@ -4119,7 +4449,7 @@ retry:
 		goto out_unlock;
 
 	if (target < 0) {
-		ceph_remove_cap(mdsc, cap, false);
+		ceph_remove_cap(mdsc, cap, ci, false);
 		goto out_unlock;
 	}
 
@@ -4156,7 +4486,7 @@ retry:
 				change_auth_cap_ses(ci, tcap->session);
 			}
 		}
-		ceph_remove_cap(mdsc, cap, false);
+		ceph_remove_cap(mdsc, cap, ci, false);
 		goto out_unlock;
 	} else if (tsession) {
 		/* add placeholder for the export target */
@@ -4173,7 +4503,7 @@ retry:
 			spin_unlock(&mdsc->cap_dirty_lock);
 		}
 
-		ceph_remove_cap(mdsc, cap, false);
+		ceph_remove_cap(mdsc, cap, ci, false);
 		goto out_unlock;
 	}
 
@@ -4289,7 +4619,7 @@ retry:
 					inode, ceph_vinop(inode), peer,
 					ocap->seq, ocap->mseq, mds, piseq, pmseq);
 		}
-		ceph_remove_cap(mdsc, ocap, (ph->flags & CEPH_CAP_FLAG_RELEASE));
+		ceph_remove_cap(mdsc, ocap, ci, (ph->flags & CEPH_CAP_FLAG_RELEASE));
 	}
 
 	*old_issued = issued;
@@ -4361,6 +4691,7 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 	struct ceph_snap_realm *realm = NULL;
 	int op;
 	int msg_version = le16_to_cpu(msg->hdr.version);
+	int err;
 	u32 seq, mseq, issue_seq;
 	struct ceph_vino vino;
 	void *snaptrace;
@@ -4412,12 +4743,9 @@ void ceph_handle_caps(struct ceph_mds_session *session,
 	}
 
 	if (msg_version >= 4) {
-		ceph_decode_64_safe(&p, end, extra_info.inline_version, bad);
-		ceph_decode_32_safe(&p, end, extra_info.inline_len, bad);
-		if (p + extra_info.inline_len > end)
+		err = parse_inline_data(&p, end, &extra_info);
+		if (err < 0)
 			goto bad;
-		extra_info.inline_data = p;
-		p += extra_info.inline_len;
 	}
 
 	if (msg_version >= 5) {
@@ -4626,29 +4954,28 @@ bad:
 }
 
 /*
- * Delayed work handler to process end of delayed cap release LRU list.
+ * Process the expired end of one delayed cap list, whose entries were
+ * queued @hold jiffies before they expire.
  *
  * If new caps are added to the list while processing it, these won't get
  * processed in this run.  In this case, the ci->i_hold_caps_max will be
  * returned so that the work can be scheduled accordingly.
  */
-unsigned long ceph_check_delayed_caps(struct ceph_mds_client *mdsc)
+static unsigned long check_delayed_caps_list(struct ceph_mds_client *mdsc,
+					     struct list_head *list,
+					     unsigned long hold,
+					     unsigned long loop_start)
 {
 	struct ceph_client *cl = mdsc->fsc->client;
 	struct inode *inode;
 	struct ceph_inode_info *ci;
-	struct ceph_mount_options *opt = mdsc->fsc->mount_options;
-	unsigned long delay_max = opt->caps_wanted_delay_max * HZ;
-	unsigned long loop_start = jiffies;
 	unsigned long delay = 0;
 
-	doutc(cl, "begin\n");
 	spin_lock(&mdsc->cap_delay_lock);
-	while (!list_empty(&mdsc->cap_delay_list)) {
-		ci = list_first_entry(&mdsc->cap_delay_list,
-				      struct ceph_inode_info,
+	while (!list_empty(list)) {
+		ci = list_first_entry(list, struct ceph_inode_info,
 				      i_cap_delay_list);
-		if (time_before(loop_start, ci->i_hold_caps_max - delay_max)) {
+		if (time_before(loop_start, ci->i_hold_caps_max - hold)) {
 			doutc(cl, "caps added recently.  Exiting loop");
 			delay = ci->i_hold_caps_max;
 			break;
@@ -4677,8 +5004,33 @@ unsigned long ceph_check_delayed_caps(struct ceph_mds_client *mdsc)
 			break;
 	}
 	spin_unlock(&mdsc->cap_delay_lock);
+
+	return delay;
+}
+
+/*
+ * Delayed work handler to process end of delayed cap release LRU lists:
+ * the closed files waiting for caps_wanted_delay_min, then the inodes
+ * waiting for caps_wanted_delay_max.
+ */
+unsigned long ceph_check_delayed_caps(struct ceph_mds_client *mdsc)
+{
+	struct ceph_client *cl = mdsc->fsc->client;
+	struct ceph_mount_options *opt = mdsc->fsc->mount_options;
+	unsigned long loop_start = jiffies;
+	unsigned long delay, idle_delay;
+
+	doutc(cl, "begin\n");
+	idle_delay = check_delayed_caps_list(mdsc, &mdsc->cap_idle_delay_list,
+					     opt->caps_wanted_delay_min * HZ,
+					     loop_start);
+	delay = check_delayed_caps_list(mdsc, &mdsc->cap_delay_list,
+					opt->caps_wanted_delay_max * HZ,
+					loop_start);
 	doutc(cl, "done\n");
 
+	if (idle_delay && (!delay || time_before(idle_delay, delay)))
+		delay = idle_delay;
 	return delay;
 }
 
@@ -4812,8 +5164,21 @@ void ceph_put_fmode(struct ceph_inode_info *ci, int fmode, int count)
 			is_closed = false;
 	}
 
-	if (is_closed)
+	if (is_closed) {
 		percpu_counter_dec(&mdsc->metric.opened_inodes);
+		/*
+		 * A closed file stops wanting its caps once its last read
+		 * or write is caps_wanted_delay_min old, but nothing checks
+		 * its caps again before caps_wanted_delay_max runs out.
+		 * Until then the MDS keeps it the loner and has to revoke
+		 * the exclusive caps from us first when another client
+		 * looks at the file, e.g. stats a file we just created.
+		 * Check again after caps_wanted_delay_min instead.
+		 */
+		if (S_ISREG(ci->netfs.inode.i_mode) &&
+		    (__ceph_caps_issued(ci, NULL) & CEPH_CAP_ANY_WR))
+			__cap_delay_requeue_idle(mdsc, ci);
+	}
 	spin_unlock(&ci->i_ceph_lock);
 }
 
@@ -4887,7 +5252,7 @@ int ceph_encode_inode_release(void **p, struct inode *inode,
 	drop &= ~(used | dirty);
 
 	cap = __get_cap_for_mds(ci, mds);
-	if (cap && __cap_is_valid(cap)) {
+	if (cap && __cap_is_valid(ci, cap)) {
 		unless &= cap->issued;
 		if (unless) {
 			if (unless & CEPH_CAP_AUTH_EXCL)
@@ -5046,7 +5411,7 @@ int ceph_purge_inode_cap(struct inode *inode, struct ceph_cap *cap, bool *invali
 	      cap, ci, inode, ceph_vinop(inode));
 
 	is_auth = (cap == ci->i_auth_cap);
-	__ceph_remove_cap(cap, false);
+	__ceph_remove_cap(ci, cap, false);
 	if (is_auth) {
 		struct ceph_cap_flush *cf;
 

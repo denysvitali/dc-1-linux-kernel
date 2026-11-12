@@ -503,8 +503,8 @@ static int qmc_dai_constraints_interleaved(struct snd_pcm_substream *substream,
 		return ret;
 	}
 
-	access = 1ULL << (__force int)SNDRV_PCM_ACCESS_MMAP_INTERLEAVED |
-		 1ULL << (__force int)SNDRV_PCM_ACCESS_RW_INTERLEAVED;
+	access = 1ULL << SNDRV_PCM_ACCESS_MMAP_INTERLEAVED |
+		 1ULL << SNDRV_PCM_ACCESS_RW_INTERLEAVED;
 	ret = snd_pcm_hw_constraint_mask64(substream->runtime, SNDRV_PCM_HW_PARAM_ACCESS,
 					   access);
 	if (ret) {
@@ -532,8 +532,8 @@ static int qmc_dai_constraints_noninterleaved(struct snd_pcm_substream *substrea
 		return ret;
 	}
 
-	access = 1ULL << (__force int)SNDRV_PCM_ACCESS_MMAP_NONINTERLEAVED |
-		 1ULL << (__force int)SNDRV_PCM_ACCESS_RW_NONINTERLEAVED;
+	access = 1ULL << SNDRV_PCM_ACCESS_MMAP_NONINTERLEAVED |
+		 1ULL << SNDRV_PCM_ACCESS_RW_NONINTERLEAVED;
 	ret = snd_pcm_hw_constraint_mask64(substream->runtime, SNDRV_PCM_HW_PARAM_ACCESS,
 					   access);
 	if (ret) {
@@ -781,8 +781,8 @@ static int qmc_audio_dai_parse(struct qmc_audio *qmc_audio, struct device_node *
 		return dev_err_probe(qmc_audio->dev, -EINVAL,
 				     "dai %d no QMC channel defined\n", qmc_dai->id);
 
-	qmc_dai->qmc_chans = devm_kcalloc(qmc_audio->dev, count, sizeof(*qmc_dai->qmc_chans),
-					  GFP_KERNEL);
+	qmc_dai->qmc_chans = devm_kzalloc_objs(qmc_audio->dev,
+					       *qmc_dai->qmc_chans, count);
 	if (!qmc_dai->qmc_chans)
 		return -ENOMEM;
 
@@ -908,7 +908,7 @@ static int qmc_audio_probe(struct platform_device *pdev)
 	unsigned int i;
 	int ret;
 
-	qmc_audio = devm_kzalloc(&pdev->dev, sizeof(*qmc_audio), GFP_KERNEL);
+	qmc_audio = devm_kzalloc_obj(&pdev->dev, *qmc_audio);
 	if (!qmc_audio)
 		return -ENOMEM;
 
@@ -916,15 +916,15 @@ static int qmc_audio_probe(struct platform_device *pdev)
 
 	qmc_audio->num_dais = of_get_available_child_count(np);
 	if (qmc_audio->num_dais) {
-		qmc_audio->dais = devm_kcalloc(&pdev->dev, qmc_audio->num_dais,
-					       sizeof(*qmc_audio->dais),
-					       GFP_KERNEL);
+		qmc_audio->dais = devm_kzalloc_objs(&pdev->dev,
+						    *qmc_audio->dais,
+						    qmc_audio->num_dais);
 		if (!qmc_audio->dais)
 			return -ENOMEM;
 
-		qmc_audio->dai_drivers = devm_kcalloc(&pdev->dev, qmc_audio->num_dais,
-						      sizeof(*qmc_audio->dai_drivers),
-						      GFP_KERNEL);
+		qmc_audio->dai_drivers = devm_kzalloc_objs(&pdev->dev,
+							   *qmc_audio->dai_drivers,
+							   qmc_audio->num_dais);
 		if (!qmc_audio->dai_drivers)
 			return -ENOMEM;
 	}

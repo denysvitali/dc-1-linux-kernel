@@ -245,7 +245,7 @@ static int wilco_ec_debugfs_probe(struct platform_device *pdev)
 {
 	struct wilco_ec_device *ec = dev_get_drvdata(pdev->dev.parent);
 
-	debug_info = devm_kzalloc(&pdev->dev, sizeof(*debug_info), GFP_KERNEL);
+	debug_info = devm_kzalloc_obj(&pdev->dev, *debug_info);
 	if (!debug_info)
 		return 0;
 	debug_info->ec = ec;
@@ -265,8 +265,8 @@ static void wilco_ec_debugfs_remove(struct platform_device *pdev)
 }
 
 static const struct platform_device_id wilco_ec_debugfs_id[] = {
-	{ DRV_NAME, 0 },
-	{}
+	{ .name = DRV_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, wilco_ec_debugfs_id);
 

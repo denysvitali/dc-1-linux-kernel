@@ -1451,9 +1451,7 @@ static int mt6351_codec_driver_probe(struct platform_device *pdev)
 {
 	struct mt6351_priv *priv;
 
-	priv = devm_kzalloc(&pdev->dev,
-			    sizeof(struct mt6351_priv),
-			    GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, struct mt6351_priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -1478,6 +1476,7 @@ static const struct of_device_id mt6351_of_match[] = {
 	{.compatible = "mediatek,mt6351-sound",},
 	{}
 };
+MODULE_DEVICE_TABLE(of, mt6351_of_match);
 
 static struct platform_driver mt6351_codec_driver = {
 	.driver = {

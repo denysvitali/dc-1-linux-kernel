@@ -18,8 +18,6 @@
 
 #define DRV_NAME			"olpc-xo15-sci"
 #define PFX				DRV_NAME ": "
-#define XO15_SCI_CLASS			DRV_NAME
-#define XO15_SCI_DEVICE_NAME		"OLPC XO-1.5 SCI"
 
 static unsigned long			xo15_sci_gpe;
 static bool				lid_wake_on_close;
@@ -148,9 +146,6 @@ static int xo15_sci_probe(struct platform_device *pdev)
 	if (!device)
 		return -ENODEV;
 
-	strscpy(acpi_device_name(device), XO15_SCI_DEVICE_NAME);
-	strscpy(acpi_device_class(device), XO15_SCI_CLASS);
-
 	/* Get GPE bit assignment (EC events). */
 	status = acpi_evaluate_integer(device->handle, "_GPE", NULL, &tmp);
 	if (ACPI_FAILURE(status))
@@ -215,8 +210,8 @@ static int xo15_sci_resume(struct device *dev)
 static SIMPLE_DEV_PM_OPS(xo15_sci_pm, NULL, xo15_sci_resume);
 
 static const struct acpi_device_id xo15_sci_device_ids[] = {
-	{"XO15EC", 0},
-	{"", 0},
+	{ .id = "XO15EC" },
+	{ }
 };
 
 static struct platform_driver xo15_sci_drv = {

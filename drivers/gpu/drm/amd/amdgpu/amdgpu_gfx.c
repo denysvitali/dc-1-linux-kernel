@@ -34,6 +34,8 @@
 #include "amdgpu_xcp.h"
 #include "amdgpu_xgmi.h"
 #include "amdgpu_mes.h"
+#include "amdgpu_userq.h"
+#include "mes_userqueue.h"
 #include "nvd.h"
 
 /* delay 0.1 second to enable gfx off feature */
@@ -377,6 +379,30 @@ int amdgpu_gfx_kiq_init(struct amdgpu_device *adev,
 	return 0;
 }
 
+void amdgpu_gfx_mqd_reset_restore(struct amdgpu_ring *ring)
+{
+	struct amdgpu_device *adev = ring->adev;
+	int mqd_idx, mqd_size;
+
+	/* restore mqd with the backup copy */
+	if (ring->funcs->type == AMDGPU_RING_TYPE_COMPUTE) {
+		mqd_idx = ring - &adev->gfx.compute_ring[0];
+		mqd_size = adev->mqds[AMDGPU_HW_IP_COMPUTE].mqd_size;
+		if (adev->gfx.mec.mqd_backup[mqd_idx])
+			memcpy_toio(ring->mqd_ptr, adev->gfx.mec.mqd_backup[mqd_idx], mqd_size);
+	} else if (ring->funcs->type == AMDGPU_RING_TYPE_GFX) {
+		mqd_size = adev->mqds[AMDGPU_HW_IP_GFX].mqd_size;
+		mqd_idx = ring - &adev->gfx.gfx_ring[0];
+
+		if (adev->gfx.me.mqd_backup[mqd_idx])
+			memcpy_toio(ring->mqd_ptr, adev->gfx.me.mqd_backup[mqd_idx], mqd_size);
+	}
+	/* reset the ring */
+	ring->wptr = 0;
+	atomic64_set((atomic64_t *)ring->wptr_cpu_addr, 0);
+	amdgpu_ring_clear_ring(ring);
+}
+
 /* create MQD for each compute/gfx queue */
 int amdgpu_gfx_mqd_sw_init(struct amdgpu_device *adev,
 			   unsigned int mqd_size, int xcc_id)
@@ -394,8 +420,8 @@ int amdgpu_gfx_mqd_sw_init(struct amdgpu_device *adev,
 		domain |= AMDGPU_GEM_DOMAIN_VRAM;
 #endif
 
-	/* create MQD for KIQ */
-	if (!adev->enable_mes_kiq && !ring->mqd_obj) {
+	/* create MQD for KIQ (on GFX8+ where we use KIQ) */
+	if (adev->asic_type >= CHIP_TOPAZ && !adev->enable_mes_kiq && !ring->mqd_obj) {
 		/* originaly the KIQ MQD is put in GTT domain, but for SRIOV VRAM domain is a must
 		 * otherwise hypervisor trigger SAVE_VF fail after driver unloaded which mean MQD
 		 * deallocated and gart_unbind, to strict diverage we decide to use VRAM domain for
@@ -830,6 +856,73 @@ int amdgpu_gfx_enable_kgq(struct amdgpu_device *adev, int xcc_id)
 	return r;
 }
 
+/**
+ * amdgpu_gfx_handle_priv_fault - Handle privileged instruction fault
+ *
+ * @adev: amdgpu_device pointer
+ * @entry: interrupt vector entry containing fault information
+ * @me_id: micro-engine ID of the faulty ring
+ * @pipe_id: pipe ID of the faulty ring
+ * @queue_id: queue ID of the faulty ring
+ *
+ * This function handles privileged instruction faults by identifying
+ * the faulty ring (gfx or compute) and triggering a scheduler fault, or by
+ * recovering the faulting user queue.
+ */
+void amdgpu_gfx_handle_priv_fault(struct amdgpu_device *adev,
+					struct amdgpu_iv_entry *entry,
+					u8 me_id, u8 pipe_id, u8 queue_id)
+{
+	struct amdgpu_ring *ring;
+	u32 doorbell_offset;
+	int i;
+
+	/*
+	 * Try KQ first by ring_id (HW slot is authoritative). The
+	 * KMD compute_hqd_mask contract guarantees KCQ and user queues
+	 * never share a HW slot.
+	 */
+	if (!adev->gfx.disable_kq) {
+		for (i = 0; i < adev->gfx.num_gfx_rings; i++) {
+			ring = &adev->gfx.gfx_ring[i];
+			if (ring->me == me_id && ring->pipe == pipe_id &&
+			    ring->queue == queue_id) {
+				drm_sched_fault(&ring->sched);
+				return;
+			}
+		}
+
+		for (i = 0; i < adev->gfx.num_compute_rings; i++) {
+			ring = &adev->gfx.compute_ring[i];
+			if (ring->me == me_id && ring->pipe == pipe_id &&
+			    ring->queue == queue_id) {
+				drm_sched_fault(&ring->sched);
+				return;
+			}
+		}
+	}
+
+	/* No KQ matched: the faulting slot belongs to a user queue. */
+	if (adev->gfx.disable_uq)
+		return;
+
+	doorbell_offset = entry->src_data[0] & AMDGPU_CTXID0_DOORBELL_ID_MASK;
+
+	/*
+	 * A compute user-queue fault IV carries the doorbell offset, so reset
+	 * the queue directly from it. A gfx user-queue fault is raised by the
+	 * ME and carries only the HW slot (no doorbell); record the slot and
+	 * let the worker read the doorbell back from the HQD.
+	 */
+	if (doorbell_offset) {
+		amdgpu_userq_process_reset_irq(adev, entry->pasid,
+					       doorbell_offset);
+	} else {
+		set_bit(pipe_id | (queue_id << 2), &adev->gfx.userq_priv_fault_slots);
+		schedule_work(&adev->gfx.userq_priv_fault_work);
+	}
+}
+
 static void amdgpu_gfx_do_off_ctrl(struct amdgpu_device *adev, bool enable,
 				   bool no_delay)
 {
@@ -1142,10 +1235,11 @@ uint32_t amdgpu_kiq_rreg(struct amdgpu_device *adev, uint32_t reg, uint32_t xcc_
 	if (adev->mes.ring[0].sched.ready)
 		return amdgpu_mes_rreg(adev, reg, xcc_id);
 
-	BUG_ON(!ring->funcs->emit_rreg);
+	if (!ring->funcs || !ring->funcs->emit_rreg)
+		goto failed_kiq_read;
 
 	spin_lock_irqsave(&kiq->ring_lock, flags);
-	if (amdgpu_device_wb_get(adev, &reg_val_offs)) {
+	if (amdgpu_wb_get(adev, &reg_val_offs)) {
 		pr_err("critical bug! too many kiq readers\n");
 		goto failed_unlock;
 	}
@@ -1188,7 +1282,7 @@ uint32_t amdgpu_kiq_rreg(struct amdgpu_device *adev, uint32_t reg, uint32_t xcc_
 
 	mb();
 	value = adev->wb.wb[reg_val_offs];
-	amdgpu_device_wb_free(adev, reg_val_offs);
+	amdgpu_wb_free(adev, reg_val_offs);
 	return value;
 
 failed_undo:
@@ -1197,7 +1291,7 @@ failed_unlock:
 	spin_unlock_irqrestore(&kiq->ring_lock, flags);
 failed_kiq_read:
 	if (reg_val_offs)
-		amdgpu_device_wb_free(adev, reg_val_offs);
+		amdgpu_wb_free(adev, reg_val_offs);
 	dev_err(adev->dev, "failed to read reg:%x\n", reg);
 	return ~0;
 }
@@ -1210,8 +1304,6 @@ void amdgpu_kiq_wreg(struct amdgpu_device *adev, uint32_t reg, uint32_t v, uint3
 	struct amdgpu_kiq *kiq = &adev->gfx.kiq[xcc_id];
 	struct amdgpu_ring *ring = &kiq->ring;
 
-	BUG_ON(!ring->funcs->emit_wreg);
-
 	if (amdgpu_device_skip_hw_access(adev))
 		return;
 
@@ -1219,6 +1311,9 @@ void amdgpu_kiq_wreg(struct amdgpu_device *adev, uint32_t reg, uint32_t v, uint3
 		amdgpu_mes_wreg(adev, reg, v, xcc_id);
 		return;
 	}
+
+	if (!ring->funcs || !ring->funcs->emit_wreg)
+		goto failed_kiq_write;
 
 	spin_lock_irqsave(&kiq->ring_lock, flags);
 	r = amdgpu_ring_alloc(ring, 32);
@@ -1316,9 +1411,8 @@ int amdgpu_kiq_hdp_flush(struct amdgpu_device *adev)
 	if (adev->enable_mes_kiq && adev->mes.ring[0].sched.ready)
 		return amdgpu_mes_hdp_flush(adev);
 
-	if (!ring->funcs->emit_hdp_flush) {
+	if (!ring->funcs || !ring->funcs->emit_hdp_flush)
 		return -EOPNOTSUPP;
-	}
 
 	spin_lock_irqsave(&kiq->ring_lock, flags);
 	r = amdgpu_ring_alloc(ring, 32);
@@ -1505,6 +1599,10 @@ void amdgpu_gfx_cp_init_microcode(struct amdgpu_device *adev,
 	case AMDGPU_UCODE_ID_CP_RS64_MEC_P1_STACK:
 	case AMDGPU_UCODE_ID_CP_RS64_MEC_P2_STACK:
 	case AMDGPU_UCODE_ID_CP_RS64_MEC_P3_STACK:
+	case AMDGPU_UCODE_ID_CP_RS64_MEC_P4_STACK:
+	case AMDGPU_UCODE_ID_CP_RS64_MEC_P5_STACK:
+	case AMDGPU_UCODE_ID_CP_RS64_MEC_P6_STACK:
+	case AMDGPU_UCODE_ID_CP_RS64_MEC_P7_STACK:
 		cp_hdr_v2_0 = (const struct gfx_firmware_header_v2_0 *)
 			adev->gfx.mec_fw->data;
 		ucode_fw = adev->gfx.mec_fw;
@@ -1688,8 +1786,9 @@ static int amdgpu_gfx_run_cleaner_shader_job(struct amdgpu_ring *ring)
 	owner = (void *)(unsigned long)atomic_inc_return(&counter);
 
 	r = amdgpu_job_alloc_with_ib(ring->adev, &entity, owner,
-				     ib_size_dw * sizeof(uint32_t), 0, &job,
-				     AMDGPU_KERNEL_JOB_ID_CLEANER_SHADER);
+				     ib_size_dw * sizeof(uint32_t), 0,
+				     AMDGPU_KERNEL_JOB_ID_CLEANER_SHADER,
+				     &job);
 	if (r)
 		goto err;
 
@@ -1964,6 +2063,144 @@ static ssize_t amdgpu_gfx_get_compute_reset_mask(struct device *dev,
 	return amdgpu_show_reset_mask(buf, adev->gfx.compute_supported_reset);
 }
 
+static int amdgpu_gfx_mes_reset_queue_start(struct amdgpu_ring *ring,
+					     unsigned int vmid,
+					     struct amdgpu_fence *timedout_fence,
+					     bool use_mmio)
+{
+	struct amdgpu_device *adev = ring->adev;
+	bool reinit_queue;
+	int r;
+
+	if ((ring->funcs->type == AMDGPU_RING_TYPE_COMPUTE) &&
+	    adev->mes.compute_pipe_reset_enabled)
+		reinit_queue = true;
+	else if ((ring->funcs->type == AMDGPU_RING_TYPE_GFX) &&
+		 adev->mes.gfx_pipe_reset_enabled)
+		reinit_queue = true;
+	else
+		reinit_queue = use_mmio;
+
+	amdgpu_ring_reset_helper_begin(ring, timedout_fence);
+
+	r = amdgpu_mes_reset_legacy_queue(ring->adev, ring, vmid, use_mmio, 0);
+	if (r)
+		return r;
+
+	if (reinit_queue) {
+		r = amdgpu_mes_unmap_legacy_queue(adev, ring,
+						  RESET_QUEUES, 0, 0, 0);
+		if (r)
+			return r;
+		amdgpu_gfx_mqd_reset_restore(ring);
+
+		r = amdgpu_mes_map_legacy_queue(adev, ring, 0);
+		if (r) {
+			dev_err(adev->dev, "failed to remap kgq\n");
+			return r;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Reset one GFX queue and preserve collateral kernel rings on its pipe.
+ * Exactly one of @ring / @queue is non-NULL.
+ * This helper takes the reset mutex; callers must not already hold it.
+ */
+int amdgpu_gfx_reset_mes_gfx(struct amdgpu_device *adev,
+			     struct amdgpu_ring *ring,
+			     struct amdgpu_fence *guilty_fence,
+			     struct amdgpu_usermode_queue *queue,
+			     unsigned int vmid, bool use_mmio)
+{
+	struct mes_reset_queue_input queue_input = { 0 };
+	struct amdgpu_gfx_pipe_reset_ctx ctx;
+	u32 me = U32_MAX, pipe = U32_MAX;
+	int i, r, resume_r;
+
+	mutex_lock(&adev->gfx.mec.reset_mutex);
+
+	/*
+	 * Suspend before detecting the HQD to avoid resolving a slot MES remaps.
+	 * A hung queue can prevent suspend; still try reset and always resume.
+	 */
+	amdgpu_mes_suspend(adev, 0);
+
+	if (queue) {
+		u32 hw_queue_id;
+
+		queue_input.queue_type = queue->queue_type;
+		queue_input.doorbell_offset = queue->doorbell_index;
+		if (adev->gfx.funcs->detect_hung_queue(adev,
+				queue->doorbell_index, &me, &pipe,
+				&hw_queue_id)) {
+			queue_input.use_mmio = true;
+			queue_input.me_id = me;
+			queue_input.pipe_id = pipe;
+			queue_input.queue_id = hw_queue_id;
+		}
+	} else {
+		me = ring->me;
+		pipe = ring->pipe;
+	}
+
+	amdgpu_gfx_pipe_reset_prepare(adev, ring, me, pipe, &ctx);
+
+	if (ring)
+		r = amdgpu_gfx_mes_reset_queue_start(ring, vmid, guilty_fence,
+						     use_mmio);
+	else
+		r = mes_userq_reset_hw(queue, &queue_input);
+
+	resume_r = amdgpu_mes_resume(adev, 0);
+	if (!r)
+		r = resume_r;
+
+	/* MES must run before ring tests or replay. */
+	if (!r && ring)
+		r = amdgpu_ring_reset_helper_end(ring, guilty_fence);
+
+	for (i = 0; !r && i < adev->gfx.num_gfx_rings; i++) {
+		struct amdgpu_ring *cring = &adev->gfx.gfx_ring[i];
+
+		/* MQD rebuild clears wptr; replay only rings rebuilt by pipe reset. */
+		if ((ctx.replay_mask & BIT(i)) && !cring->wptr)
+			r = amdgpu_ring_reset_helper_end(cring, NULL);
+	}
+
+	/* Leave stopped schedulers to GPU recovery if any part failed. */
+	if (!r) {
+		for (i = 0; i < adev->gfx.num_gfx_rings; i++) {
+			if (ctx.sched_mask & BIT(i))
+				drm_sched_wqueue_start(&adev->gfx.gfx_ring[i].sched);
+		}
+	}
+
+	mutex_unlock(&adev->gfx.mec.reset_mutex);
+	return r;
+}
+
+int amdgpu_gfx_mes_reset_queue(struct amdgpu_ring *ring,
+			       unsigned int vmid,
+			       struct amdgpu_fence *timedout_fence,
+			       bool use_mmio)
+{
+	struct amdgpu_device *adev = ring->adev;
+	int r;
+
+	if (!amdgpu_gfx_me_pipe_reset_supported(adev)) {
+		r = amdgpu_gfx_mes_reset_queue_start(ring, vmid, timedout_fence,
+						     use_mmio);
+		if (r)
+			return r;
+		return amdgpu_ring_reset_helper_end(ring, timedout_fence);
+	}
+
+	return amdgpu_gfx_reset_mes_gfx(adev, ring, timedout_fence, NULL, vmid,
+				      use_mmio);
+}
+
 static DEVICE_ATTR(run_cleaner_shader, 0200,
 		   NULL, amdgpu_gfx_set_run_cleaner_shader);
 
@@ -2120,6 +2357,245 @@ void amdgpu_gfx_sysfs_fini(struct amdgpu_device *adev)
 		amdgpu_gfx_sysfs_isolation_shader_fini(adev);
 		amdgpu_gfx_sysfs_reset_mask_fini(adev);
 	}
+}
+
+static void amdgpu_gfx_reset_start_compute_scheds(struct amdgpu_device *adev,
+						  struct amdgpu_ring *guilty_ring)
+{
+	struct amdgpu_ring *ring;
+	int i;
+
+	for (i = 0; i < adev->gfx.num_compute_rings; i++) {
+		ring = &adev->gfx.compute_ring[i];
+		if (ring == guilty_ring)
+			continue;
+		drm_sched_wqueue_start(&ring->sched);
+	}
+}
+
+static void amdgpu_gfx_reset_stop_compute_scheds(struct amdgpu_device *adev,
+						 struct amdgpu_ring *guilty_ring)
+{
+	struct amdgpu_ring *ring;
+	int i;
+
+	for (i = 0; i < adev->gfx.num_compute_rings; i++) {
+		ring = &adev->gfx.compute_ring[i];
+		if (ring == guilty_ring)
+			continue;
+		drm_sched_wqueue_stop(&ring->sched);
+	}
+}
+
+bool amdgpu_gfx_me_pipe_reset_supported(struct amdgpu_device *adev)
+{
+	if (!!(adev->gfx.gfx_supported_reset & AMDGPU_RESET_TYPE_PER_PIPE))
+		return true;
+	else
+		dev_warn_once(adev->dev, "Please use the latest ME version to see whether support pipe reset\n");
+
+	return false;
+}
+
+/* Caller holds reset_mutex and attempted MES suspend before HQD lookup. */
+void amdgpu_gfx_pipe_reset_prepare(struct amdgpu_device *adev,
+				   struct amdgpu_ring *guilty_ring,
+				   u32 me, u32 pipe,
+				   struct amdgpu_gfx_pipe_reset_ctx *ctx)
+{
+	struct amdgpu_ring *ring;
+	int i;
+
+	lockdep_assert_held(&adev->gfx.mec.reset_mutex);
+	ctx->sched_mask = 0;
+	ctx->replay_mask = 0;
+
+	for (i = 0; i < adev->gfx.num_gfx_rings; i++) {
+		ring = &adev->gfx.gfx_ring[i];
+		/* An unresolved userq slot requires protecting every GFX pipe. */
+		if (ring == guilty_ring ||
+		    (me != U32_MAX && ring->me != me) ||
+		    (pipe != U32_MAX && ring->pipe != pipe) ||
+		    !amdgpu_ring_sched_ready(ring))
+			continue;
+
+		if (!drm_sched_is_stopped(&ring->sched)) {
+			drm_sched_wqueue_stop(&ring->sched);
+			ctx->sched_mask |= BIT(i);
+		}
+
+		if (amdgpu_fence_count_emitted(ring)) {
+			amdgpu_ring_reset_helper_begin(ring, NULL);
+			if (ring->ring_backup_entries_to_copy)
+				ctx->replay_mask |= BIT(i);
+		}
+	}
+}
+
+/*
+ * Match the MES-reported hung doorbell against a compute ring and run
+ * the reset. On hit, the matched ring and its guilty fence are returned
+ * via *out_ring / *out_fence so the caller can defer reset end until
+ * after MES has resumed all gangs.
+ */
+static int amdgpu_gfx_reset_mes_kcq(struct amdgpu_device *adev,
+				    struct amdgpu_ring *guilty_ring,
+				    unsigned int db,
+				    struct amdgpu_ring **out_ring,
+				    struct amdgpu_fence **out_fence)
+{
+	bool use_mmio = adev->gfx.mec.use_mmio_for_reset;
+	struct amdgpu_fence *fence;
+	struct amdgpu_ring *ring;
+	int i, r;
+
+	*out_ring = NULL;
+	*out_fence = NULL;
+	for (i = 0; i < adev->gfx.num_compute_rings; i++) {
+		ring = &adev->gfx.compute_ring[i];
+		if (ring == guilty_ring)
+			continue;
+		if (ring->doorbell_index == db) {
+			fence = amdgpu_ring_find_guilty_fence(ring);
+			r = amdgpu_gfx_mes_reset_queue_start(ring, 0, fence,
+							      use_mmio);
+			if (r)
+				return r;
+			*out_ring = ring;
+			*out_fence = fence;
+			break;
+		}
+	}
+	return 0;
+}
+
+int amdgpu_gfx_reset_mes_compute(struct amdgpu_device *adev,
+				 struct amdgpu_ring *ring,
+				 struct amdgpu_fence *guilty_fence,
+				 struct amdgpu_usermode_queue *uq,
+				 unsigned int *hung_queue_count,
+				 void *faulty_queue_input)
+{
+	struct amdgpu_mes_hung_queue_hqd_info *hqd_info =
+		(struct amdgpu_mes_hung_queue_hqd_info *)
+		&adev->gfx.mec.mes_hung_db_array[adev->mes.hung_queue_hqd_info_offset];
+	int i, r, pipe, queue, queue_type;
+	unsigned int num_hung = 0;
+	bool use_mmio = adev->gfx.mec.use_mmio_for_reset;
+	struct mes_remove_queue_input *queue_input = (struct mes_remove_queue_input *)faulty_queue_input;
+	struct amdgpu_gfx_deferred_entry deferred_end[AMDGPU_MAX_COMPUTE_RINGS + 1];
+	int n_deferred = 0;
+	int ring_err;
+
+	guard(mutex)(&adev->gfx.mec.reset_mutex);
+	/* stop the drm schedulers for all compute queues */
+	amdgpu_gfx_reset_stop_compute_scheds(adev, ring);
+	/* suspend all will determine which queues are hung.
+	 * reset detect will return the array of bad queue doorbells
+	 */
+	r = amdgpu_mes_suspend(adev, 0);
+	/* if suspend all success, it should no hang queue */
+	if (!r)
+		/* always reset the KCQ/userq since we need to signal the fence
+		 * and we could be stuck in a loop which is preemptable.
+		 */
+		goto fence_reset;
+	r = amdgpu_mes_detect_and_reset_hung_queues(adev, AMDGPU_RING_TYPE_COMPUTE,
+						    true, &num_hung, adev->gfx.mec.mes_hung_db_array, 0);
+	if (r)
+		goto out;
+	if (hung_queue_count)
+		*hung_queue_count = num_hung;
+
+fence_reset:
+	/* reset the queue this came from if specified */
+	if (ring) {
+		r = amdgpu_gfx_mes_reset_queue_start(ring, 0, guilty_fence,
+						      use_mmio);
+		if (r)
+			goto out;
+		deferred_end[n_deferred].ring = ring;
+		deferred_end[n_deferred].fence = guilty_fence;
+		n_deferred++;
+	}
+	if (uq) {
+		r = mes_userq_reset(uq);
+		if (r)
+			goto out;
+	}
+	for (i = 0; i < num_hung; i++) {
+		struct amdgpu_ring *hr = NULL;
+		struct amdgpu_fence *hf = NULL;
+
+		pipe = hqd_info[i].pipe_index;
+		queue = hqd_info[i].queue_index;
+		queue_type = hqd_info[i].queue_type;
+
+		/* reset any KCQs */
+		r = amdgpu_gfx_reset_mes_kcq(adev, ring,
+					     adev->gfx.mec.mes_hung_db_array[i],
+					     &hr, &hf);
+		if (r)
+			goto out;
+		if (hr) {
+			deferred_end[n_deferred].ring = hr;
+			deferred_end[n_deferred].fence = hf;
+			n_deferred++;
+		}
+		/* reset any KFD queues */
+		r = amdgpu_amdkfd_reset_mes_queue(adev, 0, queue_type, pipe, queue,
+						  adev->gfx.mec.mes_hung_db_array[i]);
+		if (r)
+			goto out;
+		/* reset KGD user queues */
+		r = mes_userq_reset_queue(adev, uq, queue_type, pipe, queue,
+					  adev->gfx.mec.mes_hung_db_array[i]);
+		if (r)
+			goto out;
+	}
+
+	/* MES doesn't detect any hung queue but we have a known bad queue
+	 * and it is not KCQ
+	 */
+	if (!num_hung && queue_input && !ring) {
+		/* MES suspend_all is successful means this bad queue is
+		 * preempted successfuly. Remove it before resume all so it
+		 * doesn't get mapped back
+		 */
+		if (!down_read_trylock(&adev->reset_domain->sem)) {
+			r = -EIO;
+			goto out;
+		}
+		amdgpu_mes_lock(&adev->mes);
+		r = adev->mes.funcs->remove_hw_queue(&adev->mes, queue_input);
+		amdgpu_mes_unlock(&adev->mes);
+		up_read(&adev->reset_domain->sem);
+	}
+
+out:
+	/* resume all will enable the non-hung queues */
+	amdgpu_mes_resume(adev, 0);
+
+	/* Now CP is running again — replay backed-up commands and ring
+	 * doorbells on each reset queue.
+	 */
+	ring_err = r;
+	for (i = 0; i < n_deferred; i++) {
+		int er = amdgpu_ring_reset_helper_end(deferred_end[i].ring,
+						      deferred_end[i].fence);
+
+		if (er && !ring_err)
+			ring_err = er;
+	}
+
+	if (!ring_err)
+		amdgpu_gfx_reset_start_compute_scheds(adev, ring);
+
+	/* If this reset is triggered by non-KCQ, the KCQ result after resume must
+	 * not override the reset result; otherwise a false reset failure is returned
+	 * to the non-KCQ caller
+	 */
+	return ring ? ring_err : r;
 }
 
 int amdgpu_gfx_cleaner_shader_sw_init(struct amdgpu_device *adev,
@@ -2460,9 +2936,8 @@ void amdgpu_gfx_profile_ring_begin_use(struct amdgpu_ring *ring)
 	else
 		profile = PP_SMC_POWER_PROFILE_COMPUTE;
 
-	atomic_inc(&adev->gfx.total_submission_cnt);
-
-	cancel_delayed_work_sync(&adev->gfx.idle_work);
+	if (!atomic_fetch_inc(&adev->gfx.total_submission_cnt))
+		cancel_delayed_work_sync(&adev->gfx.idle_work);
 
 	/* We can safely return early here because we've cancelled the
 	 * the delayed work so there is no one else to set it to false
@@ -2490,9 +2965,9 @@ void amdgpu_gfx_profile_ring_end_use(struct amdgpu_ring *ring)
 	if (amdgpu_dpm_is_overdrive_enabled(adev))
 		return;
 
-	atomic_dec(&ring->adev->gfx.total_submission_cnt);
-
-	schedule_delayed_work(&ring->adev->gfx.idle_work, GFX_PROFILE_IDLE_TIMEOUT);
+	if (atomic_dec_and_test(&ring->adev->gfx.total_submission_cnt))
+		schedule_delayed_work(&ring->adev->gfx.idle_work,
+				      GFX_PROFILE_IDLE_TIMEOUT);
 }
 
 /**
@@ -2754,4 +3229,3 @@ int amdgpu_gfx_ring_preempt_ib(struct amdgpu_ring *ring)
 
 	return 0;
 }
-

@@ -504,16 +504,12 @@ static struct snd_kcontrol_new tegra264_amx_controls[] = {
 static int tegra210_amx_component_probe(struct snd_soc_component *component)
 {
 	struct tegra210_amx *amx = snd_soc_component_get_drvdata(component);
-	int err = 0;
 
-	if (amx->soc_data->num_controls) {
-		err = snd_soc_add_component_controls(component, amx->soc_data->controls,
-						     amx->soc_data->num_controls);
-		if (err)
-			dev_err(component->dev, "can't add AMX controls, err: %d\n", err);
-	}
+	if (amx->soc_data->num_controls)
+		return snd_soc_add_component_controls(component, amx->soc_data->controls,
+						      amx->soc_data->num_controls);
 
-	return err;
+	return 0;
 }
 
 static const struct snd_soc_component_driver tegra210_amx_cmpnt = {
@@ -730,7 +726,7 @@ static int tegra210_amx_platform_probe(struct platform_device *pdev)
 	void __iomem *regs;
 	int err, i;
 
-	amx = devm_kzalloc(dev, sizeof(*amx), GFP_KERNEL);
+	amx = devm_kzalloc_obj(dev, *amx);
 	if (!amx)
 		return -ENOMEM;
 
@@ -750,14 +746,13 @@ static int tegra210_amx_platform_probe(struct platform_device *pdev)
 
 	regcache_cache_only(amx->regmap, true);
 
-	amx->map = devm_kcalloc(dev,
-				amx->soc_data->ram_depth * TEGRA_AMX_SLOTS_PER_WORD,
-				sizeof(*amx->map), GFP_KERNEL);
+	amx->map = devm_kzalloc_objs(dev, *amx->map,
+				     amx->soc_data->ram_depth * TEGRA_AMX_SLOTS_PER_WORD);
 	if (!amx->map)
 		return -ENOMEM;
 
-	amx->byte_mask = devm_kcalloc(dev, amx->soc_data->byte_mask_size,
-				      sizeof(*amx->byte_mask), GFP_KERNEL);
+	amx->byte_mask = devm_kzalloc_objs(dev, *amx->byte_mask,
+					   amx->soc_data->byte_mask_size);
 	if (!amx->byte_mask)
 		return -ENOMEM;
 

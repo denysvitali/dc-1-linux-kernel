@@ -231,11 +231,7 @@ static int pm8916_lbc_charger_probe_dt(struct pm8916_lbc_charger *chg)
 		return ret;
 
 	/* Disable charger timeout. */
-	ret = regmap_write(chg->regmap, chg->reg[LBC_CHGR] + PM8916_LBC_CHGR_TCHG_MAX_EN, 0x00);
-	if (ret)
-		return ret;
-
-	return ret;
+	return regmap_write(chg->regmap, chg->reg[LBC_CHGR] + PM8916_LBC_CHGR_TCHG_MAX_EN, 0x00);
 }
 
 static const struct power_supply_desc pm8916_lbc_charger_psy_desc = {
@@ -256,7 +252,7 @@ static int pm8916_lbc_charger_probe(struct platform_device *pdev)
 	int ret, len, irq;
 	unsigned int tmp;
 
-	chg = devm_kzalloc(dev, sizeof(*chg), GFP_KERNEL);
+	chg = devm_kzalloc_obj(dev, *chg);
 	if (!chg)
 		return -ENOMEM;
 

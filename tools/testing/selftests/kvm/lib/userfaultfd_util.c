@@ -119,13 +119,13 @@ struct uffd_desc *uffd_setup_demand_paging(int uffd_mode, useconds_t delay,
 	uffd_desc = malloc(sizeof(struct uffd_desc));
 	TEST_ASSERT(uffd_desc, "Failed to malloc uffd descriptor");
 
-	uffd_desc->pipefds = calloc(sizeof(int), num_readers);
+	uffd_desc->pipefds = calloc(num_readers, sizeof(int));
 	TEST_ASSERT(uffd_desc->pipefds, "Failed to alloc pipes");
 
-	uffd_desc->readers = calloc(sizeof(pthread_t), num_readers);
+	uffd_desc->readers = calloc(num_readers, sizeof(pthread_t));
 	TEST_ASSERT(uffd_desc->readers, "Failed to alloc reader threads");
 
-	uffd_desc->reader_args = calloc(sizeof(struct uffd_reader_args), num_readers);
+	uffd_desc->reader_args = calloc(num_readers, sizeof(struct uffd_reader_args));
 	TEST_ASSERT(uffd_desc->reader_args, "Failed to alloc reader_args");
 
 	uffd_desc->num_readers = num_readers;
@@ -167,8 +167,8 @@ struct uffd_desc *uffd_setup_demand_paging(int uffd_mode, useconds_t delay,
 		uffd_desc->reader_args[i].handler = handler;
 		uffd_desc->reader_args[i].pipe = pipes[0];
 
-		pthread_create(&uffd_desc->readers[i], NULL, uffd_handler_thread_fn,
-			       &uffd_desc->reader_args[i]);
+		kvm_pthread_create(&uffd_desc->readers[i], NULL, uffd_handler_thread_fn,
+				   &uffd_desc->reader_args[i]);
 
 		PER_VCPU_DEBUG("Created uffd thread %i for HVA range [%p, %p)\n",
 			       i, hva, hva + len);
@@ -187,8 +187,7 @@ void uffd_stop_demand_paging(struct uffd_desc *uffd)
 			    "Unable to write to pipefd %i for uffd_desc %p", i, uffd);
 
 	for (i = 0; i < uffd->num_readers; ++i)
-		TEST_ASSERT(!pthread_join(uffd->readers[i], NULL),
-			    "Pthread_join failed on reader %i for uffd_desc %p", i, uffd);
+		kvm_pthread_join(uffd->readers[i], NULL);
 
 	close(uffd->uffd);
 

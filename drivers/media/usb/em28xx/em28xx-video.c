@@ -431,6 +431,7 @@ static void em2828X_decoder_set_std(struct em28xx *dev, v4l2_std_id norm)
 		} else if (INPUT(dev->ctl_input)->vmux == EM2828X_TELEVISION) {
 			em28xx_write_reg(dev, 0x7A00, 0x32);
 			em28xx_write_reg(dev, 0x7A03, 0x09);
+			em28xx_write_reg(dev, 0x7A07, 0x2f);
 			em28xx_write_reg(dev, 0x7A30, 0x2a);
 			em28xx_write_reg(dev, 0x7A80, 0x03);
 			em28xx_write_reg(dev, 0x7A20, 0x35);
@@ -744,6 +745,27 @@ finish_field_prepare_next(struct em28xx *dev,
 }
 
 /*
+ * Set the parity of the field that starts with this header.
+ *
+ * Non-interlaced sources, such as the 240p output of classic game consoles,
+ * generate every field with the same parity, so the bridge reports the same
+ * field ID over and over. A top field never arrives and no frame is ever
+ * completed. Detect a repeated field ID and alternate the parity instead, so
+ * consecutive fields are woven into a frame like a genuine interlaced pair.
+ */
+static inline void em28xx_set_field_parity(struct em28xx_v4l2 *v4l2,
+					   int field_id)
+{
+	bool top_field = !(field_id & 1);
+
+	if (field_id == v4l2->last_field_id)
+		top_field = !v4l2->top_field;
+
+	v4l2->last_field_id = field_id;
+	v4l2->top_field = top_field;
+}
+
+/*
  * Process data packet according to the em2710/em2750/em28xx frame data format
  */
 static inline void process_frame_data_em28xx(struct em28xx *dev,
@@ -777,14 +799,14 @@ static inline void process_frame_data_em28xx(struct em28xx *dev,
 			v4l2->capture_type = 0;
 			v4l2->vbi_read = 0;
 			em28xx_isocdbg("VBI START HEADER !!!\n");
-			v4l2->top_field = !(data_pkt[2] & 1);
+			em28xx_set_field_parity(v4l2, data_pkt[2] & 1);
 			data_pkt += 4;
 			data_len -= 4;
 		} else if (data_pkt[0] == 0x22 && data_pkt[1] == 0x5a) {
 			/* Field start (VBI disabled) */
 			v4l2->capture_type = 2;
 			em28xx_isocdbg("VIDEO START HEADER !!!\n");
-			v4l2->top_field = !(data_pkt[2] & 1);
+			em28xx_set_field_parity(v4l2, data_pkt[2] & 1);
 			data_pkt += 4;
 			data_len -= 4;
 		}
@@ -1213,6 +1235,9 @@ int em28xx_start_analog_streaming(struct vb2_queue *vq, unsigned int count)
 {
 	struct em28xx *dev = vb2_get_drv_priv(vq);
 	struct em28xx_v4l2 *v4l2 = dev->v4l2;
+	struct em28xx_dmaqueue *dmaq = vq->type == V4L2_BUF_TYPE_VBI_CAPTURE ?
+		&dev->vbiq : &dev->vidq;
+	unsigned long flags = 0;
 	struct v4l2_frequency f;
 	struct v4l2_fh *owner;
 	int rc = 0;
@@ -1227,7 +1252,7 @@ int em28xx_start_analog_streaming(struct vb2_queue *vq, unsigned int count)
 	 */
 	rc = res_get(dev, vq->type);
 	if (rc)
-		return rc;
+		goto exit;
 
 	if (v4l2->streaming_users == 0) {
 		/* First active streaming user, so allocate all the URBs */
@@ -1242,6 +1267,7 @@ int em28xx_start_analog_streaming(struct vb2_queue *vq, unsigned int count)
 		em28xx_wake_i2c(dev);
 
 		v4l2->capture_type = -1;
+		v4l2->last_field_id = -1;
 		rc = em28xx_init_usb_xfer(dev, EM28XX_ANALOG_MODE,
 					  dev->analog_xfer_bulk,
 					  EM28XX_NUM_BUFS,
@@ -1250,7 +1276,7 @@ int em28xx_start_analog_streaming(struct vb2_queue *vq, unsigned int count)
 					  em28xx_urb_data_copy);
 		if (rc < 0) {
 			res_free(dev, vq->type);
-			return rc;
+			goto exit;
 		}
 
 		/*
@@ -1275,7 +1301,18 @@ int em28xx_start_analog_streaming(struct vb2_queue *vq, unsigned int count)
 	}
 
 	v4l2->streaming_users++;
+	return 0;
 
+exit:
+	spin_lock_irqsave(&dev->slock, flags);
+	while (!list_empty(&dmaq->active)) {
+		struct em28xx_buffer *buf;
+
+		buf = list_entry(dmaq->active.next, struct em28xx_buffer, list);
+		list_del(&buf->list);
+		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_QUEUED);
+	}
+	spin_unlock_irqrestore(&dev->slock, flags);
 	return rc;
 }
 
@@ -1395,6 +1432,9 @@ static int em28xx_vb2_setup(struct em28xx *dev)
 	rc = vb2_queue_init(q);
 	if (rc < 0)
 		return rc;
+
+	if (!em28xx_vbi_supported(dev))
+		return 0;
 
 	/* Setup Videobuf2 for VBI capture */
 	q = &v4l2->vb_vbiq;
@@ -2275,18 +2315,27 @@ static int radio_s_tuner(struct file *file, void *priv,
 }
 
 /*
- * em28xx_free_v4l2() - Free struct em28xx_v4l2
+ * em28xx_free_v4l2() - v4l2_device release callback
  *
- * @ref: struct kref for struct em28xx_v4l2
+ * @v4l2_dev: pointer to struct v4l2_device embedded in struct em28xx_v4l2
  *
- * Called when all users of struct em28xx_v4l2 are gone
+ * Called by the v4l2 core when the last reference to the v4l2_device is
+ * released. At this point no userspace file handle nor video_device node
+ * keeps the v4l2 instance alive anymore, so it is safe to release all
+ * v4l2-related resources and drop the em28xx device reference taken when
+ * the v4l2 extension was initialized.
  */
-static void em28xx_free_v4l2(struct kref *ref)
+static void em28xx_free_v4l2(struct v4l2_device *v4l2_dev)
 {
-	struct em28xx_v4l2 *v4l2 = container_of(ref, struct em28xx_v4l2, ref);
+	struct em28xx_v4l2 *v4l2 =
+		container_of(v4l2_dev, struct em28xx_v4l2, v4l2_dev);
+	struct em28xx *dev = v4l2->dev;
 
-	v4l2->dev->v4l2 = NULL;
+	v4l2_ctrl_handler_free(&v4l2->ctrl_handler);
+	v4l2_device_unregister(v4l2_dev);
+	dev->v4l2 = NULL;
 	kfree(v4l2);
+	kref_put(&dev->ref, em28xx_free_device);
 }
 
 /*
@@ -2323,9 +2372,8 @@ static int em28xx_v4l2_open(struct file *filp)
 		return -ENODEV;
 	}
 
-	em28xx_videodbg("open dev=%s type=%s users=%d\n",
-			video_device_node_name(vdev), v4l2_type_names[fh_type],
-			v4l2->users);
+	em28xx_videodbg("open dev=%s type=%s\n",
+			video_device_node_name(vdev), v4l2_type_names[fh_type]);
 
 	ret = v4l2_fh_open(filp);
 	if (ret) {
@@ -2336,7 +2384,7 @@ static int em28xx_v4l2_open(struct file *filp)
 		return ret;
 	}
 
-	if (v4l2->users == 0) {
+	if (v4l2_fh_is_singular_file(filp)) {
 		em28xx_set_mode(dev, EM28XX_ANALOG_MODE);
 
 		if (vdev->vfl_type != VFL_TYPE_RADIO)
@@ -2353,10 +2401,6 @@ static int em28xx_v4l2_open(struct file *filp)
 		em28xx_videodbg("video_open: setting radio device\n");
 		v4l2_device_call_all(&v4l2->v4l2_dev, 0, tuner, s_radio);
 	}
-
-	kref_get(&dev->ref);
-	kref_get(&v4l2->ref);
-	v4l2->users++;
 
 	mutex_unlock(&dev->lock);
 
@@ -2403,22 +2447,22 @@ static int em28xx_v4l2_fini(struct em28xx *dev)
 	if (video_is_registered(&v4l2->vbi_dev)) {
 		dev_info(&dev->intf->dev, "V4L2 device %s deregistered\n",
 			 video_device_node_name(&v4l2->vbi_dev));
-		video_unregister_device(&v4l2->vbi_dev);
+		vb2_video_unregister_device(&v4l2->vbi_dev);
 	}
 	if (video_is_registered(&v4l2->vdev)) {
 		dev_info(&dev->intf->dev, "V4L2 device %s deregistered\n",
 			 video_device_node_name(&v4l2->vdev));
-		video_unregister_device(&v4l2->vdev);
+		vb2_video_unregister_device(&v4l2->vdev);
 	}
-
-	v4l2_ctrl_handler_free(&v4l2->ctrl_handler);
-	v4l2_device_unregister(&v4l2->v4l2_dev);
-
-	kref_put(&v4l2->ref, em28xx_free_v4l2);
 
 	mutex_unlock(&dev->lock);
 
-	kref_put(&dev->ref, em28xx_free_device);
+	/*
+	 * Drop the initial reference taken at v4l2_device_register() time.
+	 * The em28xx_free_v4l2() release callback will be invoked once all
+	 * userspace file handles to the video device nodes are closed.
+	 */
+	v4l2_device_put(&v4l2->v4l2_dev);
 
 	return 0;
 }
@@ -2456,17 +2500,18 @@ static int em28xx_v4l2_resume(struct em28xx *dev)
  */
 static int em28xx_v4l2_close(struct file *filp)
 {
+	struct video_device   *vdev = video_devdata(filp);
 	struct em28xx         *dev  = video_drvdata(filp);
 	struct em28xx_v4l2    *v4l2 = dev->v4l2;
 	struct usb_device *udev = interface_to_usbdev(dev->intf);
 	int              err;
+	bool last_user;
 
-	em28xx_videodbg("users=%d\n", v4l2->users);
-
-	vb2_fop_release(filp);
 	mutex_lock(&dev->lock);
+	last_user = v4l2_fh_is_singular_file(filp);
+	_vb2_fop_release(filp, vdev->queue->lock);
 
-	if (v4l2->users == 1) {
+	if (last_user) {
 		/* No sense to try to write to the device */
 		if (dev->disconnected)
 			goto exit;
@@ -2489,10 +2534,7 @@ static int em28xx_v4l2_close(struct file *filp)
 	}
 
 exit:
-	v4l2->users--;
-	kref_put(&v4l2->ref, em28xx_free_v4l2);
 	mutex_unlock(&dev->lock);
-	kref_put(&dev->ref, em28xx_free_device);
 
 	return 0;
 }
@@ -2711,7 +2753,6 @@ static int em28xx_v4l2_init(struct em28xx *dev)
 		mutex_unlock(&dev->lock);
 		return -ENOMEM;
 	}
-	kref_init(&v4l2->ref);
 	v4l2->dev = dev;
 	dev->v4l2 = v4l2;
 
@@ -2722,8 +2763,20 @@ static int em28xx_v4l2_init(struct em28xx *dev)
 	if (ret < 0) {
 		dev_err(&dev->intf->dev,
 			"Call to v4l2_device_register() failed!\n");
-		goto err;
+		dev->v4l2 = NULL;
+		kfree(v4l2);
+		mutex_unlock(&dev->lock);
+		return ret;
 	}
+
+	/*
+	 * From this point on, em28xx_free_v4l2() will be used to release
+	 * v4l2-related resources when the v4l2_device refcount reaches
+	 * zero. Take a reference to the em28xx device so that it cannot
+	 * be freed before the v4l2 instance is released.
+	 */
+	v4l2->v4l2_dev.release = em28xx_free_v4l2;
+	kref_get(&dev->ref);
 
 	hdl = &v4l2->ctrl_handler;
 	v4l2_ctrl_handler_init(hdl, 9);
@@ -2957,6 +3010,14 @@ static int em28xx_v4l2_init(struct em28xx *dev)
 	if (dev->chip_id == CHIP_ID_EM2828X || dev->board.decoder == EM28XX_BUILTIN)
 		v4l2_disable_ioctl(&v4l2->vdev, VIDIOC_ENUM_FRAMESIZES);
 
+	/* initialize videobuf2 stuff */
+	ret = em28xx_vb2_setup(dev);
+	if (ret) {
+		dev_err(&dev->intf->dev,
+			"unable to setup videobuf queues (error=%i).\n", ret);
+		goto unregister_dev;
+	}
+
 	/* register v4l2 video video_device */
 	ret = video_register_device(&v4l2->vdev, VFL_TYPE_VIDEO,
 				    video_nr[dev->devno]);
@@ -2975,7 +3036,7 @@ static int em28xx_v4l2_init(struct em28xx *dev)
 		v4l2->vbi_dev.queue->lock = &v4l2->vb_vbi_queue_lock;
 		v4l2->vbi_dev.device_caps = V4L2_CAP_STREAMING |
 			V4L2_CAP_READWRITE | V4L2_CAP_VBI_CAPTURE;
-		if ((v4l2->vdev.device_caps & V4L2_CAP_TUNER) == 0)
+		if (v4l2->vdev.device_caps & V4L2_CAP_TUNER)
 			v4l2->vbi_dev.device_caps |= V4L2_CAP_TUNER;
 
 		/* disable inapplicable ioctls */
@@ -3042,13 +3103,8 @@ static int em28xx_v4l2_init(struct em28xx *dev)
 	/* Save some power by putting tuner to sleep */
 	v4l2_device_call_all(&v4l2->v4l2_dev, 0, tuner, standby);
 
-	/* initialize videobuf2 stuff */
-	em28xx_vb2_setup(dev);
-
 	dev_info(&dev->intf->dev,
 		 "V4L2 extension successfully initialized\n");
-
-	kref_get(&dev->ref);
 
 	mutex_unlock(&dev->lock);
 	return 0;
@@ -3064,21 +3120,23 @@ unregister_dev:
 		dev_info(&dev->intf->dev,
 			 "V4L2 device %s deregistered\n",
 			 video_device_node_name(&v4l2->vbi_dev));
-		video_unregister_device(&v4l2->vbi_dev);
+		vb2_video_unregister_device(&v4l2->vbi_dev);
 	}
 	if (video_is_registered(&v4l2->vdev)) {
 		dev_info(&dev->intf->dev,
 			 "V4L2 device %s deregistered\n",
 			 video_device_node_name(&v4l2->vdev));
-		video_unregister_device(&v4l2->vdev);
+		vb2_video_unregister_device(&v4l2->vdev);
 	}
 
-	v4l2_ctrl_handler_free(&v4l2->ctrl_handler);
-	v4l2_device_unregister(&v4l2->v4l2_dev);
-err:
-	dev->v4l2 = NULL;
-	kref_put(&v4l2->ref, em28xx_free_v4l2);
 	mutex_unlock(&dev->lock);
+
+	/*
+	 * Drop the initial reference. em28xx_free_v4l2() will be called
+	 * once the last video_device node release has decremented the
+	 * v4l2_device refcount to zero.
+	 */
+	v4l2_device_put(&v4l2->v4l2_dev);
 	return ret;
 }
 

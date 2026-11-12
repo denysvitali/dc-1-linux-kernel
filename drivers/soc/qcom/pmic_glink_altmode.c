@@ -53,7 +53,7 @@ struct usbc_sc8280x_tbt_data {
 	/* This field is NOP on USB4, all cables support rounded rates by spec */
 	u8 rounded_cable : 1;
 	u8 power_limited : 1;
-	u8 res[11];
+	u8 res[7];
 };
 
 struct usbc_notify {
@@ -74,6 +74,7 @@ struct usbc_notify {
 		struct usbc_sc8280x_dp_data dp;
 		struct usbc_sc8280x_tbt_data tbt;
 	} extended_data;
+	u32 reserved;
 };
 
 struct usbc_sc8180x_notify {
@@ -450,7 +451,7 @@ static void pmic_glink_altmode_sc8180xp_notify(struct pmic_glink_altmode *altmod
 	alt_port->mode = mode;
 	alt_port->hpd_state = hpd_state;
 	alt_port->hpd_irq = hpd_irq;
-	schedule_work(&alt_port->work);
+	queue_work(system_freezable_wq, &alt_port->work);
 }
 
 #define SC8280XP_DPAM_MASK	0x3f
@@ -501,7 +502,7 @@ static void pmic_glink_altmode_sc8280xp_notify(struct pmic_glink_altmode *altmod
 		alt_port->tbt_data = *tbt;
 	}
 
-	schedule_work(&alt_port->work);
+	queue_work(system_freezable_wq, &alt_port->work);
 }
 
 static void pmic_glink_altmode_callback(const void *data, size_t len, void *priv)
@@ -576,7 +577,7 @@ static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 	u32 port;
 	int ret;
 
-	altmode = devm_kzalloc(dev, sizeof(*altmode), GFP_KERNEL);
+	altmode = devm_kzalloc_obj(dev, *altmode);
 	if (!altmode)
 		return -ENOMEM;
 

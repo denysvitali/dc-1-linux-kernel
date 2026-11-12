@@ -5082,14 +5082,13 @@ static void dwc2_hcd_free(struct dwc2_hsotg *hsotg)
 	}
 
 	cancel_work_sync(&hsotg->phy_reset_work);
-
-	timer_delete(&hsotg->wkp_timer);
 }
 
 static void dwc2_hcd_release(struct dwc2_hsotg *hsotg)
 {
 	/* Turn off all host-specific interrupts */
 	dwc2_disable_host_interrupts(hsotg);
+	timer_shutdown_sync(&hsotg->wkp_timer);
 
 	dwc2_hcd_free(hsotg);
 }
@@ -5121,14 +5120,12 @@ int dwc2_hcd_init(struct dwc2_hsotg *hsotg)
 	dev_dbg(hsotg->dev, "hcfg=%08x\n", hcfg);
 
 #ifdef CONFIG_USB_DWC2_TRACK_MISSED_SOFS
-	hsotg->frame_num_array = kcalloc(FRAME_NUM_ARRAY_SIZE,
-					 sizeof(*hsotg->frame_num_array),
-					 GFP_KERNEL);
+	hsotg->frame_num_array = kzalloc_objs(*hsotg->frame_num_array,
+					      FRAME_NUM_ARRAY_SIZE);
 	if (!hsotg->frame_num_array)
 		goto error1;
 	hsotg->last_frame_num_array =
-		kcalloc(FRAME_NUM_ARRAY_SIZE,
-			sizeof(*hsotg->last_frame_num_array), GFP_KERNEL);
+		kzalloc_objs(*hsotg->last_frame_num_array, FRAME_NUM_ARRAY_SIZE);
 	if (!hsotg->last_frame_num_array)
 		goto error1;
 #endif
@@ -5656,7 +5653,7 @@ int dwc2_host_exit_hibernation(struct dwc2_hsotg *hsotg, int rem_wakeup,
 	 */
 	mdelay(100);
 
-	/* Clear all pending interupts */
+	/* Clear all pending interrupts */
 	dwc2_writel(hsotg, 0xffffffff, GINTSTS);
 
 	/* De-assert Restore */
@@ -5726,7 +5723,7 @@ int dwc2_host_exit_hibernation(struct dwc2_hsotg *hsotg, int rem_wakeup,
 
 	hprt0 = dwc2_readl(hsotg, HPRT0);
 
-	/* Clear all pending interupts */
+	/* Clear all pending interrupts */
 	dwc2_writel(hsotg, 0xffffffff, GINTSTS);
 
 	/* Restore global registers */

@@ -133,7 +133,7 @@ static void ip_map_init(struct cache_head *cnew, struct cache_head *citem)
 	struct ip_map *new = container_of(cnew, struct ip_map, h);
 	struct ip_map *item = container_of(citem, struct ip_map, h);
 
-	strcpy(new->m_class, item->m_class);
+	strscpy(new->m_class, item->m_class);
 	new->m_addr = item->m_addr;
 }
 static void update(struct cache_head *cnew, struct cache_head *citem)
@@ -296,7 +296,7 @@ static struct ip_map *__ip_map_lookup(struct cache_detail *cd, char *class,
 	struct ip_map ip;
 	struct cache_head *ch;
 
-	strcpy(ip.m_class, class);
+	strscpy(ip.m_class, class);
 	ip.m_addr = *addr;
 	ch = sunrpc_cache_lookup_rcu(cd, &ip.h,
 				     hash_str(class, IP_HASHBITS) ^
@@ -540,6 +540,13 @@ static int unix_gid_parse(struct cache_detail *cd,
 	if (ugp) {
 		struct cache_head *ch;
 		ug.h.flags = 0;
+		/*
+		 * mountd sends at least the user's primary group on
+		 * success, so an empty list can only mean the lookup
+		 * failed. Keep the credential's own groups instead.
+		 */
+		if (gids == 0)
+			set_bit(CACHE_NEGATIVE, &ug.h.flags);
 		ug.h.expiry_time = expiry;
 		ch = sunrpc_cache_update(cd,
 					 &ug.h, &ugp->h,
@@ -625,8 +632,8 @@ int sunrpc_nl_unix_gid_get_reqs_dumpit(struct sk_buff *skb,
 	if (!cnt)
 		return 0;
 
-	items = kcalloc(cnt, sizeof(*items), GFP_KERNEL);
-	seqnos = kcalloc(cnt, sizeof(*seqnos), GFP_KERNEL);
+	items = kzalloc_objs(*items, cnt);
+	seqnos = kzalloc_objs(*seqnos, cnt);
 	if (!items || !seqnos) {
 		ret = -ENOMEM;
 		goto out_alloc;
@@ -730,6 +737,8 @@ static int sunrpc_nl_parse_one_unix_gid(struct cache_detail *cd,
 			   boot.tv_sec;
 
 	if (tb[SUNRPC_A_UNIX_GID_NEGATIVE]) {
+		/* failed lookup: keep the credential's own groups */
+		set_bit(CACHE_NEGATIVE, &ug.h.flags);
 		ug.gi = groups_alloc(0);
 		if (!ug.gi)
 			return -ENOMEM;
@@ -1326,8 +1335,8 @@ int sunrpc_nl_ip_map_get_reqs_dumpit(struct sk_buff *skb,
 	if (!cnt)
 		return 0;
 
-	items = kcalloc(cnt, sizeof(*items), GFP_KERNEL);
-	seqnos = kcalloc(cnt, sizeof(*seqnos), GFP_KERNEL);
+	items = kzalloc_objs(*items, cnt);
+	seqnos = kzalloc_objs(*seqnos, cnt);
 	if (!items || !seqnos) {
 		ret = -ENOMEM;
 		goto out_alloc;

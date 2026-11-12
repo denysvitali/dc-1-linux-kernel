@@ -117,8 +117,14 @@ static int __init set_permissions(pte_t *ptep, unsigned long addr, void *data)
 	const efi_memory_desc_t *md = spd->md;
 	pte_t pte = __ptep_get(ptep);
 
+	/*
+	 * Clear PTE_WRITE as well: it doubles as the DBM bit, and leaving it
+	 * set would permit the hardware to make the mapping writable again
+	 * when TCR_EL1.HD is set.
+	 */
 	if (md->attribute & EFI_MEMORY_RO)
-		pte = set_pte_bit(pte, __pgprot(PTE_RDONLY));
+		pte = set_pte_bit(clear_pte_bit(pte, __pgprot(PTE_WRITE)),
+				  __pgprot(PTE_RDONLY));
 	if (md->attribute & EFI_MEMORY_XP)
 		pte = set_pte_bit(pte, __pgprot(PTE_PXN));
 	else if (system_supports_bti_kernel() && spd->has_bti)
@@ -184,6 +190,8 @@ void arch_efi_call_virt_setup(void)
 		efi_virtmap_load();
 	}
 
+	__efi_fpsimd_begin();
+
 	/*
 	 * Enable access to the valid TTBR0_EL1 and invoke the errata
 	 * workaround directly since there is no return from exception when
@@ -191,8 +199,6 @@ void arch_efi_call_virt_setup(void)
 	 */
 	uaccess_ttbr0_enable();
 	post_ttbr_update_workaround();
-
-	__efi_fpsimd_begin();
 }
 
 void arch_efi_call_virt_teardown(void)

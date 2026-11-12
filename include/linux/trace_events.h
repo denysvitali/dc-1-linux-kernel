@@ -298,6 +298,15 @@ struct trace_event_class {
 	struct list_head	*(*get_fields)(struct trace_event_call *);
 	struct list_head	fields;
 	int			(*raw_init)(struct trace_event_call *);
+#ifdef CONFIG_BPF_EVENTS
+	/*
+	 * Per-template BTF ids set by DECLARE_EVENT_CLASS via BTF_ID() and
+	 * patched by resolve_btfids at link time. NULL for handcrafted classes.
+	 *   [0] FUNC   __bpf_trace_<template>
+	 *   [1] STRUCT trace_event_raw_<template>
+	 */
+	const u32		*btf_ids;
+#endif
 };
 
 extern int trace_event_reg(struct trace_event_call *event,
@@ -863,6 +872,7 @@ enum {
 	FILTER_COMM,
 	FILTER_CPU,
 	FILTER_STACKTRACE,
+	FILTER_WITHIN,
 };
 
 extern int trace_event_raw_init(struct trace_event_call *call);
@@ -873,7 +883,7 @@ extern int trace_add_event_call(struct trace_event_call *call);
 extern int trace_remove_event_call(struct trace_event_call *call);
 extern int trace_event_get_offsets(struct trace_event_call *call);
 
-int ftrace_set_clr_event(struct trace_array *tr, char *buf, int set);
+int ftrace_set_clr_event(struct trace_array *tr, const char *buf, int set, bool handle_filter);
 int trace_set_clr_event(const char *system, const char *event, int set);
 int trace_array_set_clr_event(struct trace_array *tr, const char *system,
 		const char *event, bool enable);

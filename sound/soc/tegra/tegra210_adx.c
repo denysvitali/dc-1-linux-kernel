@@ -496,16 +496,12 @@ static struct snd_kcontrol_new tegra264_adx_controls[] = {
 static int tegra210_adx_component_probe(struct snd_soc_component *component)
 {
 	struct tegra210_adx *adx = snd_soc_component_get_drvdata(component);
-	int err = 0;
 
-	if (adx->soc_data->num_controls) {
-		err = snd_soc_add_component_controls(component, adx->soc_data->controls,
-						     adx->soc_data->num_controls);
-		if (err)
-			dev_err(component->dev, "can't add ADX controls, err: %d\n", err);
-	}
+	if (adx->soc_data->num_controls)
+		return snd_soc_add_component_controls(component, adx->soc_data->controls,
+						      adx->soc_data->num_controls);
 
-	return err;
+	return 0;
 }
 
 static const struct snd_soc_component_driver tegra210_adx_cmpnt = {
@@ -680,11 +676,12 @@ static int tegra210_adx_platform_probe(struct platform_device *pdev)
 	void __iomem *regs;
 	int err, i;
 
-	adx = devm_kzalloc(dev, sizeof(*adx), GFP_KERNEL);
+	soc_data = of_device_get_match_data(dev);
+	adx = devm_kzalloc_flex(dev, *adx, map,
+				soc_data->ram_depth * TEGRA_ADX_SLOTS_PER_WORD);
 	if (!adx)
 		return -ENOMEM;
 
-	soc_data = of_device_get_match_data(dev);
 	adx->soc_data = soc_data;
 
 	dev_set_drvdata(dev, adx);
@@ -701,14 +698,8 @@ static int tegra210_adx_platform_probe(struct platform_device *pdev)
 
 	regcache_cache_only(adx->regmap, true);
 
-	adx->map = devm_kcalloc(dev,
-				soc_data->ram_depth * TEGRA_ADX_SLOTS_PER_WORD,
-				sizeof(*adx->map), GFP_KERNEL);
-	if (!adx->map)
-		return -ENOMEM;
-
-	adx->byte_mask = devm_kcalloc(dev, soc_data->byte_mask_size,
-				      sizeof(*adx->byte_mask), GFP_KERNEL);
+	adx->byte_mask = devm_kzalloc_objs(dev, *adx->byte_mask,
+					   soc_data->byte_mask_size);
 	if (!adx->byte_mask)
 		return -ENOMEM;
 

@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
+#include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
@@ -1564,11 +1565,10 @@ static int wm8962_dsp2_ena_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wm8962_priv *wm8962 = snd_soc_component_get_drvdata(component);
 	int old = wm8962->dsp2_ena;
-	int ret = 0;
 	int dsp2_running = snd_soc_component_read(component, WM8962_DSP2_POWER_MANAGEMENT) &
 		WM8962_DSP2_ENA;
 
-	mutex_lock(&wm8962->dsp2_ena_lock);
+	guard(mutex)(&wm8962->dsp2_ena_lock);
 
 	if (ucontrol->value.integer.value[0])
 		wm8962->dsp2_ena |= 1 << shift;
@@ -1576,9 +1576,7 @@ static int wm8962_dsp2_ena_put(struct snd_kcontrol *kcontrol,
 		wm8962->dsp2_ena &= ~(1 << shift);
 
 	if (wm8962->dsp2_ena == old)
-		goto out;
-
-	ret = 1;
+		return 0;
 
 	if (dsp2_running) {
 		if (wm8962->dsp2_ena)
@@ -1587,10 +1585,7 @@ static int wm8962_dsp2_ena_put(struct snd_kcontrol *kcontrol,
 			wm8962_dsp2_stop(component);
 	}
 
-out:
-	mutex_unlock(&wm8962->dsp2_ena_lock);
-
-	return ret;
+	return 1;
 }
 
 /* The VU bits for the headphones are in a different register to the mute
@@ -3061,6 +3056,22 @@ static int wm8962_mute(struct snd_soc_dai *dai, int mute, int direction)
 #define WM8962_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE |\
 			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
 
+static const u64 wm8962_selectable_formats[] = {
+	/* 1st priority */
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF,
+	/* 2nd priority */
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF,
+};
+
 static const struct snd_soc_dai_ops wm8962_dai_ops = {
 	.hw_params = wm8962_hw_params,
 	.set_sysclk = wm8962_set_dai_sysclk,
@@ -3068,6 +3079,8 @@ static const struct snd_soc_dai_ops wm8962_dai_ops = {
 	.set_tdm_slot = wm8962_set_tdm_slot,
 	.mute_stream = wm8962_mute,
 	.no_capture_mute = 1,
+	.auto_selectable_formats = wm8962_selectable_formats,
+	.num_auto_selectable_formats = ARRAY_SIZE(wm8962_selectable_formats),
 };
 
 static struct snd_soc_dai_driver wm8962_dai = {
@@ -3360,7 +3373,7 @@ static void wm8962_init_beep(struct snd_soc_component *component)
 	struct wm8962_priv *wm8962 = snd_soc_component_get_drvdata(component);
 	int ret;
 
-	wm8962->beep = devm_input_allocate_device(component->dev);
+	wm8962->beep = input_allocate_device();
 	if (!wm8962->beep) {
 		dev_err(component->dev, "Failed to allocate beep device\n");
 		return;
@@ -3381,8 +3394,10 @@ static void wm8962_init_beep(struct snd_soc_component *component)
 
 	ret = input_register_device(wm8962->beep);
 	if (ret != 0) {
+		input_free_device(wm8962->beep);
 		wm8962->beep = NULL;
 		dev_err(component->dev, "Failed to register beep device\n");
+		return;
 	}
 
 	ret = device_create_file(component->dev, &dev_attr_beep);
@@ -3398,7 +3413,10 @@ static void wm8962_free_beep(struct snd_soc_component *component)
 
 	device_remove_file(component->dev, &dev_attr_beep);
 	cancel_work_sync(&wm8962->beep_work);
-	wm8962->beep = NULL;
+	if (wm8962->beep) {
+		input_unregister_device(wm8962->beep);
+		wm8962->beep = NULL;
+	}
 
 	snd_soc_component_update_bits(component, WM8962_BEEP_GENERATOR_1, WM8962_BEEP_ENA,0);
 }
@@ -3435,7 +3453,7 @@ static int wm8962_gpio_request(struct gpio_chip *chip, unsigned offset)
 
 	/* The WM8962 GPIOs aren't linearly numbered.  For simplicity
 	 * we export linear numbers and error out if the unsupported
-	 * ones are requsted.
+	 * ones are requested.
 	 */
 	switch (offset + 1) {
 	case 2:
@@ -3530,33 +3548,11 @@ static void wm8962_free_gpio(struct snd_soc_component *component)
 static int wm8962_probe(struct snd_soc_component *component)
 {
 	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
-	int ret;
 	struct wm8962_priv *wm8962 = snd_soc_component_get_drvdata(component);
 	int i;
 	bool dmicclk, dmicdat;
 
 	wm8962->component = component;
-
-	wm8962->disable_nb[0].notifier_call = wm8962_regulator_event_0;
-	wm8962->disable_nb[1].notifier_call = wm8962_regulator_event_1;
-	wm8962->disable_nb[2].notifier_call = wm8962_regulator_event_2;
-	wm8962->disable_nb[3].notifier_call = wm8962_regulator_event_3;
-	wm8962->disable_nb[4].notifier_call = wm8962_regulator_event_4;
-	wm8962->disable_nb[5].notifier_call = wm8962_regulator_event_5;
-	wm8962->disable_nb[6].notifier_call = wm8962_regulator_event_6;
-	wm8962->disable_nb[7].notifier_call = wm8962_regulator_event_7;
-
-	/* This should really be moved into the regulator core */
-	for (i = 0; i < ARRAY_SIZE(wm8962->supplies); i++) {
-		ret = devm_regulator_register_notifier(
-						wm8962->supplies[i].consumer,
-						&wm8962->disable_nb[i]);
-		if (ret != 0) {
-			dev_err(component->dev,
-				"Failed to register regulator notifier: %d\n",
-				ret);
-		}
-	}
 
 	wm8962_add_widgets(component);
 
@@ -3669,7 +3665,7 @@ static int wm8962_i2c_probe(struct i2c_client *i2c)
 	unsigned int reg;
 	int ret, i, irq_pol, trigger;
 
-	wm8962 = devm_kzalloc(&i2c->dev, sizeof(*wm8962), GFP_KERNEL);
+	wm8962 = devm_kzalloc_obj(&i2c->dev, *wm8962);
 	if (wm8962 == NULL)
 		return -ENOMEM;
 
@@ -3747,6 +3743,27 @@ static int wm8962_i2c_probe(struct i2c_client *i2c)
 
 	regcache_cache_bypass(wm8962->regmap, false);
 
+	wm8962->disable_nb[0].notifier_call = wm8962_regulator_event_0;
+	wm8962->disable_nb[1].notifier_call = wm8962_regulator_event_1;
+	wm8962->disable_nb[2].notifier_call = wm8962_regulator_event_2;
+	wm8962->disable_nb[3].notifier_call = wm8962_regulator_event_3;
+	wm8962->disable_nb[4].notifier_call = wm8962_regulator_event_4;
+	wm8962->disable_nb[5].notifier_call = wm8962_regulator_event_5;
+	wm8962->disable_nb[6].notifier_call = wm8962_regulator_event_6;
+	wm8962->disable_nb[7].notifier_call = wm8962_regulator_event_7;
+
+	/* This should really be moved into the regulator core */
+	for (i = 0; i < ARRAY_SIZE(wm8962->supplies); i++) {
+		ret = devm_regulator_register_notifier(wm8962->supplies[i].consumer,
+						       &wm8962->disable_nb[i]);
+		if (ret != 0) {
+			dev_err(&i2c->dev,
+				"Failed to register regulator notifier: %d\n",
+				ret);
+			goto err_enable;
+		}
+	}
+
 	ret = wm8962_reset(wm8962);
 	if (ret < 0) {
 		dev_err(&i2c->dev, "Failed to issue reset\n");
@@ -3818,7 +3835,7 @@ static int wm8962_i2c_probe(struct i2c_client *i2c)
 	regmap_update_bits(wm8962->regmap, WM8962_EQ1,
 			   WM8962_EQ_SHARED_COEFF, 0);
 
-	/* Don't debouce interrupts so we don't need SYSCLK */
+	/* Don't debounce interrupts so we don't need SYSCLK */
 	regmap_update_bits(wm8962->regmap, WM8962_IRQ_DEBOUNCE,
 			   WM8962_FLL_LOCK_DB | WM8962_PLL3_LOCK_DB |
 			   WM8962_PLL2_LOCK_DB | WM8962_TEMP_SHUT_DB,
@@ -3937,7 +3954,9 @@ static int wm8962_runtime_resume(struct device *dev)
 			   WM8962_OSC_ENA | WM8962_PLL2_ENA | WM8962_PLL3_ENA,
 			   0);
 
-	regcache_sync(wm8962->regmap);
+	ret = regcache_sync(wm8962->regmap);
+	if (ret)
+		goto cache_sync_err;
 
 	regmap_update_bits(wm8962->regmap, WM8962_ANTI_POP,
 			   WM8962_STARTUP_BIAS_ENA | WM8962_VMID_BUF_ENA,
@@ -3955,6 +3974,11 @@ static int wm8962_runtime_resume(struct device *dev)
 
 	return 0;
 
+cache_sync_err:
+	regcache_cache_only(wm8962->regmap, true);
+	regcache_mark_dirty(wm8962->regmap);
+	regulator_bulk_disable(ARRAY_SIZE(wm8962->supplies),
+			       wm8962->supplies);
 disable_clock:
 	clk_disable_unprepare(wm8962->pdata.mclk);
 	return ret;

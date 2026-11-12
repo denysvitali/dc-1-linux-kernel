@@ -542,6 +542,7 @@ static int cifs_query_path_info(const unsigned int xid,
 
 	data->reparse_point = false;
 	data->adjust_tz = false;
+	data->unknown_nlink = false;
 
 	/*
 	 * First try CIFSSMBQPathInfo() function which returns more info
@@ -608,6 +609,7 @@ static int cifs_query_path_info(const unsigned int xid,
 				fi.EASize = di->EaSize;
 			}
 			fi.NumberOfLinks = cpu_to_le32(1);
+			data->unknown_nlink = true;
 			fi.DeletePending = 0;
 			fi.Directory = !!(le32_to_cpu(fi.Attributes) & ATTR_DIRECTORY);
 			cifs_buf_release(search_info.ntwrk_buf_start);
@@ -630,6 +632,8 @@ static int cifs_query_path_info(const unsigned int xid,
 		rc = SMBQueryInformation(xid, tcon, full_path, &fi, cifs_sb->local_nls,
 					 cifs_remap(cifs_sb));
 		data->adjust_tz = true;
+		if (!rc)
+			data->unknown_nlink = true;
 	} else if ((rc == -EOPNOTSUPP || rc == -EINVAL) && non_unicode_wildcard) {
 		/* Path with non-UNICODE wildcard character cannot exist. */
 		rc = -ENOENT;
@@ -717,7 +721,7 @@ static int cifs_query_path_info(const unsigned int xid,
 			ea->ea_value_length = cpu_to_le16(SMB2_WSL_XATTR_DEV_SIZE);
 			memcpy(&ea->ea_data[0], SMB2_WSL_XATTR_DEV, SMB2_WSL_XATTR_NAME_LEN + 1);
 			data->wsl.eas_len += ALIGN(sizeof(*ea) + SMB2_WSL_XATTR_NAME_LEN + 1 +
-						   SMB2_WSL_XATTR_MODE_SIZE, 4);
+						   SMB2_WSL_XATTR_DEV_SIZE, 4);
 			rc = 0;
 		} else if (rc >= 0) {
 			/* It is an error if EA $LXDEV has wrong size. */
@@ -811,7 +815,6 @@ cifs_clear_stats(struct cifs_tcon *tcon)
 	atomic_set(&tcon->stats.cifs_stats.num_symlinks, 0);
 	atomic_set(&tcon->stats.cifs_stats.num_locks, 0);
 	atomic_set(&tcon->stats.cifs_stats.num_acl_get, 0);
-	atomic_set(&tcon->stats.cifs_stats.num_acl_set, 0);
 }
 
 static void
@@ -864,13 +867,12 @@ cifs_mkdir_setinfo(struct inode *inode, const char *full_path,
 	cifsInode = CIFS_I(inode);
 	dosattrs = cifsInode->cifsAttrs|ATTR_READONLY;
 	info.Attributes = cpu_to_le32(dosattrs);
-	rc = CIFSSMBSetPathInfo(xid, tcon, full_path, &info, cifs_sb->local_nls,
-				cifs_sb);
+	rc = CIFSSMBSetPathInfo(xid, tcon, full_path, &info, cifs_sb);
 	if (rc == -EOPNOTSUPP || rc == -EINVAL)
 		rc = SMBSetInformation(xid, tcon, full_path,
 				       info.Attributes,
 				       0 /* do not change write time */,
-				       cifs_sb->local_nls, cifs_sb);
+				       cifs_sb);
 	if (rc == 0)
 		cifsInode->cifsAttrs = dosattrs;
 }
@@ -888,13 +890,14 @@ static int cifs_open_file(const unsigned int xid, struct cifs_open_parms *oparms
 				   oparms->desired_access,
 				   oparms->create_options,
 				   &oparms->fid->netfid, oplock, &fi,
-				   oparms->cifs_sb->local_nls,
 				   cifs_remap(oparms->cifs_sb));
 	else
 		rc = CIFS_open(xid, oparms, oplock, &fi);
 
-	if (!rc && data)
+	if (!rc && data) {
 		move_cifs_info_to_smb2(&data->fi, &fi);
+		data->unknown_nlink = true;
+	}
 
 	return rc;
 }
@@ -1017,8 +1020,7 @@ smb_set_file_info(struct inode *inode, const char *full_path,
 	if (open_file)
 		goto set_via_filehandle;
 
-	rc = CIFSSMBSetPathInfo(xid, tcon, full_path, buf, cifs_sb->local_nls,
-				cifs_sb);
+	rc = CIFSSMBSetPathInfo(xid, tcon, full_path, buf, cifs_sb);
 	if (rc == 0) {
 		cinode->cifsAttrs = le32_to_cpu(buf->Attributes);
 		goto out;
@@ -1067,7 +1069,7 @@ smb_set_file_info(struct inode *inode, const char *full_path,
 		rc = SMBSetInformation(xid, tcon, full_path,
 				       buf->Attributes != 0 ? buf->Attributes : cpu_to_le32(cinode->cifsAttrs),
 				       write_time,
-				       cifs_sb->local_nls, cifs_sb);
+				       cifs_sb);
 		if (rc == 0)
 			cinode->cifsAttrs = le32_to_cpu(buf->Attributes);
 		else
@@ -1106,7 +1108,7 @@ set_via_filehandle:
 		SMBSetInformation(xid, tcon, full_path,
 				  buf->Attributes,
 				  0 /* do not change write time */,
-				  cifs_sb->local_nls, cifs_sb);
+				  cifs_sb);
 	}
 out:
 	if (tlink != NULL)

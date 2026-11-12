@@ -43,7 +43,7 @@ static struct io_wq *io_init_wq_offload(struct io_ring_ctx *ctx,
 	return io_wq_create(concurrency, &data);
 }
 
-void __io_uring_free(struct task_struct *tsk)
+void io_uring_free_tctx(struct task_struct *tsk)
 {
 	struct io_uring_task *tctx = tsk->io_uring;
 	struct io_tctx_node *node;
@@ -64,9 +64,14 @@ void __io_uring_free(struct task_struct *tsk)
 		WARN_ON_ONCE(tctx->cached_refs);
 
 		percpu_counter_destroy(&tctx->inflight);
-		kfree(tctx);
+		kfree_rcu(tctx, rcu);
 		tsk->io_uring = NULL;
 	}
+}
+
+void __io_uring_free(struct task_struct *tsk)
+{
+	io_uring_free_tctx(tsk);
 	if (tsk->io_uring_restrict) {
 		io_put_bpf_filters(tsk->io_uring_restrict);
 		kfree(tsk->io_uring_restrict);
@@ -99,7 +104,7 @@ __cold struct io_uring_task *io_uring_alloc_task_context(struct task_struct *tas
 	}
 
 	tctx->task = task;
-	xa_init(&tctx->xa);
+	xa_init_flags(&tctx->xa, XA_FLAGS_ACCOUNT);
 	init_waitqueue_head(&tctx->wait);
 	atomic_set(&tctx->in_cancel, 0);
 	atomic_set(&tctx->inflight_tracked, 0);
@@ -118,7 +123,7 @@ static int io_tctx_install_node(struct io_ring_ctx *ctx,
 	if (xa_load(&tctx->xa, (unsigned long)ctx))
 		return 0;
 
-	node = kmalloc_obj(*node);
+	node = kmalloc_obj(*node, GFP_KERNEL_ACCOUNT);
 	if (!node)
 		return -ENOMEM;
 	node->ctx = ctx;
@@ -184,6 +189,7 @@ err_free:
 			io_wq_exit_start(tctx->io_wq);
 			io_wq_put_and_exit(tctx->io_wq);
 		}
+		xa_destroy(&tctx->xa);
 		percpu_counter_destroy(&tctx->inflight);
 		kfree(tctx);
 	}
@@ -245,6 +251,8 @@ __cold void io_uring_clean_tctx(struct io_uring_task *tctx)
 		io_uring_del_tctx_node(index);
 		cond_resched();
 	}
+	/* A failed xa_store() leaves nodes with no entry behind. */
+	xa_destroy(&tctx->xa);
 	if (wq) {
 		/*
 		 * Must be after io_uring_del_tctx_node() (removes nodes under

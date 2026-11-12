@@ -70,11 +70,10 @@ int ocrdma_query_device(struct ib_device *ibdev, struct ib_device_attr *attr,
 	struct ocrdma_dev *dev = get_ocrdma_dev(ibdev);
 	int err;
 
-	err = ib_is_udata_in_empty(uhw);
+	err = ib_no_udata_io(uhw);
 	if (err)
 		return err;
 
-	memset(attr, 0, sizeof *attr);
 	memcpy(&attr->fw_ver, &dev->attr.fw_ver[0],
 	       min(sizeof(dev->attr.fw_ver), sizeof(attr->fw_ver)));
 	addrconf_addr_eui48((u8 *)&attr->sys_image_guid,
@@ -112,7 +111,7 @@ int ocrdma_query_device(struct ib_device *ibdev, struct ib_device_attr *attr,
 	attr->local_ca_ack_delay = dev->attr.local_ca_ack_delay;
 	attr->max_fast_reg_page_list_len = dev->attr.max_pages_per_frmr;
 	attr->max_pkeys = 1;
-	return ib_respond_empty_udata(uhw);
+	return 0;
 }
 
 static inline void get_link_speed_and_width(struct ocrdma_dev *dev,
@@ -1393,9 +1392,9 @@ int ocrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	qp = get_ocrdma_qp(ibqp);
 	dev = get_ocrdma_dev(ibqp->device);
 
-	/* syncronize with multiple context trying to change, retrive qps */
+	/* synchronize with multiple context trying to change, retrieve qps */
 	mutex_lock(&dev->dev_lock);
-	/* syncronize with wqe, rqe posting and cqe processing contexts */
+	/* synchronize with wqe, rqe posting and cqe processing contexts */
 	spin_lock_irqsave(&qp->q_lock, flags);
 	old_qps = get_ibqp_state(qp->state);
 	if (attr_mask & IB_QP_STATE)
@@ -1600,7 +1599,7 @@ static void ocrdma_discard_cqes(struct ocrdma_qp *qp, struct ocrdma_cq *cq)
 	 */
 
 	cur_getp = cq->getp;
-	/* find upto when do we reap the cq. */
+	/* find up to when do we reap the cq. */
 	stop_getp = cur_getp;
 	do {
 		if (is_hw_sq_empty(qp) && (!qp->srq && is_hw_rq_empty(qp)))
@@ -1791,8 +1790,7 @@ int ocrdma_create_srq(struct ib_srq *ibsrq, struct ib_srq_init_attr *init_attr,
 		srq->bit_fields_len = (srq->rq.max_cnt / 32) +
 		    (srq->rq.max_cnt % 32 ? 1 : 0);
 		srq->idx_bit_fields =
-		    kmalloc_array(srq->bit_fields_len, sizeof(u32),
-				  GFP_KERNEL);
+		    kmalloc_objs(u32, srq->bit_fields_len);
 		if (!srq->idx_bit_fields) {
 			status = -ENOMEM;
 			goto arm_err;

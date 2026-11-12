@@ -6,7 +6,7 @@
 #include "iwl-drv.h"
 #include "pnvm.h"
 #include "iwl-prph.h"
-#include "iwl-io.h"
+#include "iwl-trans.h"
 #include "fw/api/commands.h"
 #include "fw/api/nvm-reg.h"
 #include "fw/api/alive.h"
@@ -205,6 +205,12 @@ static int iwl_pnvm_parse(struct iwl_trans *trans, const u8 *data,
 			IWL_DEBUG_FW(trans,
 				     "Got IWL_UCODE_TLV_PNVM_SKU len %d\n",
 				     tlv_len);
+			if (tlv_len < sizeof(*tlv_sku_id)) {
+				IWL_ERR(trans, "invalid PNVM SKU TLV len: %u\n",
+					tlv_len);
+				return -EINVAL;
+			}
+
 			IWL_DEBUG_FW(trans, "sku_id 0x%0x 0x%0x 0x%0x\n",
 				     le32_to_cpu(tlv_sku_id->data[0]),
 				     le32_to_cpu(tlv_sku_id->data[1]),
@@ -479,8 +485,8 @@ int iwl_pnvm_load(struct iwl_trans *trans,
 				   iwl_pnvm_complete_fn, trans);
 
 	/* kick the doorbell */
-	iwl_write_umac_prph(trans, UREG_DOORBELL_TO_ISR6,
-			    UREG_DOORBELL_TO_ISR6_PNVM);
+	iwl_trans_write_umac_prph(trans, UREG_DOORBELL_TO_ISR6,
+				  UREG_DOORBELL_TO_ISR6_PNVM);
 
 	return iwl_wait_notification(notif_wait, &pnvm_wait,
 				     MVM_UCODE_PNVM_TIMEOUT);

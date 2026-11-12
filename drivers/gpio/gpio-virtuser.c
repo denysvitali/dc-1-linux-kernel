@@ -692,7 +692,8 @@ static int gpio_virtuser_interrupts_set(void *data, u64 val)
 		atomic_set(&ld->irq, irq);
 	} else {
 		irq = atomic_xchg(&ld->irq, 0);
-		free_irq(irq, ld);
+		if (irq)
+			free_irq(irq, ld);
 	}
 
 	return 0;
@@ -772,7 +773,7 @@ static int gpio_virtuser_dbgfs_init_line_array_attrs(struct device *dev,
 	struct gpio_virtuser_line_array_data *data;
 	char *name;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -802,7 +803,7 @@ static int gpio_virtuser_dbgfs_init_line_attrs(struct device *dev,
 	char *name;
 	int ret;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -916,7 +917,7 @@ static int gpio_virtuser_probe(struct platform_device *pdev)
 	if (num_ids == 0)
 		return dev_err_probe(dev, -EINVAL, "No GPIO IDs specified\n");
 
-	ids = devm_kcalloc(dev, num_ids, sizeof(*ids), GFP_KERNEL);
+	ids = devm_kzalloc_objs(dev, *ids, num_ids);
 	if (!ids)
 		return -ENOMEM;
 
@@ -1429,8 +1430,7 @@ gpio_virtuser_make_device_swnode(struct gpio_virtuser_device *dev)
 	memset(properties, 0, sizeof(properties));
 
 	num_ids = list_count_nodes(&dev->lookup_list);
-	char **ids __free(kfree) = kcalloc(num_ids + 1, sizeof(*ids),
-					   GFP_KERNEL);
+	char **ids __free(kfree) = kzalloc_objs(*ids, num_ids + 1);
 	if (!ids)
 		return ERR_PTR(-ENOMEM);
 

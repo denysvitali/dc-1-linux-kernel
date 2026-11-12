@@ -201,7 +201,7 @@ static int cros_usbpd_logger_probe(struct platform_device *pd)
 	struct logger_data *logger;
 	int ret;
 
-	logger = devm_kzalloc(dev, sizeof(*logger), GFP_KERNEL);
+	logger = devm_kzalloc_obj(dev, *logger);
 	if (!logger)
 		return -ENOMEM;
 
@@ -248,8 +248,8 @@ static SIMPLE_DEV_PM_OPS(cros_usbpd_logger_pm_ops, cros_usbpd_logger_suspend,
 			 cros_usbpd_logger_resume);
 
 static const struct platform_device_id cros_usbpd_logger_id[] = {
-	{ DRV_NAME, 0 },
-	{}
+	{ .name = DRV_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, cros_usbpd_logger_id);
 

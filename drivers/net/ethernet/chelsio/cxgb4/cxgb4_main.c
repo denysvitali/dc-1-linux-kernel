@@ -864,7 +864,7 @@ int cxgb4_write_rss(const struct port_info *pi, const u16 *queues)
 	u16 *rss;
 
 	rxq = &adapter->sge.ethrxq[pi->first_qset];
-	rss = kmalloc_array(pi->rss_size, sizeof(u16), GFP_KERNEL);
+	rss = kmalloc_objs(u16, pi->rss_size);
 	if (!rss)
 		return -ENOMEM;
 
@@ -1163,7 +1163,7 @@ static u16 cxgb_select_queue(struct net_device *dev, struct sk_buff *skb,
 	}
 #endif /* CONFIG_CHELSIO_T4_DCB */
 
-	if (dev->num_tc) {
+	if (netdev_get_num_tc(dev)) {
 		struct port_info *pi = netdev2pinfo(dev);
 		u8 ver, proto;
 
@@ -1388,7 +1388,7 @@ static int cxgb4_port_mirror_alloc_queues(struct net_device *dev)
 	}
 
 	/* Setup RSS for Mirror Rxqs */
-	rss = kcalloc(pi->rss_size, sizeof(u16), GFP_KERNEL);
+	rss = kzalloc_objs(u16, pi->rss_size);
 	if (!rss) {
 		ret = -ENOMEM;
 		goto out_free_queues;
@@ -6096,7 +6096,7 @@ static int init_rss(struct adapter *adap)
 	for_each_port(adap, i) {
 		struct port_info *pi = adap2pinfo(adap, i);
 
-		pi->rss = kcalloc(pi->rss_size, sizeof(u16), GFP_KERNEL);
+		pi->rss = kzalloc_objs(u16, pi->rss_size);
 		if (!pi->rss)
 			return -ENOMEM;
 	}

@@ -149,7 +149,7 @@ static int s3fwrn5_i2c_probe(struct i2c_client *client)
 	struct s3fwrn5_i2c_phy *phy;
 	int ret;
 
-	phy = devm_kzalloc(&client->dev, sizeof(*phy), GFP_KERNEL);
+	phy = devm_kzalloc_obj(&client->dev, *phy);
 	if (!phy)
 		return -ENOMEM;
 
@@ -210,9 +210,9 @@ static const struct i2c_device_id s3fwrn5_i2c_id_table[] = {
 };
 MODULE_DEVICE_TABLE(i2c, s3fwrn5_i2c_id_table);
 
-static const struct of_device_id of_s3fwrn5_i2c_match[] __maybe_unused = {
-	{ .compatible = "samsung,s3fwrn5-i2c", },
-	{}
+static const struct of_device_id of_s3fwrn5_i2c_match[] = {
+	{ .compatible = "samsung,s3fwrn5-i2c" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, of_s3fwrn5_i2c_match);
 

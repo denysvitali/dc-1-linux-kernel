@@ -2028,15 +2028,15 @@ static int mlxbf_pmc_init_perftype_counter(struct device *dev, unsigned int blk_
 		attr = NULL;
 	}
 
-	pmc->block[blk_num].attr_counter = devm_kcalloc(
-		dev, pmc->block[blk_num].counters,
-		sizeof(struct mlxbf_pmc_attribute), GFP_KERNEL);
+	pmc->block[blk_num].attr_counter = devm_kzalloc_objs(dev,
+							     struct mlxbf_pmc_attribute,
+							     pmc->block[blk_num].counters);
 	if (!pmc->block[blk_num].attr_counter)
 		return -ENOMEM;
 
-	pmc->block[blk_num].attr_event = devm_kcalloc(
-		dev, pmc->block[blk_num].counters,
-		sizeof(struct mlxbf_pmc_attribute), GFP_KERNEL);
+	pmc->block[blk_num].attr_event = devm_kzalloc_objs(dev,
+							   struct mlxbf_pmc_attribute,
+							   pmc->block[blk_num].counters);
 	if (!pmc->block[blk_num].attr_event)
 		return -ENOMEM;
 
@@ -2084,8 +2084,9 @@ static int mlxbf_pmc_init_perftype_reg(struct device *dev, unsigned int blk_num)
 	if (!events)
 		return -ENOENT;
 
-	pmc->block[blk_num].attr_event = devm_kcalloc(
-		dev, count, sizeof(struct mlxbf_pmc_attribute), GFP_KERNEL);
+	pmc->block[blk_num].attr_event = devm_kzalloc_objs(dev,
+							   struct mlxbf_pmc_attribute,
+							   count);
 	if (!pmc->block[blk_num].attr_event)
 		return -ENOMEM;
 
@@ -2262,12 +2263,18 @@ static int mlxbf_pmc_map_counters(struct device *dev)
 
 static int mlxbf_pmc_probe(struct platform_device *pdev)
 {
-	struct acpi_device *acpi_dev = ACPI_COMPANION(&pdev->dev);
-	const char *hid = acpi_device_hid(acpi_dev);
 	struct device *dev = &pdev->dev;
+	struct acpi_device *acpi_dev;
 	struct arm_smccc_res res;
+	const char *hid;
 	guid_t guid;
 	int ret;
+
+	acpi_dev = ACPI_COMPANION(&pdev->dev);
+	if (!acpi_dev)
+		return -ENODEV;
+
+	hid = acpi_device_hid(acpi_dev);
 
 	/* Ensure we have the UUID we expect for this service. */
 	arm_smccc_smc(MLXBF_PMC_SIP_SVC_UID, 0, 0, 0, 0, 0, 0, 0, &res);
@@ -2275,7 +2282,7 @@ static int mlxbf_pmc_probe(struct platform_device *pdev)
 	if (!mlxbf_pmc_guid_match(&guid, &res))
 		return -ENODEV;
 
-	pmc = devm_kzalloc(dev, sizeof(struct mlxbf_pmc_context), GFP_KERNEL);
+	pmc = devm_kzalloc_obj(dev, struct mlxbf_pmc_context);
 	if (!pmc)
 		return -ENOMEM;
 

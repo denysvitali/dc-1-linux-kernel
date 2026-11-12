@@ -264,7 +264,7 @@ static inline void task_set_sve_vl_onexec(struct task_struct *task,
 
 #define SCTLR_USER_MASK                                                        \
 	(SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | SCTLR_ELx_ENDA | SCTLR_ELx_ENDB |   \
-	 SCTLR_EL1_TCF0_MASK)
+	 SCTLR_EL1_TCF0_MASK | SCTLR_EL1_TCSO0_MASK)
 
 static inline void arch_thread_struct_whitelist(unsigned long *offset,
 						unsigned long *size)
@@ -351,8 +351,6 @@ static inline void compat_start_thread(struct pt_regs *regs, unsigned long pc,
 	unsigned long pstate = PSR_AA32_MODE_USR;
 	if (pc & 1)
 		pstate |= PSR_AA32_T_BIT;
-	if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
-		pstate |= PSR_AA32_E_BIT;
 
 	start_thread_common(regs, pc, pstate);
 	spectre_v4_enable_task_mitigation(current);

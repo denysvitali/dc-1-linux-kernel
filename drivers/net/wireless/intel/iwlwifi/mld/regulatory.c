@@ -6,18 +6,37 @@
 #include <linux/dmi.h>
 
 #include "fw/regulatory.h"
-#include "fw/acpi.h"
 #include "fw/uefi.h"
 
 #include "regulatory.h"
 #include "mld.h"
 #include "hcmd.h"
 
+static ssize_t iwl_mld_get_lari_config_cmd_size(u8 cmd_ver)
+{
+	switch (cmd_ver) {
+	case 15:
+		return sizeof(struct iwl_lari_config_change_cmd);
+	case 14:
+		return offsetof(struct iwl_lari_config_change_cmd,
+				oem_supported_dsm_bitmap);
+	case 13:
+		return offsetof(struct iwl_lari_config_change_cmd,
+				oem_uhb_allow_extension_bitmap);
+	case 12:
+		return offsetof(struct iwl_lari_config_change_cmd,
+				oem_11bn_allow_bitmap);
+	default:
+		WARN(true, "unsupported version: %d", cmd_ver);
+		return -EINVAL;
+	}
+}
+
 void iwl_mld_get_bios_tables(struct iwl_mld *mld)
 {
 	int ret;
 
-	iwl_acpi_get_guid_lock_status(&mld->fwrt);
+	iwl_bios_get_guid_lock_status(&mld->fwrt);
 
 	ret = iwl_bios_get_ppag_table(&mld->fwrt);
 	if (ret < 0) {
@@ -55,6 +74,21 @@ void iwl_mld_get_bios_tables(struct iwl_mld *mld)
 					"EWRD SAR BIOS table invalid or unavailable. (%d)\n",
 					ret);
 
+		ret = iwl_bios_get_wsss_table(&mld->fwrt);
+		if (ret < 0)
+			IWL_DEBUG_RADIO(mld,
+					"WSSS (WRDS Standalone) SAR BIOS table invalid or unavailable. (%d)\n",
+					ret);
+
+		if (!ret) {
+			/* EWSS only extends the standalone SAR profiles from WSSS. */
+			ret = iwl_bios_get_ewss_table(&mld->fwrt);
+			if (ret < 0)
+				IWL_DEBUG_RADIO(mld,
+						"EWSS (EWRD Standalone) SAR BIOS table invalid or unavailable. (%d)\n",
+						ret);
+		}
+
 		ret = iwl_bios_get_wgds_table(&mld->fwrt);
 		if (ret < 0)
 			IWL_DEBUG_RADIO(mld,
@@ -67,6 +101,9 @@ void iwl_mld_get_bios_tables(struct iwl_mld *mld)
 	iwl_uefi_get_uneb_table(mld->trans, &mld->fwrt);
 
 	iwl_bios_get_phy_filters(&mld->fwrt);
+
+	iwl_uefi_get_sgom_table(mld->trans, &mld->fwrt);
+	iwl_uefi_get_puncturing(&mld->fwrt);
 }
 
 static int iwl_mld_geo_sar_init(struct iwl_mld *mld)
@@ -113,7 +150,9 @@ static int iwl_mld_geo_sar_init(struct iwl_mld *mld)
 	return iwl_mld_send_cmd_pdu(mld, cmd_id, &cmd, cmd_size);
 }
 
-int iwl_mld_config_sar_profile(struct iwl_mld *mld, int prof_a, int prof_b)
+static int
+iwl_mld_config_sar_concurrent_profile(struct iwl_mld *mld, int prof_a,
+				      int prof_b)
 {
 	struct iwl_dev_tx_power_cmd cmd = {
 		.common.set_mode = cpu_to_le32(IWL_TX_POWER_MODE_SET_CHAINS),
@@ -130,8 +169,9 @@ int iwl_mld_config_sar_profile(struct iwl_mld *mld, int prof_a, int prof_b)
 		num_subbands = IWL_NUM_SUB_BANDS_V2;
 		break;
 	case 11:
-		cmd.v11.flags = cpu_to_le32(mld->fwrt.reduced_power_flags);
-		cmd_size = sizeof(cmd.common) + sizeof(cmd.v11);
+	case 12:
+		cmd.v12.flags = cpu_to_le32(mld->fwrt.reduced_power_flags);
+		cmd_size = sizeof(cmd.common) + sizeof(cmd.v12);
 		num_subbands = IWL_NUM_SUB_BANDS_V3;
 		break;
 	default:
@@ -141,17 +181,63 @@ int iwl_mld_config_sar_profile(struct iwl_mld *mld, int prof_a, int prof_b)
 	}
 
 	/* TODO: CDB - support IWL_NUM_CHAIN_TABLES_V2 */
-	/* v10 and v11 have the same position for per_chain */
-	BUILD_BUG_ON(offsetof(typeof(cmd), v11.per_chain) !=
+	/* v10 and v12 have the same position for per_chain */
+	BUILD_BUG_ON(offsetof(typeof(cmd), v12.per_chain) !=
 		     offsetof(typeof(cmd), v10.per_chain));
-	ret = iwl_sar_fill_profile(&mld->fwrt, &cmd.v11.per_chain[0][0][0],
+	ret = iwl_sar_fill_profile(&mld->fwrt, &cmd.v12.per_chain[0][0][0],
 				   IWL_NUM_CHAIN_TABLES, num_subbands,
-				   prof_a, prof_b);
+				   prof_a, prof_b,
+				   mld->fwrt.sar_profiles, false);
 	/* return on error or if the profile is disabled (positive number) */
 	if (ret)
 		return ret;
 
 	return iwl_mld_send_cmd_pdu(mld, REDUCE_TX_POWER_CMD, &cmd, cmd_size);
+}
+
+static int iwl_mld_config_sar_standalone_profile(struct iwl_mld *mld,
+						 int prof_a, int prof_b)
+{
+	struct iwl_dev_tx_power_cmd cmd = {
+		.common.set_mode =
+			cpu_to_le32(IWL_TX_POWER_MODE_SET_STANDALONE_CHAINS),
+	};
+	int ret;
+
+	/* standalone per-chain SAR limits require cmd version 12 */
+	if (iwl_fw_lookup_cmd_ver(mld->fw, REDUCE_TX_POWER_CMD, 10) != 12)
+		return 0;
+
+	ret = iwl_sar_fill_profile(&mld->fwrt,
+				   &cmd.v12.per_chain[0][0][0],
+				   IWL_NUM_CHAIN_TABLES,
+				   IWL_NUM_SUB_BANDS_V3,
+				   prof_a, prof_b,
+				   mld->fwrt.sar_standalone_profiles,
+				   true);
+	/* return on error or if the standalone profile is disabled */
+	if (ret)
+		return ret;
+
+	return iwl_mld_send_cmd_pdu(mld, REDUCE_TX_POWER_CMD, &cmd,
+				    sizeof(cmd.common) + sizeof(cmd.v12));
+}
+
+int iwl_mld_config_sar_profiles(struct iwl_mld *mld, int prof_a, int prof_b)
+{
+	int ret;
+
+	ret = iwl_mld_config_sar_concurrent_profile(mld, prof_a, prof_b);
+	/* return on error or if the profile is disabled (positive number) */
+	if (ret)
+		return ret;
+
+	ret = iwl_mld_config_sar_standalone_profile(mld, prof_a, prof_b);
+	/* standalone profile is optional and may be disabled (positive number) */
+	if (ret < 0)
+		return ret;
+
+	return 0;
 }
 
 int iwl_mld_init_sar(struct iwl_mld *mld)
@@ -168,7 +254,7 @@ int iwl_mld_init_sar(struct iwl_mld *mld)
 		chain_b_prof = mld->fwrt.sar_chain_b_profile;
 	}
 
-	ret = iwl_mld_config_sar_profile(mld, chain_a_prof, chain_b_prof);
+	ret = iwl_mld_config_sar_profiles(mld, chain_a_prof, chain_b_prof);
 	if (ret < 0)
 		return ret;
 
@@ -325,10 +411,22 @@ void iwl_mld_configure_lari(struct iwl_mld *mld)
 	struct iwl_lari_config_change_cmd cmd = {
 		.config_bitmap = iwl_mld_get_lari_config_bitmap(fwrt),
 	};
-	bool has_raw_dsm_capa = fw_has_capa(&fwrt->fw->ucode_capa,
-					    IWL_UCODE_TLV_CAPA_FW_ACCEPTS_RAW_DSM_TABLE);
+	u8 cmd_ver = iwl_fw_lookup_cmd_ver(mld->fw,
+					   WIDE_ID(REGULATORY_AND_NVM_GROUP,
+						   LARI_CONFIG_CHANGE), 12);
+	/*
+	 * For LARI_CONFIG_CHANGE command version 13 and above, firmware accepts
+	 * raw DSM values by default and this TLV is no longer needed.
+	 */
+	bool has_raw_dsm_capa = cmd_ver >= 13 ||
+		fw_has_capa(&fwrt->fw->ucode_capa,
+			    IWL_UCODE_TLV_CAPA_FW_ACCEPTS_RAW_DSM_TABLE);
+	ssize_t cmd_len = iwl_mld_get_lari_config_cmd_size(cmd_ver);
 	int ret;
 	u32 value;
+
+	if (cmd_len < 0)
+		return;
 
 	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_11AX_ENABLEMENT, &value);
 	if (!ret) {
@@ -371,8 +469,11 @@ void iwl_mld_configure_lari(struct iwl_mld *mld)
 	}
 
 	ret = iwl_bios_get_wbem(fwrt, &value);
-	if (!ret)
+	if (!ret) {
 		cmd.oem_320mhz_allow_bitmap = cpu_to_le32(value);
+		cmd.bios_wbem_hdr.table_source = fwrt->wbem_source;
+		cmd.bios_wbem_hdr.table_revision = fwrt->wbem_revision;
+	}
 
 	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_ENABLE_11BE, &value);
 	if (!ret)
@@ -386,8 +487,21 @@ void iwl_mld_configure_lari(struct iwl_mld *mld)
 	if (!ret)
 		cmd.oem_unii9_enable = cpu_to_le32(value);
 
+	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_REGULATORY_CONFIG, &value);
+	if (!ret)
+		cmd.oem_uhb_allow_extension_bitmap = cpu_to_le32(value);
+
+	ret = iwl_bios_get_dsm(fwrt, DSM_FUNC_QUERY, &value);
+	if (!ret)
+		cmd.oem_supported_dsm_bitmap = cpu_to_le32(value);
+
+	cmd.bios_wcpe_hdr.table_source = fwrt->puncturing_source;
+	cmd.bios_wcpe_hdr.table_revision = fwrt->puncturing_revision;
+	cmd.wcpe_bitmap = cpu_to_le32(fwrt->bios_puncturing);
+
 	if (!cmd.config_bitmap &&
 	    !cmd.oem_uhb_allow_bitmap &&
+	    !cmd.oem_uhb_allow_extension_bitmap &&
 	    !cmd.oem_11ax_allow_bitmap &&
 	    !cmd.oem_unii4_allow_bitmap &&
 	    !cmd.chan_state_active_bitmap &&
@@ -396,7 +510,9 @@ void iwl_mld_configure_lari(struct iwl_mld *mld)
 	    !cmd.oem_320mhz_allow_bitmap &&
 	    !cmd.oem_11be_allow_bitmap &&
 	    !cmd.oem_11bn_allow_bitmap &&
-	    !cmd.oem_unii9_enable)
+	    !cmd.oem_unii9_enable &&
+	    !cmd.wcpe_bitmap &&
+	    !cmd.oem_supported_dsm_bitmap)
 		return;
 
 	cmd.bios_hdr.table_source = fwrt->dsm_source;
@@ -415,6 +531,9 @@ void iwl_mld_configure_lari(struct iwl_mld *mld)
 			le32_to_cpu(cmd.oem_uhb_allow_bitmap),
 			le32_to_cpu(cmd.force_disable_channels_bitmap));
 	IWL_DEBUG_RADIO(mld,
+			"sending LARI_CONFIG_CHANGE, oem_uhb_allow_extension_bitmap=0x%x\n",
+			le32_to_cpu(cmd.oem_uhb_allow_extension_bitmap));
+	IWL_DEBUG_RADIO(mld,
 			"sending LARI_CONFIG_CHANGE, edt_bitmap=0x%x, oem_320mhz_allow_bitmap=0x%x\n",
 			le32_to_cpu(cmd.edt_bitmap),
 			le32_to_cpu(cmd.oem_320mhz_allow_bitmap));
@@ -427,22 +546,16 @@ void iwl_mld_configure_lari(struct iwl_mld *mld)
 	IWL_DEBUG_RADIO(mld,
 			"sending LARI_CONFIG_CHANGE, oem_unii9_enable=0x%x\n",
 			le32_to_cpu(cmd.oem_unii9_enable));
+	IWL_DEBUG_RADIO(mld,
+			"sending LARI_CONFIG_CHANGE, wcpe_bitmap=0x%x\n",
+			le32_to_cpu(cmd.wcpe_bitmap));
+	IWL_DEBUG_RADIO(mld,
+			"sending LARI_CONFIG_CHANGE, oem_supported_dsm_bitmap=0x%x\n",
+			le32_to_cpu(cmd.oem_supported_dsm_bitmap));
 
-	if (iwl_fw_lookup_cmd_ver(mld->fw,
-				  WIDE_ID(REGULATORY_AND_NVM_GROUP,
-					  LARI_CONFIG_CHANGE), 12) == 12) {
-		int cmd_size = offsetof(typeof(cmd), oem_11bn_allow_bitmap);
-
-		ret = iwl_mld_send_cmd_pdu(mld,
-					   WIDE_ID(REGULATORY_AND_NVM_GROUP,
-						   LARI_CONFIG_CHANGE),
-					   &cmd, cmd_size);
-	} else {
-		ret = iwl_mld_send_cmd_pdu(mld,
-					   WIDE_ID(REGULATORY_AND_NVM_GROUP,
-						   LARI_CONFIG_CHANGE),
-					   &cmd);
-	}
+	ret = iwl_mld_send_cmd_pdu(mld,
+				   WIDE_ID(REGULATORY_AND_NVM_GROUP,
+					   LARI_CONFIG_CHANGE), &cmd, cmd_len);
 	if (ret)
 		IWL_DEBUG_RADIO(mld,
 				"Failed to send LARI_CONFIG_CHANGE (%d)\n",
@@ -464,8 +577,7 @@ void iwl_mld_init_ap_type_tables(struct iwl_mld *mld)
 		return;
 
 	if (iwl_fw_lookup_cmd_ver(mld->fw, cmd.id, 1) == 1) {
-		struct iwl_mcc_allowed_ap_type_cmd_v1 *cmd_v1 =
-			kzalloc(sizeof(*cmd_v1), GFP_KERNEL);
+		struct iwl_mcc_allowed_ap_type_cmd_v1 *cmd_v1 = kzalloc_obj(*cmd_v1);
 
 		if (!cmd_v1)
 			return;
@@ -488,6 +600,8 @@ void iwl_mld_init_ap_type_tables(struct iwl_mld *mld)
 	if (ret)
 		IWL_ERR(mld, "failed to send MCC_ALLOWED_AP_TYPE_CMD (%d)\n",
 			ret);
+	else
+		IWL_DEBUG_RADIO(mld, "MCC_ALLOWED_AP_TYPE_CMD sent to FW\n");
 }
 
 void iwl_mld_init_tas(struct iwl_mld *mld)

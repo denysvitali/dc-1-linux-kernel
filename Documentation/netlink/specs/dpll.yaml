@@ -31,8 +31,7 @@ definitions:
       -
         name: unlocked
         doc: |
-          dpll was not yet locked to any valid input (or forced by setting
-          DPLL_A_MODE to DPLL_MODE_DETACHED)
+          dpll was not yet locked to any valid input
         value: 1
       -
         name: locked
@@ -165,6 +164,13 @@ definitions:
       -
         name: gnss
         doc: GNSS recovered clock
+      -
+        name: int-nco
+        doc: |
+          Device internal numerically controlled oscillator.
+          When connected as a DPLL input, the DPLL enters NCO mode
+          where the output frequency is adjusted by the host via
+          the PTP clock interface.
     render-max: true
   -
     type: enum
@@ -252,6 +258,12 @@ definitions:
       -
         name: state-can-change
         doc: pin state can be changed
+      -
+        name: state-connected-override
+        doc: |
+          pin state can be set to connected regardless of current
+          DPLL device mode, overriding the active input selection.
+          Requires state-can-change to be set as well.
   -
     type: const
     name: phase-offset-divider
@@ -456,6 +468,9 @@ attribute-sets:
           offset on the media associated with the pin. Inside
           the pin-parent-device nest it represents the frequency
           offset between the pin and its parent DPLL device.
+          For pins of type PIN_TYPE_INT_NCO this represents
+          the DPLL's current output frequency offset from its
+          nominal frequency.
           Value is in PPM (parts per million).
           This is a lower-precision version of
           fractional-frequency-offset-ppt.
@@ -502,6 +517,9 @@ attribute-sets:
           offset on the media associated with the pin. Inside
           the pin-parent-device nest it represents the frequency
           offset between the pin and its parent DPLL device.
+          For pins of type PIN_TYPE_INT_NCO this represents
+          the DPLL's current output frequency offset from its
+          nominal frequency.
           Value is in PPT (parts per trillion, 10^-12).
           This is a higher-precision version of
           fractional-frequency-offset.
@@ -532,6 +550,8 @@ attribute-sets:
       -
         name: parent-id
       -
+        name: pad
+      -
         name: direction
       -
         name: prio
@@ -557,6 +577,8 @@ attribute-sets:
     name: frequency-range
     subset-of: pin
     attributes:
+      -
+        name: pad
       -
         name: frequency-min
       -
@@ -613,6 +635,7 @@ operations:
             - mode-supported
             - lock-status
             - lock-status-error
+            - clock-quality-level
             - temp
             - clock-id
             - type
@@ -681,11 +704,9 @@ operations:
       doc: |
         Get list of pins and its attributes.
 
-        - dump request without any attributes given - list all the pins in the
-          system
-        - dump request with target dpll - list all the pins registered with
-          a given dpll device
-        - do request with target dpll and target pin - single pin attributes
+        - dump request - list all the registered, available pins in the
+          system, the request takes no attributes
+        - do request with target pin - single pin attributes
       attribute-set: pin
       flags: [admin-perm]
 
@@ -722,9 +743,6 @@ operations:
             - measured-frequency
 
       dump:
-        request:
-          attributes:
-            - id
         reply: *pin-attrs
 
     -
@@ -740,9 +758,6 @@ operations:
           attributes:
             - id
             - frequency
-            - direction
-            - prio
-            - state
             - parent-device
             - parent-pin
             - phase-adjust

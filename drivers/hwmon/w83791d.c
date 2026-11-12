@@ -1357,8 +1357,7 @@ static int w83791d_probe(struct i2c_client *client)
 			(val1 >> 5) & 0x07, (val1 >> 1) & 0x0f, val1);
 #endif
 
-	data = devm_kzalloc(&client->dev, sizeof(struct w83791d_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct w83791d_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1415,6 +1414,7 @@ static void w83791d_remove(struct i2c_client *client)
 	struct w83791d_data *data = i2c_get_clientdata(client);
 
 	hwmon_device_unregister(data->hwmon_dev);
+	sysfs_remove_group(&client->dev.kobj, &w83791d_group_fanpwm45);
 	sysfs_remove_group(&client->dev.kobj, &w83791d_group);
 }
 

@@ -21,6 +21,7 @@
 
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
+#include <drm/drm_of.h>
 #include <drm/drm_panel.h>
 
 #define DRV_NAME "panel-himax-hx8394"
@@ -991,7 +992,7 @@ static int hx8394_probe(struct mipi_dsi_device *dsi)
 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
 				     "Failed to get reset gpio\n");
 
-	ret = of_drm_get_panel_orientation(dev->of_node, &ctx->orientation);
+	ret = drm_of_get_panel_orientation(dev->of_node, &ctx->orientation);
 	if (ret < 0) {
 		dev_err(dev, "%pOF: failed to get orientation %d\n", dev->of_node, ret);
 		return ret;
@@ -1022,14 +1023,13 @@ static int hx8394_probe(struct mipi_dsi_device *dsi)
 
 	ctx->panel.prepare_prev_first = true;
 
-	drm_panel_add(&ctx->panel);
-
-	ret = mipi_dsi_attach(dsi);
-	if (ret < 0) {
-		dev_err_probe(dev, ret, "mipi_dsi_attach failed\n");
-		drm_panel_remove(&ctx->panel);
+	ret = devm_drm_panel_add(dev, &ctx->panel);
+	if (ret)
 		return ret;
-	}
+
+	ret = devm_mipi_dsi_attach(dev, dsi);
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "mipi_dsi_attach failed\n");
 
 	dev_dbg(dev, "%ux%u@%u %ubpp dsi %udl - ready\n",
 		ctx->desc->mode->hdisplay, ctx->desc->mode->vdisplay,
@@ -1037,18 +1037,6 @@ static int hx8394_probe(struct mipi_dsi_device *dsi)
 		mipi_dsi_pixel_format_to_bpp(dsi->format), dsi->lanes);
 
 	return 0;
-}
-
-static void hx8394_remove(struct mipi_dsi_device *dsi)
-{
-	struct hx8394 *ctx = mipi_dsi_get_drvdata(dsi);
-	int ret;
-
-	ret = mipi_dsi_detach(dsi);
-	if (ret < 0)
-		dev_err(&dsi->dev, "Failed to detach from DSI host: %d\n", ret);
-
-	drm_panel_remove(&ctx->panel);
 }
 
 static const struct of_device_id hx8394_of_match[] = {
@@ -1064,7 +1052,6 @@ MODULE_DEVICE_TABLE(of, hx8394_of_match);
 
 static struct mipi_dsi_driver hx8394_driver = {
 	.probe	= hx8394_probe,
-	.remove = hx8394_remove,
 	.driver = {
 		.name = DRV_NAME,
 		.of_match_table = hx8394_of_match,

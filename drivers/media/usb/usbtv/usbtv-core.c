@@ -119,7 +119,10 @@ usbtv_audio_fail:
 
 usbtv_video_fail:
 	usb_set_intfdata(intf, NULL);
-	kfree(usbtv);
+	if (usbtv->v4l2_dev.dev)
+		v4l2_device_put(&usbtv->v4l2_dev);
+	else
+		kfree(usbtv);
 
 	return ret;
 }
@@ -135,8 +138,6 @@ static void usbtv_disconnect(struct usb_interface *intf)
 
 	usbtv_audio_free(usbtv);
 	usbtv_video_free(usbtv);
-
-	usbtv->udev = NULL;
 
 	/* the usbtv structure will be deallocated when v4l2 will be
 	   done using it */

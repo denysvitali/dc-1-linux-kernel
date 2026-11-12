@@ -63,8 +63,7 @@ pgd_alloc(struct mm_struct *mm)
 static inline unsigned long
 load_PCB(struct pcb_struct *pcb)
 {
-	register unsigned long sp __asm__("$30");
-	pcb->ksp = sp;
+	pcb->ksp = (unsigned long)current_stack_pointer;
 	return __reload_thread(pcb);
 }
 
@@ -225,6 +224,11 @@ void __init arch_zone_limits_init(unsigned long *max_zone_pfn)
 void __init paging_init(void)
 {
 	memset(absolute_pointer(ZERO_PGE), 0, PAGE_SIZE);
+}
+
+void __init arch_mm_preinit(void)
+{
+	early_memtest(memblock_start_of_DRAM(), PFN_PHYS(max_low_pfn));
 }
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM)

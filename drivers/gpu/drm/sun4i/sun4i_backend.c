@@ -686,7 +686,7 @@ static int sun4i_backend_init_sat(struct device *dev) {
 	ret = clk_prepare_enable(backend->sat_clk);
 	if (ret) {
 		dev_err(dev, "Couldn't enable the SAT clock\n");
-		return ret;
+		goto err_assert_reset;
 	}
 
 	return 0;
@@ -792,7 +792,7 @@ static int sun4i_backend_bind(struct device *dev, struct device *master,
 	void __iomem *regs;
 	int i, ret;
 
-	backend = devm_kzalloc(dev, sizeof(*backend), GFP_KERNEL);
+	backend = devm_kzalloc_obj(dev, *backend);
 	if (!backend)
 		return -ENOMEM;
 	dev_set_drvdata(dev, backend);

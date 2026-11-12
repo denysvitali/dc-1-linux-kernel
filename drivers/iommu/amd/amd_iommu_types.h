@@ -39,18 +39,6 @@
 #define MMIO_RANGE_OFFSET	0x0c
 #define MMIO_MISC_OFFSET	0x10
 
-/* Masks, shifts and macros to parse the device range capability */
-#define MMIO_RANGE_LD_MASK	0xff000000
-#define MMIO_RANGE_FD_MASK	0x00ff0000
-#define MMIO_RANGE_BUS_MASK	0x0000ff00
-#define MMIO_RANGE_LD_SHIFT	24
-#define MMIO_RANGE_FD_SHIFT	16
-#define MMIO_RANGE_BUS_SHIFT	8
-#define MMIO_GET_LD(x)  (((x) & MMIO_RANGE_LD_MASK) >> MMIO_RANGE_LD_SHIFT)
-#define MMIO_GET_FD(x)  (((x) & MMIO_RANGE_FD_MASK) >> MMIO_RANGE_FD_SHIFT)
-#define MMIO_GET_BUS(x) (((x) & MMIO_RANGE_BUS_MASK) >> MMIO_RANGE_BUS_SHIFT)
-#define MMIO_MSI_NUM(x)	((x) & 0x1f)
-
 /* Used offsets into the MMIO space */
 #define MMIO_DEV_TABLE_OFFSET   0x0000
 #define MMIO_CMD_BUF_OFFSET     0x0008
@@ -65,6 +53,7 @@
 #define MMIO_MSI_ADDR_LO_OFFSET	0x015C
 #define MMIO_MSI_ADDR_HI_OFFSET	0x0160
 #define MMIO_MSI_DATA_OFFSET	0x0164
+#define MMIO_PERF_OPT_OFFSET	0x016C
 #define MMIO_INTCAPXT_EVT_OFFSET	0x0170
 #define MMIO_INTCAPXT_PPR_OFFSET	0x0178
 #define MMIO_INTCAPXT_GALOG_OFFSET	0x0180
@@ -99,6 +88,8 @@
 #define FEATURE_GLX		GENMASK_ULL(15, 14)
 #define FEATURE_GAM_VAPIC	BIT_ULL(21)
 #define FEATURE_PASMAX		GENMASK_ULL(36, 32)
+#define FEATURE_PERF_OPT	BIT_ULL(45)
+#define PERF_OPT_EN		BIT(13)
 #define FEATURE_GIOSUP		BIT_ULL(48)
 #define FEATURE_HASUP		BIT_ULL(49)
 #define FEATURE_EPHSUP		BIT_ULL(50)
@@ -113,6 +104,7 @@
 #define FEATURE_SNPAVICSUP_GAM(x) \
 	(FIELD_GET(FEATURE_SNPAVICSUP, x) == 0x1)
 #define FEATURE_HT_RANGE_IGNORE		BIT_ULL(11)
+#define FEATURE_SNP_PAGE_MODE0_SUP	BIT_ULL(13)
 
 #define FEATURE_NUM_INT_REMAP_SUP	GENMASK_ULL(9, 8)
 #define FEATURE_NUM_INT_REMAP_SUP_2K(x) \
@@ -159,6 +151,8 @@
 #define EVENT_FLAGS_SHIFT	0x10
 #define EVENT_FLAG_RW		0x020
 #define EVENT_FLAG_I		0x008
+#define EVENT_FLAG_PPR_RX	0x001
+#define EVENT_FLAG_PPR_GN	0x200
 
 /* feature control bits */
 #define CONTROL_IOMMU_EN	0
@@ -244,7 +238,6 @@
 
 /* constants to configure the command buffer */
 #define CMD_BUFFER_SIZE    8192
-#define CMD_BUFFER_UNINITIALIZED 1
 #define CMD_BUFFER_ENTRIES 512
 #define MMIO_CMD_SIZE_SHIFT 56
 #define MMIO_CMD_SIZE_512 (0x9ULL << MMIO_CMD_SIZE_SHIFT)
@@ -280,7 +273,8 @@
 #define PPR_REQ_TYPE(x)		(((x) >> 60) & 0xfULL)
 #define PPR_FLAGS(x)		(((x) >> 48) & 0xfffULL)
 #define PPR_DEVID(x)		((x) & 0xffffULL)
-#define PPR_TAG(x)		(((x) >> 32) & 0x3ffULL)
+#define PPR_TAG(x)		(((x) >> 32) & 0x1ffULL)
+#define PPR_TAG_LAST_PAGE(x)	(((x) >> 32) & 0x200ULL)
 #define PPR_PASID1(x)		(((x) >> 16) & 0xffffULL)
 #define PPR_PASID2(x)		(((x) >> 42) & 0xfULL)
 #define PPR_PASID(x)		((PPR_PASID2(x) << 16) | PPR_PASID1(x))
@@ -415,6 +409,9 @@ extern bool amd_iommu_dump;
 		if (amd_iommu_dump)				\
 			pr_info(format, ## arg);	\
 	} while(0);
+
+/* SNP page mode 0 support */
+extern bool amd_iommu_snp_mode0_sup;
 
 /* global flag if IOMMUs cache non-present entries */
 extern bool amd_iommu_np_cache;
@@ -663,6 +660,9 @@ struct amd_iommu {
 	/* Extended features 2 */
 	u64 features2;
 
+	/* Saved PerfOpt activation state, protected by @lock. */
+	bool perfopt_enabled;
+
 	/* PCI device id of the IOMMU device */
 	u16 devid;
 
@@ -824,6 +824,7 @@ struct iommu_dev_data {
 	u8 ppr          :1;		  /* Enable device PPR support */
 	bool use_vapic;			  /* Enable device to use vapic mode */
 	bool defer_attach;
+	bool perfopt;			  /* Device is eligible for PerfOpt */
 
 	struct ratelimit_state rs;        /* Ratelimit IOPF messages */
 };

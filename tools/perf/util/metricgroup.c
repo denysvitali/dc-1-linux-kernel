@@ -214,7 +214,7 @@ static void metric__free(struct metric *m)
 	zfree(&m->metric_refs);
 	expr__ctx_free(m->pctx);
 	zfree(&m->modifier);
-	evlist__delete(m->evlist);
+	evlist__put(m->evlist);
 	free(m);
 }
 
@@ -224,7 +224,8 @@ static struct metric *metric__new(const struct pmu_metric *pm,
 				  bool metric_no_threshold,
 				  int runtime,
 				  const char *user_requested_cpu_list,
-				  bool system_wide)
+				  bool system_wide,
+				  bool fake_pmu)
 {
 	struct metric *m;
 
@@ -256,6 +257,7 @@ static struct metric *metric__new(const struct pmu_metric *pm,
 	}
 	m->pctx->sctx.runtime = runtime;
 	m->pctx->sctx.system_wide = system_wide;
+	m->pctx->sctx.is_test = fake_pmu;
 	m->group_events = !metric_no_group && metric__group_events(pm, metric_no_threshold);
 	m->default_show_events = pm->default_show_events;
 	m->metric_refs = NULL;
@@ -699,6 +701,7 @@ static int add_metric(struct list_head *metric_list,
 		      bool metric_no_threshold,
 		      const char *user_requested_cpu_list,
 		      bool system_wide,
+		      bool fake_pmu,
 		      struct metric *root_metric,
 		      const struct visited_metric *visited,
 		      const struct pmu_metrics_table *table);
@@ -724,6 +727,7 @@ static int metricgroup__find_metric_callback(const struct pmu_metric *pm,
  *                   user may override.
  * @user_requested_cpu_list: Command line specified CPUs to record on.
  * @system_wide: Are events for all processes recorded.
+ * @fake_pmu: Are PMUs and events being faked for testing?
  * @root_metric: Metrics may reference other metrics to form a tree. In this
  *               case the root_metric holds all the IDs and a list of referenced
  *               metrics. When adding a root this argument is NULL.
@@ -739,6 +743,7 @@ static int resolve_metric(struct list_head *metric_list,
 			  bool metric_no_threshold,
 			  const char *user_requested_cpu_list,
 			  bool system_wide,
+			  bool fake_pmu,
 			  struct metric *root_metric,
 			  const struct visited_metric *visited,
 			  const struct pmu_metrics_table *table)
@@ -788,7 +793,7 @@ static int resolve_metric(struct list_head *metric_list,
 	for (i = 0; i < pending_cnt; i++) {
 		ret = add_metric(metric_list, &pending[i].pm, modifier, metric_no_group,
 				 metric_no_threshold, user_requested_cpu_list, system_wide,
-				 root_metric, visited, table);
+				 fake_pmu, root_metric, visited, table);
 		if (ret)
 			break;
 	}
@@ -809,6 +814,7 @@ static int resolve_metric(struct list_head *metric_list,
  * @runtime: A special argument for the parser only known at runtime.
  * @user_requested_cpu_list: Command line specified CPUs to record on.
  * @system_wide: Are events for all processes recorded.
+ * @fake_pmu: Are PMUs and events being faked for testing?
  * @root_metric: Metrics may reference other metrics to form a tree. In this
  *               case the root_metric holds all the IDs and a list of referenced
  *               metrics. When adding a root this argument is NULL.
@@ -825,6 +831,7 @@ static int __add_metric(struct list_head *metric_list,
 			int runtime,
 			const char *user_requested_cpu_list,
 			bool system_wide,
+			bool fake_pmu,
 			struct metric *root_metric,
 			const struct visited_metric *visited,
 			const struct pmu_metrics_table *table)
@@ -851,7 +858,7 @@ static int __add_metric(struct list_head *metric_list,
 		 * metrics that are added recursively.
 		 */
 		root_metric = metric__new(pm, modifier, metric_no_group, metric_no_threshold,
-					  runtime, user_requested_cpu_list, system_wide);
+					  runtime, user_requested_cpu_list, system_wide, fake_pmu);
 		if (!root_metric)
 			return -ENOMEM;
 
@@ -924,7 +931,7 @@ static int __add_metric(struct list_head *metric_list,
 
 		ret = resolve_metric(metric_list, pmu, modifier, metric_no_group,
 				     metric_no_threshold, user_requested_cpu_list,
-				     system_wide, root_metric, &visited_node,
+				     system_wide, fake_pmu, root_metric, &visited_node,
 				     table);
 	}
 	if (ret) {
@@ -944,6 +951,7 @@ static int add_metric(struct list_head *metric_list,
 		      bool metric_no_threshold,
 		      const char *user_requested_cpu_list,
 		      bool system_wide,
+		      bool fake_pmu,
 		      struct metric *root_metric,
 		      const struct visited_metric *visited,
 		      const struct pmu_metrics_table *table)
@@ -955,7 +963,7 @@ static int add_metric(struct list_head *metric_list,
 	if (!strstr(pm->metric_expr, "?")) {
 		ret = __add_metric(metric_list, pm, modifier, metric_no_group,
 				   metric_no_threshold, 0, user_requested_cpu_list,
-				   system_wide, root_metric, visited, table);
+				   system_wide, fake_pmu, root_metric, visited, table);
 	} else {
 		int j, count;
 
@@ -969,7 +977,7 @@ static int add_metric(struct list_head *metric_list,
 		for (j = 0; j < count && !ret; j++)
 			ret = __add_metric(metric_list, pm, modifier, metric_no_group,
 					   metric_no_threshold, j, user_requested_cpu_list,
-					   system_wide, root_metric, visited, table);
+					   system_wide, fake_pmu, root_metric, visited, table);
 	}
 
 	return ret;
@@ -1030,6 +1038,7 @@ struct metricgroup__add_metric_data {
 	bool metric_no_group;
 	bool metric_no_threshold;
 	bool system_wide;
+	bool fake_pmu;
 	bool has_match;
 };
 
@@ -1047,7 +1056,7 @@ static int metricgroup__add_metric_callback(const struct pmu_metric *pm,
 		data->has_match = true;
 		ret = add_metric(data->list, pm, data->modifier, metric_no_group,
 				 data->metric_no_threshold, data->user_requested_cpu_list,
-				 data->system_wide, /*root_metric=*/NULL,
+				data->system_wide, data->fake_pmu, /*root_metric=*/NULL,
 				 /*visited_metrics=*/NULL, table);
 	}
 	return ret;
@@ -1065,6 +1074,7 @@ static int metricgroup__add_metric_callback(const struct pmu_metric *pm,
  *                   user may override.
  * @user_requested_cpu_list: Command line specified CPUs to record on.
  * @system_wide: Are events for all processes recorded.
+ * @fake_pmu: Are PMUs and events being faked for testing?
  * @metric_list: The list that the metric or metric group are added to.
  * @table: The table that is searched for metrics, most commonly the table for the
  *       architecture perf is running upon.
@@ -1072,7 +1082,7 @@ static int metricgroup__add_metric_callback(const struct pmu_metric *pm,
 static int metricgroup__add_metric(const char *pmu, const char *metric_name, const char *modifier,
 				   bool metric_no_group, bool metric_no_threshold,
 				   const char *user_requested_cpu_list,
-				   bool system_wide,
+				   bool system_wide, bool fake_pmu,
 				   struct list_head *metric_list,
 				   const struct pmu_metrics_table *table)
 {
@@ -1087,6 +1097,7 @@ static int metricgroup__add_metric(const char *pmu, const char *metric_name, con
 		.metric_no_threshold = metric_no_threshold,
 		.user_requested_cpu_list = user_requested_cpu_list,
 		.system_wide = system_wide,
+		.fake_pmu = fake_pmu,
 		.has_match = false,
 	};
 
@@ -1118,6 +1129,7 @@ static int metricgroup__add_metric(const char *pmu, const char *metric_name, con
  *                   user may override.
  * @user_requested_cpu_list: Command line specified CPUs to record on.
  * @system_wide: Are events for all processes recorded.
+ * @fake_pmu: Are PMUs and events being faked for testing?
  * @metric_list: The list that metrics are added to.
  * @table: The table that is searched for metrics, most commonly the table for the
  *       architecture perf is running upon.
@@ -1126,7 +1138,8 @@ static int metricgroup__add_metric_list(const char *pmu, const char *list,
 					bool metric_no_group,
 					bool metric_no_threshold,
 					const char *user_requested_cpu_list,
-					bool system_wide, struct list_head *metric_list,
+					bool system_wide, bool fake_pmu,
+					struct list_head *metric_list,
 					const struct pmu_metrics_table *table)
 {
 	char *list_itr, *list_copy, *metric_name, *modifier;
@@ -1145,7 +1158,8 @@ static int metricgroup__add_metric_list(const char *pmu, const char *list,
 		ret = metricgroup__add_metric(pmu, metric_name, modifier,
 					      metric_no_group, metric_no_threshold,
 					      user_requested_cpu_list,
-					      system_wide, metric_list, table);
+					      system_wide, fake_pmu,
+					      metric_list, table);
 		if (ret == -EINVAL)
 			pr_err("Fail to parse metric or group `%s'\n", metric_name);
 		else if (ret == -ENOENT)
@@ -1262,7 +1276,8 @@ static int parse_ids(bool metric_no_merge, bool fake_pmu,
 		     struct expr_parse_ctx *ids, const char *modifier,
 		     bool group_events, const bool tool_events[TOOL_PMU__EVENT_MAX],
 		     struct evlist **out_evlist,
-		     const char *filter_pmu)
+		     const char *filter_pmu,
+		     bool cputype_filter)
 {
 	struct parse_events_error parse_error;
 	struct evlist *parsed_evlist;
@@ -1317,7 +1332,9 @@ static int parse_ids(bool metric_no_merge, bool fake_pmu,
 	pr_debug("Parsing metric events '%s'\n", events.buf);
 	parse_events_error__init(&parse_error);
 	ret = __parse_events(parsed_evlist, events.buf, filter_pmu,
-			     &parse_error, fake_pmu, /*warn_if_reordered=*/false,
+			     cputype_filter,
+			     &parse_error, fake_pmu,
+			     /*warn_if_reordered=*/false,
 			     /*fake_tp=*/false);
 	if (ret) {
 		parse_events_error__print(&parse_error, events.buf);
@@ -1331,7 +1348,7 @@ static int parse_ids(bool metric_no_merge, bool fake_pmu,
 	parsed_evlist = NULL;
 err_out:
 	parse_events_error__exit(&parse_error);
-	evlist__delete(parsed_evlist);
+	evlist__put(parsed_evlist);
 	strbuf_release(&events);
 	return ret;
 }
@@ -1382,7 +1399,7 @@ static struct evsel *pick_display_evsel(struct list_head *metric_list,
 }
 
 static int parse_groups(struct evlist *perf_evlist,
-			const char *pmu, const char *str,
+			const char *pmu, bool cputype_filter, const char *str,
 			bool metric_no_group,
 			bool metric_no_merge,
 			bool metric_no_threshold,
@@ -1400,7 +1417,8 @@ static int parse_groups(struct evlist *perf_evlist,
 
 	ret = metricgroup__add_metric_list(pmu, str, metric_no_group, metric_no_threshold,
 					   user_requested_cpu_list,
-					   system_wide, &metric_list, table);
+					   system_wide, fake_pmu,
+					   &metric_list, table);
 	if (ret)
 		goto out;
 
@@ -1420,7 +1438,8 @@ static int parse_groups(struct evlist *perf_evlist,
 					/*group_events=*/false,
 					tool_events,
 					&combined_evlist,
-					(pmu && strcmp(pmu, "all") == 0) ? NULL : pmu);
+					(pmu && strcmp(pmu, "all") == 0) ? NULL : pmu,
+					cputype_filter);
 		}
 		if (combined)
 			expr__ctx_free(combined);
@@ -1476,7 +1495,8 @@ static int parse_groups(struct evlist *perf_evlist,
 		if (!metric_evlist) {
 			ret = parse_ids(metric_no_merge, fake_pmu, m->pctx, m->modifier,
 					m->group_events, tool_events, &m->evlist,
-					(pmu && strcmp(pmu, "all") == 0) ? NULL : pmu);
+					(pmu && strcmp(pmu, "all") == 0) ? NULL : pmu,
+					cputype_filter);
 			if (ret)
 				goto out;
 
@@ -1490,7 +1510,7 @@ static int parse_groups(struct evlist *perf_evlist,
 			goto out;
 		}
 
-		me = metricgroup__lookup(&perf_evlist->metric_events,
+		me = metricgroup__lookup(evlist__metric_events(perf_evlist),
 					 pick_display_evsel(&metric_list, metric_events),
 					 /*create=*/true);
 
@@ -1541,22 +1561,26 @@ static int parse_groups(struct evlist *perf_evlist,
 
 
 	if (combined_evlist) {
-		evlist__splice_list_tail(perf_evlist, &combined_evlist->core.entries);
-		evlist__delete(combined_evlist);
+		evlist__splice_list_tail(perf_evlist, &evlist__core(combined_evlist)->entries);
+		evlist__put(combined_evlist);
+		combined_evlist = NULL;
 	}
 
 	list_for_each_entry(m, &metric_list, nd) {
 		if (m->evlist)
-			evlist__splice_list_tail(perf_evlist, &m->evlist->core.entries);
+			evlist__splice_list_tail(perf_evlist, &evlist__core(m->evlist)->entries);
 	}
 
 out:
+	if (combined_evlist)
+		evlist__put(combined_evlist);
 	metricgroup__free_metrics(&metric_list);
 	return ret;
 }
 
 int metricgroup__parse_groups(struct evlist *perf_evlist,
 			      const char *pmu,
+			      bool cputype_filter,
 			      const char *str,
 			      bool metric_no_group,
 			      bool metric_no_merge,
@@ -1570,16 +1594,17 @@ int metricgroup__parse_groups(struct evlist *perf_evlist,
 	if (hardware_aware_grouping)
 		pr_debug("Use hardware aware grouping instead of traditional metric grouping method\n");
 
-	return parse_groups(perf_evlist, pmu, str, metric_no_group, metric_no_merge,
+	return parse_groups(perf_evlist, pmu, cputype_filter, str, metric_no_group, metric_no_merge,
 			    metric_no_threshold, user_requested_cpu_list, system_wide,
 			    /*fake_pmu=*/false, table);
 }
 
 int metricgroup__parse_groups_test(struct evlist *evlist,
 				   const struct pmu_metrics_table *table,
-				   const char *str)
+				   const char *str,
+				   bool cputype_filter)
 {
-	return parse_groups(evlist, "all", str,
+	return parse_groups(evlist, "all", cputype_filter, str,
 			    /*metric_no_group=*/false,
 			    /*metric_no_merge=*/false,
 			    /*metric_no_threshold=*/false,
@@ -1683,8 +1708,10 @@ int metricgroup__copy_metric_events(struct evlist *evlist, struct cgroup *cgrp,
 			new_expr->metric_expr = old_expr->metric_expr;
 			new_expr->metric_threshold = old_expr->metric_threshold;
 			new_expr->metric_name = strdup(old_expr->metric_name);
-			if (!new_expr->metric_name)
+			if (!new_expr->metric_name) {
+				free(new_expr);
 				return -ENOMEM;
+			}
 
 			new_expr->metric_unit = old_expr->metric_unit;
 			new_expr->runtime = old_expr->runtime;
@@ -1697,6 +1724,7 @@ int metricgroup__copy_metric_events(struct evlist *evlist, struct cgroup *cgrp,
 				alloc_size = sizeof(*new_expr->metric_refs);
 				new_expr->metric_refs = calloc(nr + 1, alloc_size);
 				if (!new_expr->metric_refs) {
+					zfree(&new_expr->metric_name);
 					free(new_expr);
 					return -ENOMEM;
 				}
@@ -1713,6 +1741,7 @@ int metricgroup__copy_metric_events(struct evlist *evlist, struct cgroup *cgrp,
 			alloc_size = sizeof(*new_expr->metric_events);
 			new_expr->metric_events = calloc(nr + 1, alloc_size);
 			if (!new_expr->metric_events) {
+				zfree(&new_expr->metric_name);
 				zfree(&new_expr->metric_refs);
 				free(new_expr);
 				return -ENOMEM;
@@ -1723,6 +1752,7 @@ int metricgroup__copy_metric_events(struct evlist *evlist, struct cgroup *cgrp,
 				evsel = old_expr->metric_events[idx];
 				evsel = evlist__find_evsel(evlist, evsel->core.idx);
 				if (evsel == NULL) {
+					zfree(&new_expr->metric_name);
 					zfree(&new_expr->metric_events);
 					zfree(&new_expr->metric_refs);
 					free(new_expr);

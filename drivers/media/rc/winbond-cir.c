@@ -629,7 +629,7 @@ wbcir_tx(struct rc_dev *dev, unsigned *b, unsigned count)
 	unsigned i;
 	unsigned long flags;
 
-	buf = kmalloc_array(count, sizeof(*b), GFP_KERNEL);
+	buf = kmalloc_objs(*b, count);
 	if (!buf)
 		return -ENOMEM;
 
@@ -1179,8 +1179,8 @@ wbcir_remove(struct pnp_dev *device)
 }
 
 static const struct pnp_device_id wbcir_ids[] = {
-	{ "WEC1022", 0 },
-	{ "", 0 }
+	{ .id = "WEC1022" },
+	{ }
 };
 MODULE_DEVICE_TABLE(pnp, wbcir_ids);
 

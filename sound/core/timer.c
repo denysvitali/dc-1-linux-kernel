@@ -458,6 +458,8 @@ static void remove_slave_links(struct snd_timer_instance *timeri,
 		list_del_init(&slave->ack_list);
 		list_del_init(&slave->active_list);
 	}
+	/* the close is done; a reopen must not see the mark */
+	timeri->flags &= ~SNDRV_TIMER_IFLG_DEAD;
 }
 
 /*
@@ -1544,11 +1546,8 @@ static int realloc_user_queue(struct snd_timer_user *tu, int size)
 static int snd_timer_user_open(struct inode *inode, struct file *file)
 {
 	struct snd_timer_user *tu;
-	int err;
 
-	err = stream_open(inode, file);
-	if (err < 0)
-		return err;
+	stream_open(inode, file);
 
 	tu = kzalloc_obj(*tu);
 	if (tu == NULL)
@@ -1856,7 +1855,7 @@ static int snd_timer_user_info(struct file *file,
 		return -EBADFD;
 
 	struct snd_timer_info *info __free(kfree) =
-		kzalloc(sizeof(*info), GFP_KERNEL);
+		kzalloc_obj(*info);
 	if (! info)
 		return -ENOMEM;
 	info->card = t->card ? t->card->number : -1;
@@ -2174,9 +2173,11 @@ static long snd_utimer_ioctl(struct file *file, unsigned int ioctl, unsigned lon
 }
 
 static const struct file_operations snd_utimer_fops = {
-	.llseek = noop_llseek,
-	.release = snd_utimer_release,
-	.unlocked_ioctl = snd_utimer_ioctl,
+	.owner		=	THIS_MODULE,
+	.llseek		=	noop_llseek,
+	.release	=	snd_utimer_release,
+	.unlocked_ioctl	=	snd_utimer_ioctl,
+	.compat_ioctl	=	snd_utimer_ioctl,
 };
 
 static int snd_utimer_start(struct snd_timer *t)
@@ -2528,16 +2529,15 @@ static __poll_t snd_timer_user_poll(struct file *file, poll_table * wait)
 #define snd_timer_user_ioctl_compat	NULL
 #endif
 
-static const struct file_operations snd_timer_f_ops =
-{
-	.owner =	THIS_MODULE,
-	.read =		snd_timer_user_read,
-	.open =		snd_timer_user_open,
-	.release =	snd_timer_user_release,
-	.poll =		snd_timer_user_poll,
-	.unlocked_ioctl =	snd_timer_user_ioctl,
-	.compat_ioctl =	snd_timer_user_ioctl_compat,
-	.fasync = 	snd_timer_user_fasync,
+static const struct file_operations snd_timer_f_ops = {
+	.owner		=	THIS_MODULE,
+	.read		=	snd_timer_user_read,
+	.open		=	snd_timer_user_open,
+	.release	=	snd_timer_user_release,
+	.poll		=	snd_timer_user_poll,
+	.unlocked_ioctl	=	snd_timer_user_ioctl,
+	.compat_ioctl	=	snd_timer_user_ioctl_compat,
+	.fasync		=	snd_timer_user_fasync,
 };
 
 /* unregister the system timer */

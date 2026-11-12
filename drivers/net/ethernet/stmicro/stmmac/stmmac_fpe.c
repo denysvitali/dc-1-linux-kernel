@@ -217,8 +217,11 @@ int dwmac5_fpe_map_preemption_class(struct net_device *ndev,
 	 * and is direct one-to-one mapping."
 	 */
 	for (u32 tc = 0; tc < num_tc; tc++) {
-		count = ndev->tc_to_txq[tc].count;
-		offset = ndev->tc_to_txq[tc].offset;
+		struct netdev_tc_txq res;
+
+		res.combined = READ_ONCE(ndev->tc_to_txq[tc].combined);
+		count = res.count;
+		offset = res.offset;
 
 		if (pclass & BIT(tc))
 			preemptible_txqs |= GENMASK(offset + count - 1, offset);
@@ -227,7 +230,7 @@ int dwmac5_fpe_map_preemption_class(struct net_device *ndev,
 		if (count == 1)
 			continue;
 
-		if (priv->plat->tx_sched_algorithm == MTL_TX_ALGORITHM_SP) {
+		if (priv->xmit_qdisc.algo == MTL_TX_ALGORITHM_SP) {
 			NL_SET_ERR_MSG_MOD(extack, ALG_ERR_MSG);
 			return -EINVAL;
 		}
@@ -275,8 +278,11 @@ int dwxgmac3_fpe_map_preemption_class(struct net_device *ndev,
 	 * any of the scheduling algorithms."
 	 */
 	for (u32 tc = 0; tc < num_tc; tc++) {
-		count = ndev->tc_to_txq[tc].count;
-		offset = ndev->tc_to_txq[tc].offset;
+		struct netdev_tc_txq res;
+
+		res.combined = READ_ONCE(ndev->tc_to_txq[tc].combined);
+		count = res.count;
+		offset = res.offset;
 
 		if (pclass & BIT(tc))
 			preemptible_txqs |= GENMASK(offset + count - 1, offset);

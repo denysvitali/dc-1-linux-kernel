@@ -2944,11 +2944,8 @@ static int qm_alloc_uacce(struct hisi_qm *qm)
 		.flags = UACCE_DEV_SVA,
 		.ops = &uacce_qm_ops,
 	};
-	int ret;
 
-	ret = strscpy(interface.name, dev_driver_string(&pdev->dev),
-		      sizeof(interface.name));
-	if (ret < 0)
+	if (strscpy(interface.name, dev_driver_string(&pdev->dev)) < 0)
 		return -ENAMETOOLONG;
 
 	uacce = uacce_alloc(&pdev->dev, &interface);
@@ -3120,8 +3117,7 @@ static int hisi_qp_memory_init(struct hisi_qm *qm, size_t dma_size, int id,
 	struct hisi_qp *qp;
 	int ret = -ENOMEM;
 
-	qm->poll_data[id].qp_finish_id = kcalloc(qm->qp_num, sizeof(u16),
-						 GFP_KERNEL);
+	qm->poll_data[id].qp_finish_id = kzalloc_objs(u16, qm->qp_num);
 	if (!qm->poll_data[id].qp_finish_id)
 		return -ENOMEM;
 
@@ -5735,7 +5731,7 @@ static int qm_pre_store_caps(struct hisi_qm *qm)
 	size_t i, size;
 
 	size = ARRAY_SIZE(qm_cap_query_info);
-	qm_cap = devm_kcalloc(&pdev->dev, sizeof(*qm_cap), size, GFP_KERNEL);
+	qm_cap = devm_kzalloc_objs(&pdev->dev, *qm_cap, size);
 	if (!qm_cap)
 		return -ENOMEM;
 
@@ -5746,8 +5742,8 @@ static int qm_pre_store_caps(struct hisi_qm *qm)
 							i, qm->cap_ver);
 	}
 
-	qm->cap_tables.qm_cap_table = qm_cap;
 	qm->cap_tables.qm_cap_size = size;
+	qm->cap_tables.qm_cap_table = qm_cap;
 
 	return 0;
 }

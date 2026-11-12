@@ -7,6 +7,7 @@
 #include <linux/types.h>
 #include <linux/bitops.h>
 #include <linux/bitfield.h>
+#include <linux/sizes.h>
 
 #include "../debug.h"
 #include "../core.h"
@@ -158,7 +159,7 @@ static const struct ath12k_hw_ops qcn9274_ops = {
 	.get_ring_selector = ath12k_wifi7_hw_get_ring_selector_qcn9274,
 	.dp_srng_is_tx_comp_ring = ath12k_wifi7_dp_srng_is_comp_ring_qcn9274,
 	.is_frame_link_agnostic = ath12k_wifi7_is_frame_link_agnostic_qcn9274,
-	.set_rx_link_id = ath12k_wifi7_dp_rx_set_link_id_qcn9274,
+	.get_rx_link_id = ath12k_wifi7_dp_rx_get_link_id_qcn9274,
 };
 
 static const struct ath12k_hw_ops wcn7850_ops = {
@@ -169,7 +170,7 @@ static const struct ath12k_hw_ops wcn7850_ops = {
 	.get_ring_selector = ath12k_wifi7_hw_get_ring_selector_wcn7850,
 	.dp_srng_is_tx_comp_ring = ath12k_wifi7_dp_srng_is_comp_ring_wcn7850,
 	.is_frame_link_agnostic = ath12k_wifi7_is_frame_link_agnostic_wcn7850,
-	.set_rx_link_id = ath12k_wifi7_dp_rx_set_link_id_wcn7850,
+	.get_rx_link_id = ath12k_wifi7_dp_rx_get_link_id_wcn7850,
 };
 
 static const struct ath12k_hw_ops qcc2072_ops = {
@@ -180,7 +181,7 @@ static const struct ath12k_hw_ops qcc2072_ops = {
 	.get_ring_selector = ath12k_wifi7_hw_get_ring_selector_wcn7850,
 	.dp_srng_is_tx_comp_ring = ath12k_wifi7_dp_srng_is_comp_ring_wcn7850,
 	.is_frame_link_agnostic = ath12k_wifi7_is_frame_link_agnostic_wcn7850,
-	.set_rx_link_id = ath12k_wifi7_dp_rx_set_link_id_wcn7850,
+	.get_rx_link_id = ath12k_wifi7_dp_rx_get_link_id_wcn7850,
 };
 
 #define ATH12K_TX_RING_MASK_0 0x1
@@ -369,6 +370,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 		.max_radios = 1,
 		.single_pdev_only = false,
 		.qmi_service_ins_id = ATH12K_QMI_WLFW_SERVICE_INS_ID_V01_QCN9274,
+		.qmi_max_chunk_size = SZ_2M,
 		.internal_sleep_clock = false,
 
 		.hw_ops = &qcn9274_ops,
@@ -393,6 +395,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 					BIT(NL80211_IFTYPE_MESH_POINT) |
 					BIT(NL80211_IFTYPE_AP_VLAN),
 		.supports_monitor = false,
+		.supports_cong_ctrl_max_msdus = true,
 
 		.idle_ps = false,
 		.download_calib = true,
@@ -442,6 +445,9 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 			.max_client_dbs = 128,
 			.max_client_dbs_sbs = 128,
 		},
+
+		.host_alloc_ml_id = true,
+		.advertise_iface_mac_pool = false,
 	},
 	{
 		.name = "wcn7850 hw2.0",
@@ -458,6 +464,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 		.max_radios = 1,
 		.single_pdev_only = true,
 		.qmi_service_ins_id = ATH12K_QMI_WLFW_SERVICE_INS_ID_V01_WCN7850,
+		.qmi_max_chunk_size = SZ_512K,
 		.internal_sleep_clock = true,
 
 		.hw_ops = &wcn7850_ops,
@@ -483,6 +490,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 				   BIT(NL80211_IFTYPE_P2P_CLIENT) |
 				   BIT(NL80211_IFTYPE_P2P_GO),
 		.supports_monitor = true,
+		.supports_cong_ctrl_max_msdus = false,
 
 		.idle_ps = true,
 		.download_calib = false,
@@ -533,6 +541,9 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 			.max_client_dbs = 128,
 			.max_client_dbs_sbs = 128,
 		},
+
+		.host_alloc_ml_id = false,
+		.advertise_iface_mac_pool = true,
 	},
 	{
 		.name = "qcn9274 hw2.0",
@@ -547,6 +558,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 		.max_radios = 2,
 		.single_pdev_only = false,
 		.qmi_service_ins_id = ATH12K_QMI_WLFW_SERVICE_INS_ID_V01_QCN9274,
+		.qmi_max_chunk_size = SZ_2M,
 		.internal_sleep_clock = false,
 
 		.hw_ops = &qcn9274_ops,
@@ -571,6 +583,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 					BIT(NL80211_IFTYPE_MESH_POINT) |
 					BIT(NL80211_IFTYPE_AP_VLAN),
 		.supports_monitor = true,
+		.supports_cong_ctrl_max_msdus = true,
 
 		.idle_ps = false,
 		.download_calib = true,
@@ -620,6 +633,9 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 			.max_client_dbs = 128,
 			.max_client_dbs_sbs = 128,
 		},
+
+		.host_alloc_ml_id = true,
+		.advertise_iface_mac_pool = false,
 	},
 	{
 		.name = "ipq5332 hw1.0",
@@ -634,6 +650,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 		.max_radios = 1,
 		.single_pdev_only = false,
 		.qmi_service_ins_id = ATH12K_QMI_WLFW_SERVICE_INS_ID_V01_IPQ5332,
+		.qmi_max_chunk_size = SZ_2M,
 		.internal_sleep_clock = false,
 
 		.hw_ops = &qcn9274_ops,
@@ -655,8 +672,10 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 
 		.interface_modes = BIT(NL80211_IFTYPE_STATION) |
 				   BIT(NL80211_IFTYPE_AP) |
-				   BIT(NL80211_IFTYPE_MESH_POINT),
+				   BIT(NL80211_IFTYPE_MESH_POINT) |
+				   BIT(NL80211_IFTYPE_AP_VLAN),
 		.supports_monitor = true,
+		.supports_cong_ctrl_max_msdus = true,
 
 		.idle_ps = false,
 		.download_calib = true,
@@ -692,7 +711,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 
 		.ce_ie_addr = &ath12k_wifi7_ce_ie_addr_ipq5332,
 		.ce_remap = &ath12k_wifi7_ce_remap_ipq5332,
-		.bdf_addr_offset = 0xC00000,
+		.bdf_addr_offset = 0x1A00000,
 
 		.dp_primary_link_only = true,
 		.client = {
@@ -700,6 +719,9 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 			.max_client_dbs = 128,
 			.max_client_dbs_sbs = 128,
 		},
+
+		.host_alloc_ml_id = true,
+		.advertise_iface_mac_pool = false,
 	},
 	{
 		.name = "qcc2072 hw1.0",
@@ -716,6 +738,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 		.max_radios = 1,
 		.single_pdev_only = true,
 		.qmi_service_ins_id = ATH12K_QMI_WLFW_SERVICE_INS_ID_V01_WCN7850,
+		.qmi_max_chunk_size = SZ_512K,
 		.internal_sleep_clock = true,
 
 		.hw_ops = &qcc2072_ops,
@@ -741,6 +764,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 				   BIT(NL80211_IFTYPE_P2P_CLIENT) |
 				   BIT(NL80211_IFTYPE_P2P_GO),
 		.supports_monitor = true,
+		.supports_cong_ctrl_max_msdus = false,
 
 		.idle_ps = true,
 		.download_calib = false,
@@ -792,6 +816,9 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 			.max_client_dbs = 128,
 			.max_client_dbs_sbs = 128,
 		},
+
+		.host_alloc_ml_id = false,
+		.advertise_iface_mac_pool = true,
 	},
 	{
 		.name = "ipq5424 hw1.0",
@@ -806,6 +833,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 		.max_radios = 1,
 		.single_pdev_only = false,
 		.qmi_service_ins_id = ATH12K_QMI_WLFW_SERVICE_INS_ID_V01_IPQ5332,
+		.qmi_max_chunk_size = SZ_2M,
 		.internal_sleep_clock = false,
 
 		.hw_ops = &qcn9274_ops,
@@ -829,6 +857,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 				   BIT(NL80211_IFTYPE_AP) |
 				   BIT(NL80211_IFTYPE_MESH_POINT),
 		.supports_monitor = true,
+		.supports_cong_ctrl_max_msdus = true,
 
 		.idle_ps = false,
 		.download_calib = true,
@@ -876,6 +905,9 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 			.max_client_dbs = 128,
 			.max_client_dbs_sbs = 128,
 		},
+
+		.host_alloc_ml_id = true,
+		.advertise_iface_mac_pool = false,
 	},
 };
 
@@ -906,6 +938,7 @@ static void ath12k_wifi7_mac_op_tx(struct ieee80211_hw *hw,
 	struct ethhdr *eth;
 	bool is_prb_rsp;
 	u16 mcbc_gsn;
+	u8 cb_flags;
 	u8 link_id;
 	int ret;
 	struct ath12k_dp *tmp_dp;
@@ -999,8 +1032,13 @@ static void ath12k_wifi7_mac_op_tx(struct ieee80211_hw *hw,
 	    ieee80211_has_protected(hdr->frame_control))
 		is_dvlan = true;
 
+	/*
+	 * Add a sta pointer check to differentiate multicast encapsulation
+	 * offload packets, as the ATH12K_SKB_HW_80211_ENCAP flag is also set
+	 * for such packets.
+	 */
 	if (!vif->valid_links || !is_mcast || is_dvlan ||
-	    (skb_cb->flags & ATH12K_SKB_HW_80211_ENCAP) ||
+	    ((skb_cb->flags & ATH12K_SKB_HW_80211_ENCAP) && sta) ||
 	    test_bit(ATH12K_FLAG_RAW_MODE, &ar->ab->dev_flags)) {
 		ret = ath12k_wifi7_dp_tx(dp_pdev, arvif, arsta, skb, false, 0, is_mcast);
 		if (unlikely(ret)) {
@@ -1012,6 +1050,7 @@ static void ath12k_wifi7_mac_op_tx(struct ieee80211_hw *hw,
 		mcbc_gsn = atomic_inc_return(&ahvif->dp_vif.mcbc_gsn) & 0xfff;
 
 		links_map = ahvif->links_map;
+		cb_flags = skb_cb->flags;
 		for_each_set_bit(link_id, &links_map,
 				 IEEE80211_MLD_MAX_NUM_LINKS) {
 			tmp_arvif = rcu_dereference(ahvif->link[link_id]);
@@ -1019,21 +1058,52 @@ static void ath12k_wifi7_mac_op_tx(struct ieee80211_hw *hw,
 				continue;
 
 			tmp_ar = tmp_arvif->ar;
-			tmp_dp_pdev = ath12k_dp_to_pdev_dp(tmp_ar->ab->dp,
+			if (unlikely(test_bit(ATH12K_FLAG_CRASH_FLUSH, &tmp_ar->ab->dev_flags)))
+				continue;
+
+			tmp_dp = ath12k_ab_to_dp(tmp_ar->ab);
+			tmp_dp_pdev = ath12k_dp_to_pdev_dp(tmp_dp,
 							   tmp_ar->pdev_idx);
 			if (!tmp_dp_pdev)
 				continue;
-			msdu_copied = skb_copy(skb, GFP_ATOMIC);
-			if (!msdu_copied) {
-				ath12k_err(ar->ab,
-					   "skb copy failure link_id 0x%X vdevid 0x%X\n",
-					   link_id, tmp_arvif->vdev_id);
-				continue;
-			}
 
-			ath12k_mlo_mcast_update_tx_link_address(vif, link_id,
-								msdu_copied,
-								info_flags);
+			if (cb_flags & ATH12K_SKB_HW_80211_ENCAP) {
+				/*
+				 * skb->data may be modified for the
+				 * iova_mask devices. It is better to
+				 * use skb_copy() for such devices to
+				 * avoid any potential skb corruption
+				 * related issues.
+				 */
+				if (tmp_dp->hw_params->iova_mask) {
+					msdu_copied = skb_copy(skb, GFP_ATOMIC);
+				} else {
+					/*
+					 * ath12k_wifi7_dp_tx() should
+					 * treat cloned HW-encap Ethernet
+					 * multicast frames as read-only.
+					 */
+					msdu_copied = skb_clone(skb, GFP_ATOMIC);
+				}
+				if (!msdu_copied) {
+					ath12k_err(ar->ab,
+						   "skb copy/clone failure link_id 0x%X vdevid 0x%X\n",
+						   link_id, tmp_arvif->vdev_id);
+					continue;
+				}
+			} else {
+				msdu_copied = skb_copy(skb, GFP_ATOMIC);
+				if (!msdu_copied) {
+					ath12k_err(ar->ab,
+						   "skb copy failure link_id 0x%X vdevid 0x%X\n",
+						   link_id, tmp_arvif->vdev_id);
+					continue;
+				}
+
+				ath12k_mlo_mcast_update_tx_link_address(vif, link_id,
+									msdu_copied,
+									info_flags);
+			}
 
 			skb_cb = ATH12K_SKB_CB(msdu_copied);
 			skb_cb->link_id = link_id;
@@ -1049,7 +1119,6 @@ static void ath12k_wifi7_mac_op_tx(struct ieee80211_hw *hw,
 			if (unlikely(!ahvif->dp_vif.key_cipher))
 				goto skip_peer_find;
 
-			tmp_dp = ath12k_ab_to_dp(tmp_ar->ab);
 			spin_lock_bh(&tmp_dp->dp_lock);
 			peer = ath12k_dp_link_peer_find_by_addr(tmp_dp,
 								tmp_arvif->bssid);
@@ -1068,11 +1137,16 @@ static void ath12k_wifi7_mac_op_tx(struct ieee80211_hw *hw,
 				skb_cb->cipher = key->cipher;
 				skb_cb->flags |= ATH12K_SKB_CIPHER_SET;
 
+				if (skb_cb->flags & ATH12K_SKB_HW_80211_ENCAP)
+					goto skip_fctl_protected_check;
+
 				hdr = (struct ieee80211_hdr *)msdu_copied->data;
 				if (!ieee80211_has_protected(hdr->frame_control))
 					hdr->frame_control |=
 						cpu_to_le16(IEEE80211_FCTL_PROTECTED);
 			}
+
+skip_fctl_protected_check:
 			spin_unlock_bh(&tmp_dp->dp_lock);
 
 skip_peer_find:

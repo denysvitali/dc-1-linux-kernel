@@ -1524,7 +1524,7 @@ struct mlx5_flow_handle *
 mlx5_esw_lag_demux_rule_create(struct mlx5_eswitch *esw, u16 vport_num,
 			       struct mlx5_flow_table *lag_ft)
 {
-	struct mlx5_flow_spec *spec = kvzalloc(sizeof(*spec), GFP_KERNEL);
+	struct mlx5_flow_spec *spec = kvzalloc_obj(*spec);
 	struct mlx5_flow_destination dest = {};
 	struct mlx5_flow_act flow_act = {};
 	struct mlx5_flow_handle *ret;
@@ -2567,6 +2567,7 @@ static void mlx5_esw_fdb_active(struct mlx5_eswitch *esw)
 	mlx5_esw_fdb_drop_destroy(esw);
 	mlx5_mpfs_enable(esw->dev);
 
+	mutex_lock(&esw->state_lock);
 	mlx5_esw_for_each_vf_vport(esw, i, vport, U16_MAX) {
 		if (!vport->adjacent)
 			continue;
@@ -2574,6 +2575,7 @@ static void mlx5_esw_fdb_active(struct mlx5_eswitch *esw)
 			  vport->vport);
 		mlx5_esw_adj_vport_modify(esw->dev, vport->vport, true);
 	}
+	mutex_unlock(&esw->state_lock);
 
 	esw->offloads_inactive = false;
 	esw_warn(esw->dev, "MPFS/FDB active\n");
@@ -2587,6 +2589,7 @@ static void mlx5_esw_fdb_inactive(struct mlx5_eswitch *esw)
 	mlx5_mpfs_disable(esw->dev);
 	mlx5_esw_fdb_drop_create(esw);
 
+	mutex_lock(&esw->state_lock);
 	mlx5_esw_for_each_vf_vport(esw, i, vport, U16_MAX) {
 		if (!vport->adjacent)
 			continue;
@@ -2595,6 +2598,7 @@ static void mlx5_esw_fdb_inactive(struct mlx5_eswitch *esw)
 
 		mlx5_esw_adj_vport_modify(esw->dev, vport->vport, false);
 	}
+	mutex_unlock(&esw->state_lock);
 
 	esw->offloads_inactive = true;
 	esw_warn(esw->dev, "MPFS/FDB inactive\n");
@@ -3379,10 +3383,15 @@ static void mlx5_esw_offloads_rep_event_unpair(struct mlx5_eswitch *esw,
 static void mlx5_esw_offloads_unpair(struct mlx5_eswitch *esw,
 				     struct mlx5_eswitch *peer_esw)
 {
+	struct list_head *dup_peer_flows;
+
 #if IS_ENABLED(CONFIG_MLX5_CLS_ACT)
 	mlx5e_tc_clean_fdb_peer_flows(esw);
 #endif
 	mlx5_esw_offloads_rep_event_unpair(esw, peer_esw);
+	dup_peer_flows = xa_erase(&esw->offloads.peer_flows,
+				  MLX5_CAP_GEN(peer_esw->dev, vhca_id));
+	kfree(dup_peer_flows);
 	esw_del_fdb_peer_miss_rules(esw, peer_esw->dev);
 }
 
@@ -3390,6 +3399,7 @@ static int mlx5_esw_offloads_pair(struct mlx5_eswitch *esw,
 				  struct mlx5_eswitch *peer_esw)
 {
 	const struct mlx5_eswitch_rep_ops *ops;
+	struct list_head *dup_peer_flows;
 	struct mlx5_eswitch_rep *rep;
 	unsigned long i;
 	u8 rep_type;
@@ -3398,6 +3408,20 @@ static int mlx5_esw_offloads_pair(struct mlx5_eswitch *esw,
 	err = esw_add_fdb_peer_miss_rules(esw, peer_esw->dev);
 	if (err)
 		return err;
+
+	dup_peer_flows = kzalloc_obj(*dup_peer_flows);
+	if (!dup_peer_flows) {
+		err = -ENOMEM;
+		goto err_out;
+	}
+	INIT_LIST_HEAD(dup_peer_flows);
+	err = xa_err(xa_store(&esw->offloads.peer_flows,
+			      MLX5_CAP_GEN(peer_esw->dev, vhca_id),
+			      dup_peer_flows, GFP_KERNEL));
+	if (err) {
+		kfree(dup_peer_flows);
+		goto err_out;
+	}
 
 	mlx5_esw_for_each_rep(esw, i, rep) {
 		for (rep_type = 0; rep_type < NUM_REP_TYPES; rep_type++) {
@@ -3544,10 +3568,9 @@ err_out:
 void mlx5_esw_offloads_devcom_init(struct mlx5_eswitch *esw,
 				   const struct mlx5_devcom_match_attr *attr)
 {
-	int i;
+	int err;
 
-	for (i = 0; i < MLX5_MAX_PORTS; i++)
-		INIT_LIST_HEAD(&esw->offloads.peer_flows[i]);
+	xa_init(&esw->offloads.peer_flows);
 	mutex_init(&esw->offloads.peer_mutex);
 
 	if (!MLX5_CAP_ESW(esw->dev, merged_eswitch))
@@ -3568,10 +3591,12 @@ void mlx5_esw_offloads_devcom_init(struct mlx5_eswitch *esw,
 	if (!esw->devcom)
 		return;
 
-	mlx5_devcom_send_event(esw->devcom,
-			       ESW_OFFLOADS_DEVCOM_PAIR,
-			       ESW_OFFLOADS_DEVCOM_UNPAIR,
-			       esw);
+	err = mlx5_devcom_send_event(esw->devcom,
+				     ESW_OFFLOADS_DEVCOM_PAIR,
+				     ESW_OFFLOADS_DEVCOM_UNPAIR,
+				     esw);
+	if (err)
+		mlx5_esw_offloads_devcom_cleanup(esw);
 }
 
 void mlx5_esw_offloads_devcom_cleanup(struct mlx5_eswitch *esw)
@@ -3588,6 +3613,8 @@ void mlx5_esw_offloads_devcom_cleanup(struct mlx5_eswitch *esw)
 	xa_destroy(&esw->paired);
 	xa_destroy(&esw->fdb_table.offloads.peer_miss_rules);
 	esw->devcom = NULL;
+	WARN_ON_ONCE(!xa_empty(&esw->offloads.peer_flows));
+	xa_destroy(&esw->offloads.peer_flows);
 }
 
 bool mlx5_esw_offloads_devcom_is_ready(struct mlx5_eswitch *esw)
@@ -3986,7 +4013,7 @@ static void esw_offloads_steering_cleanup(struct mlx5_eswitch *esw)
 	mutex_destroy(&esw->fdb_table.offloads.vports.lock);
 }
 
-static void esw_vfs_changed_event_handler(struct mlx5_eswitch *esw)
+static void esw_changed_event_handler(struct mlx5_eswitch *esw)
 {
 	struct mlx5_esw_pf_info host_pf_info;
 	u16 new_num_vfs;
@@ -3998,6 +4025,11 @@ static void esw_vfs_changed_event_handler(struct mlx5_eswitch *esw)
 
 	host_pf_info = mlx5_esw_get_host_pf_info(esw->dev, out);
 	new_num_vfs = host_pf_info.num_of_vfs;
+
+	if (host_pf_info.pf_disabled) {
+		mlx5_sf_table_esw_changed_event_handler(esw->dev);
+		mlx5_sf_hw_table_esw_changed_event_handler(esw->dev);
+	}
 
 	if (new_num_vfs == esw->esw_funcs.num_vfs || host_pf_info.pf_disabled)
 		goto free;
@@ -4091,8 +4123,7 @@ int mlx5_esw_funcs_changed_handler(struct notifier_block *nb,
 	esw_funcs = mlx5_nb_cof(nb, struct mlx5_esw_functions, nb);
 	esw = container_of(esw_funcs, struct mlx5_eswitch, esw_funcs);
 
-	ret = mlx5_esw_add_work(esw, esw_vfs_changed_event_handler,
-				GFP_ATOMIC);
+	ret = mlx5_esw_add_work(esw, esw_changed_event_handler, GFP_ATOMIC);
 	if (ret)
 		return NOTIFY_DONE;
 

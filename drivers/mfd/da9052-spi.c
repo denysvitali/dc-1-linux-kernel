@@ -23,7 +23,7 @@ static int da9052_spi_probe(struct spi_device *spi)
 	const struct spi_device_id *id = spi_get_device_id(spi);
 	struct da9052 *da9052;
 
-	da9052 = devm_kzalloc(&spi->dev, sizeof(struct da9052), GFP_KERNEL);
+	da9052 = devm_kzalloc_obj(&spi->dev, struct da9052);
 	if (!da9052)
 		return -ENOMEM;
 
@@ -63,12 +63,12 @@ static void da9052_spi_remove(struct spi_device *spi)
 }
 
 static const struct spi_device_id da9052_spi_id[] = {
-	{"da9052", DA9052},
-	{"da9053-aa", DA9053_AA},
-	{"da9053-ba", DA9053_BA},
-	{"da9053-bb", DA9053_BB},
-	{"da9053-bc", DA9053_BC},
-	{}
+	{ .name = "da9052", .driver_data = DA9052 },
+	{ .name = "da9053-aa", .driver_data = DA9053_AA },
+	{ .name = "da9053-ba", .driver_data = DA9053_BA },
+	{ .name = "da9053-bb", .driver_data = DA9053_BB },
+	{ .name = "da9053-bc", .driver_data = DA9053_BC },
+	{ }
 };
 
 static struct spi_driver da9052_spi_driver = {

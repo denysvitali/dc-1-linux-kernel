@@ -28,6 +28,7 @@
 #include <linux/slab.h>
 #include <linux/xarray.h>
 #include <linux/power_supply.h>
+#include <linux/numa.h>
 #include <linux/pm_runtime.h>
 #include <linux/suspend.h>
 #include <acpi/video.h>
@@ -140,13 +141,15 @@ static struct amdgpu_acpi_priv {
  * @atif: atif structure
  * @function: the ATIF function to execute
  * @params: ATIF function params
+ * @min_size: minimum size of the expected output buffer in bytes
  *
  * Executes the requested ATIF function (all asics).
  * Returns a pointer to the acpi output buffer.
  */
 static union acpi_object *amdgpu_atif_call(struct amdgpu_atif *atif,
 					   int function,
-					   struct acpi_buffer *params)
+					   struct acpi_buffer *params,
+					   size_t min_size)
 {
 	acpi_status status;
 	union acpi_object *obj;
@@ -185,6 +188,28 @@ static union acpi_object *amdgpu_atif_call(struct amdgpu_atif *atif,
 	if (obj->type != ACPI_TYPE_BUFFER) {
 		DRM_DEBUG_DRIVER("bad object returned from ATIF: %d\n",
 				 obj->type);
+		kfree(obj);
+		return NULL;
+	}
+
+	if (obj->buffer.length < sizeof(u16)) {
+		DRM_DEBUG_DRIVER("ATIF buffer too small to hold size field: %u\n",
+				 obj->buffer.length);
+		kfree(obj);
+		return NULL;
+	}
+
+	if (obj->buffer.length < *(u16 *)obj->buffer.pointer) {
+		DRM_DEBUG_DRIVER("ATIF buffer length mismatch: reported %u, actual %u\n",
+				 *(u16 *)obj->buffer.pointer,
+				 obj->buffer.length);
+		kfree(obj);
+		return NULL;
+	}
+
+	if (*(u16 *)obj->buffer.pointer < min_size) {
+		DRM_DEBUG_DRIVER("ATIF buffer too small: expected %zu, got %u\n",
+				 min_size, *(u16 *)obj->buffer.pointer);
 		kfree(obj);
 		return NULL;
 	}
@@ -251,19 +276,14 @@ int amdgpu_atif_verify_interface(struct amdgpu_atif *atif)
 	size_t size;
 	int err = 0;
 
-	info = amdgpu_atif_call(atif, ATIF_FUNCTION_VERIFY_INTERFACE, NULL);
+	info = amdgpu_atif_call(atif, ATIF_FUNCTION_VERIFY_INTERFACE, NULL,
+				sizeof(output));
 	if (!info)
 		return -EIO;
 
 	memset(&output, 0, sizeof(output));
 
-	size = *(u16 *) info->buffer.pointer;
-	if (size < 12) {
-		DRM_INFO("ATIF buffer is too small: %zu\n", size);
-		err = -EINVAL;
-		goto out;
-	}
-	size = min(sizeof(output), size);
+	size = min(sizeof(output), (size_t)*(u16 *)info->buffer.pointer);
 
 	memcpy(&output, info->buffer.pointer, size);
 
@@ -273,7 +293,6 @@ int amdgpu_atif_verify_interface(struct amdgpu_atif *atif)
 	amdgpu_atif_parse_notification(&atif->notifications, output.notification_mask);
 	amdgpu_atif_parse_functions(&atif->functions, output.function_bits);
 
-out:
 	kfree(info);
 	return err;
 }
@@ -299,20 +318,14 @@ int amdgpu_atif_get_notification_params(struct amdgpu_atif *atif)
 	int err = 0;
 
 	info = amdgpu_atif_call(atif, ATIF_FUNCTION_GET_SYSTEM_PARAMETERS,
-				NULL);
+				NULL, offsetof(struct atif_system_params, command_code));
 	if (!info) {
 		err = -EIO;
 		goto out;
 	}
 
-	size = *(u16 *) info->buffer.pointer;
-	if (size < 10) {
-		err = -EINVAL;
-		goto out;
-	}
-
 	memset(&params, 0, sizeof(params));
-	size = min(sizeof(params), size);
+	size = min(sizeof(params), (size_t)*(u16 *)info->buffer.pointer);
 	memcpy(&params, info->buffer.pointer, size);
 
 	DRM_DEBUG_DRIVER("SYSTEM_PARAMS: mask = %#x, flags = %#x\n",
@@ -376,20 +389,14 @@ int amdgpu_atif_query_backlight_caps(struct amdgpu_atif *atif)
 
 	info = amdgpu_atif_call(atif,
 		ATIF_FUNCTION_QUERY_BRIGHTNESS_TRANSFER_CHARACTERISTICS,
-		&params);
+		&params, offsetof(struct atif_qbtc_output, data_points));
 	if (!info) {
 		err = -EIO;
 		goto out;
 	}
 
-	size = *(u16 *) info->buffer.pointer;
-	if (size < 10) {
-		err = -EINVAL;
-		goto out;
-	}
-
 	memset(&characteristics, 0, sizeof(characteristics));
-	size = min(sizeof(characteristics), size);
+	size = min(sizeof(characteristics), (size_t)*(u16 *)info->buffer.pointer);
 	memcpy(&characteristics, info->buffer.pointer, size);
 
 	atif->backlight_caps.caps_valid = true;
@@ -399,7 +406,11 @@ int amdgpu_atif_query_backlight_caps(struct amdgpu_atif *atif)
 			characteristics.max_input_signal;
 	atif->backlight_caps.ac_level = characteristics.ac_level;
 	atif->backlight_caps.dc_level = characteristics.dc_level;
-	atif->backlight_caps.data_points = characteristics.number_of_points;
+	if (characteristics.number_of_points > ATIF_QBTC_MAX_DATA_POINTS)
+		pr_warn(FW_BUG "ATIF: backlight curve has %u points, using the first %u\n",
+			characteristics.number_of_points, ATIF_QBTC_MAX_DATA_POINTS);
+	atif->backlight_caps.data_points = min_t(u8, characteristics.number_of_points,
+						 ATIF_QBTC_MAX_DATA_POINTS);
 	memcpy(atif->backlight_caps.luminance_data,
 	       characteristics.data_points,
 	       sizeof(atif->backlight_caps.luminance_data));
@@ -427,24 +438,18 @@ static int amdgpu_atif_get_sbios_requests(struct amdgpu_atif *atif,
 	int count = 0;
 
 	info = amdgpu_atif_call(atif, ATIF_FUNCTION_GET_SYSTEM_BIOS_REQUESTS,
-				NULL);
+				NULL, sizeof(*req));
 	if (!info)
 		return -EIO;
 
-	size = *(u16 *)info->buffer.pointer;
-	if (size < 0xd) {
-		count = -EINVAL;
-		goto out;
-	}
 	memset(req, 0, sizeof(*req));
 
-	size = min(sizeof(*req), size);
+	size = min(sizeof(*req), (size_t)*(u16 *)info->buffer.pointer);
 	memcpy(req, info->buffer.pointer, size);
 	DRM_DEBUG_DRIVER("SBIOS pending requests: %#x\n", req->pending);
 
 	count = hweight32(req->pending);
 
-out:
 	kfree(info);
 	return count;
 }
@@ -1167,8 +1172,10 @@ int amdgpu_acpi_enumerate_xcc(void)
 		}
 
 		xcc_info = kzalloc_obj(struct amdgpu_acpi_xcc_info);
-		if (!xcc_info)
+		if (!xcc_info) {
+			acpi_dev_put(acpi_dev);
 			return -ENOMEM;
+		}
 
 		INIT_LIST_HEAD(&xcc_info->list);
 		xcc_info->handle = acpi_device_handle(acpi_dev);
@@ -1444,6 +1451,141 @@ bool amdgpu_acpi_should_gpu_reset(struct amdgpu_device *adev)
 	return true;
 #endif
 }
+
+#ifdef HAVE_ACPI_SRAT_GENERIC_AFFINITY
+static bool amdgpu_acpi_srat_pci_handle_match(struct pci_dev *pdev,
+					      struct acpi_srat_generic_affinity *gi)
+{
+	u16 segment = *(u16 *)&gi->device_handle[0];
+	u8 bus = gi->device_handle[2];
+	u8 devfn = gi->device_handle[3];
+
+	/* Only PCI device handles (ACPI 6.3: type 1; some firmware used 0) */
+	if (gi->device_handle_type != 0 && gi->device_handle_type != 1)
+		return false;
+
+	if (!(gi->flags & ACPI_SRAT_GENERIC_AFFINITY_ENABLED))
+		return false;
+
+	/* ACPI 6.3 Table 5-80: segment + bus + devfn bytes */
+	return segment == pci_domain_nr(pdev->bus) &&
+	       bus == pdev->bus->number &&
+	       devfn == pdev->devfn;
+}
+
+int amdgpu_acpi_find_gpu_memory_in_srat(struct amdgpu_device *adev,
+					uint64_t *base_addr, uint64_t *length)
+{
+	struct acpi_srat_generic_affinity *gpu;
+	struct acpi_subtable_header *sub_header;
+	struct acpi_table_header *table_header;
+	struct acpi_srat_mem_affinity *mem;
+	struct pci_dev *pdev = adev->pdev;
+	unsigned long subtable_len;
+	unsigned long table_end;
+	acpi_status status;
+	bool pxm_found = false;
+	bool mem_found = false;
+	u64 mem_base = 0;
+	u64 mem_len = 0;
+	u32 gpu_pxm = 0;
+
+	if (!base_addr || !length)
+		return -EINVAL;
+
+	status = acpi_get_table(ACPI_SIG_SRAT, 0, &table_header);
+	if (ACPI_FAILURE(status))
+		return -ENOENT;
+
+	table_end = (unsigned long)table_header + table_header->length;
+
+	/* Pass 1: find GPU PXM from GENERIC_AFFINITY */
+	sub_header = (struct acpi_subtable_header *)
+		((unsigned long)table_header + sizeof(struct acpi_table_srat));
+	subtable_len = sub_header->length;
+
+	while (((unsigned long)sub_header) + subtable_len <= table_end) {
+		if (subtable_len == 0)
+			break;
+
+		if (sub_header->type == ACPI_SRAT_TYPE_GENERIC_AFFINITY) {
+			gpu = (struct acpi_srat_generic_affinity *)sub_header;
+			if (amdgpu_acpi_srat_pci_handle_match(pdev, gpu)) {
+				gpu_pxm = gpu->proximity_domain;
+				pxm_found = true;
+				break;
+			}
+		}
+
+		sub_header = (struct acpi_subtable_header *)
+			((unsigned long)sub_header + subtable_len);
+		subtable_len = sub_header->length;
+	}
+
+	if (!pxm_found) {
+		acpi_put_table(table_header);
+		dev_err(adev->dev, "SRAT: no acpi generic initiator found\n");
+		return -ENOENT;
+	}
+
+	/* Pass 2: find SPM memory for gpu_pxm */
+	sub_header = (struct acpi_subtable_header *)
+		((unsigned long)table_header + sizeof(struct acpi_table_srat));
+	subtable_len = sub_header->length;
+
+	while (((unsigned long)sub_header) + subtable_len <= table_end) {
+		if (subtable_len == 0)
+			break;
+
+		if (sub_header->type == ACPI_SRAT_TYPE_MEMORY_AFFINITY) {
+			bool enabled, hotplug;
+
+			mem = (struct acpi_srat_mem_affinity *)sub_header;
+			enabled = mem->flags & ACPI_SRAT_MEM_ENABLED;
+			hotplug = mem->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE;
+
+			/* MUST filter ENABLED && !HOTPLUGGABLE */
+			if (enabled && !hotplug &&
+			    mem->proximity_domain == gpu_pxm) {
+				/* [mem->base_address, mem->length] is the SPM range */
+				mem_base = mem->base_address;
+				mem_len = mem->length;
+				mem_found = true;
+				break;
+			}
+		}
+
+		sub_header = (struct acpi_subtable_header *)
+			((unsigned long)sub_header + subtable_len);
+		subtable_len = sub_header->length;
+	}
+
+	acpi_put_table(table_header);
+
+	if (!mem_found) {
+		dev_err(adev->dev, "SRAT: no memory affinity for pxm %u\n",
+			 gpu_pxm);
+		return -ENOENT;
+	}
+
+	dev_info(adev->dev, "SRAT: gpu pxm=%u base=%llx length=%llx\n",
+		 gpu_pxm, mem_base, mem_len);
+
+	*base_addr = mem_base;
+	*length = mem_len;
+
+	return 0;
+}
+#else
+int amdgpu_acpi_find_gpu_memory_in_srat(struct amdgpu_device *adev,
+					uint64_t *base_addr, uint64_t *length)
+{
+	if (!base_addr || !length)
+		return -EINVAL;
+
+	return -ENOENT;
+}
+#endif
 
 /*
  * amdgpu_acpi_detect - detect ACPI ATIF/ATCS methods

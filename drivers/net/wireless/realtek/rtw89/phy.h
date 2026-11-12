@@ -353,25 +353,6 @@ struct rtw89_txpwr_byrate_cfg {
 	u32 data;
 };
 
-struct rtw89_txpwr_track_cfg {
-	const s8 (*delta_swingidx_6gb_n)[DELTA_SWINGIDX_SIZE];
-	const s8 (*delta_swingidx_6gb_p)[DELTA_SWINGIDX_SIZE];
-	const s8 (*delta_swingidx_6ga_n)[DELTA_SWINGIDX_SIZE];
-	const s8 (*delta_swingidx_6ga_p)[DELTA_SWINGIDX_SIZE];
-	const s8 (*delta_swingidx_5gb_n)[DELTA_SWINGIDX_SIZE];
-	const s8 (*delta_swingidx_5gb_p)[DELTA_SWINGIDX_SIZE];
-	const s8 (*delta_swingidx_5ga_n)[DELTA_SWINGIDX_SIZE];
-	const s8 (*delta_swingidx_5ga_p)[DELTA_SWINGIDX_SIZE];
-	const s8 *delta_swingidx_2gb_n;
-	const s8 *delta_swingidx_2gb_p;
-	const s8 *delta_swingidx_2ga_n;
-	const s8 *delta_swingidx_2ga_p;
-	const s8 *delta_swingidx_2g_cck_b_n;
-	const s8 *delta_swingidx_2g_cck_b_p;
-	const s8 *delta_swingidx_2g_cck_a_n;
-	const s8 *delta_swingidx_2g_cck_a_p;
-};
-
 struct rtw89_phy_dig_gain_cfg {
 	const struct rtw89_reg_def *table;
 	u8 size;
@@ -500,6 +481,11 @@ struct rtw89_cfo_regs {
 struct rtw89_bb_wrap_regs {
 	u32 pwr_macid_lmt;
 	u32 pwr_macid_path;
+};
+
+struct rtw89_nctl_regs {
+	u32 cfg;
+	u32 rw;
 };
 
 enum rtw89_bandwidth_section_num_ax {
@@ -645,8 +631,19 @@ struct rtw89_bb_wrap_common_data {
 		} cim3k;
 		u32 rfsi_ct_opt[2];
 		u8 pb_tb;
+		u8 qam_th[3];
 	} bands[RFSI_CTRL_BAND_NUM];
-	u8 qam_th[6];
+};
+
+struct rtw89_bb_wrap_common_data_gen2 {
+	struct {
+		u8 mdpd_160m;
+		u8 mdpd_320m;
+		u8 oob_dpd_20m;
+		u8 oob_dpd_40m;
+		u8 oob_dpd_80m;
+		u8 cim3k;
+	} qam_th;
 };
 
 struct rtw89_bb_wrap_common_data_gen3 {
@@ -658,6 +655,7 @@ struct rtw89_bb_wrap_common_data_gen3 {
 
 struct rtw89_bb_wrap_data {
 	const struct rtw89_bb_wrap_common_data *common;
+	const struct rtw89_bb_wrap_common_data_gen2 *common_gen2;
 	const struct rtw89_bb_wrap_common_data_gen3 *common_gen3;
 	struct {
 		u16 qam_comp_th0[MAX_TX_RFSI_CTRL_OPT];
@@ -679,6 +677,7 @@ struct rtw89_phy_gen_def {
 	const struct rtw89_physts_regs *physts;
 	const struct rtw89_cfo_regs *cfo;
 	const struct rtw89_bb_wrap_regs *bb_wrap;
+	const struct rtw89_nctl_regs *nctl;
 	u32 (*phy0_phy1_offset)(struct rtw89_dev *rtwdev, u32 addr);
 	void (*config_bb_gain)(struct rtw89_dev *rtwdev,
 			       const struct rtw89_reg2_def *reg,
@@ -687,6 +686,7 @@ struct rtw89_phy_gen_def {
 	void (*preinit_rf_nctl)(struct rtw89_dev *rtwdev);
 	void (*bb_wrap_init)(struct rtw89_dev *rtwdev);
 	void (*ch_info_init)(struct rtw89_dev *rtwdev);
+	int (*btc_bttrx_en)(struct rtw89_dev *rtwdev, u8 bt_en_int, bool enable);
 
 	void (*set_txpwr_byrate)(struct rtw89_dev *rtwdev,
 				 const struct rtw89_chan *chan,
@@ -1052,9 +1052,9 @@ static inline void rtw89_phy_bb_wrap_init(struct rtw89_dev *rtwdev)
 		phy->bb_wrap_init(rtwdev);
 }
 
-void rtw89_phy_bb_wrap_set_rfsi_ct_opt(struct rtw89_dev *rtwdev,
-				       enum rtw89_rfsi_ctrl_band ctrl_band,
-				       enum rtw89_phy_idx phy_idx);
+void rtw89_phy_bb_wrap_tx_rfsi_ctrl_init_by_chan(struct rtw89_dev *rtwdev,
+						 const struct rtw89_chan *chan,
+						 u8 mac_idx);
 void rtw89_phy_bb_wrap_set_rfsi_bandedge_ch(struct rtw89_dev *rtwdev,
 					    const struct rtw89_chan *chan,
 					    enum rtw89_phy_idx phy_idx);
@@ -1065,6 +1065,17 @@ static inline void rtw89_phy_ch_info_init(struct rtw89_dev *rtwdev)
 
 	if (phy->ch_info_init)
 		phy->ch_info_init(rtwdev);
+}
+
+static inline
+int rtw89_phy_btc_bttrx_en(struct rtw89_dev *rtwdev, u8 bt_en_int, bool enable)
+{
+	const struct rtw89_phy_gen_def *phy = rtwdev->chip->phy_def;
+
+	if (!phy->btc_bttrx_en)
+		return 0;
+
+	return phy->btc_bttrx_en(rtwdev, bt_en_int, enable);
 }
 
 static inline
@@ -1163,6 +1174,9 @@ void rtw89_phy_rate_pattern_vif(struct rtw89_dev *rtwdev,
 bool rtw89_phy_c2h_chk_atomic(struct rtw89_dev *rtwdev, u8 class, u8 func);
 void rtw89_phy_c2h_handle(struct rtw89_dev *rtwdev, struct sk_buff *skb,
 			  u32 len, u8 class, u8 func);
+
+extern const char * const rtw89_rfk_report_names[];
+
 int rtw89_phy_rfk_pre_ntfy_and_wait(struct rtw89_dev *rtwdev,
 				    enum rtw89_phy_idx phy_idx,
 				    unsigned int ms);

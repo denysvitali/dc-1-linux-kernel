@@ -277,7 +277,12 @@ static int max98373_resume(struct device *dev)
 	}
 
 	regcache_cache_only(max98373->regmap, false);
-	regcache_sync(max98373->regmap);
+	ret = regcache_sync(max98373->regmap);
+	if (ret) {
+		regcache_cache_only(max98373->regmap, true);
+		regcache_mark_dirty(max98373->regmap);
+		return ret;
+	}
 
 	return 0;
 }
@@ -305,9 +310,8 @@ static int max98373_read_prop(struct sdw_slave *slave)
 	prop->clk_stop_timeout = 20;
 
 	nval = hweight32(prop->source_ports);
-	prop->src_dpn_prop = devm_kcalloc(&slave->dev, nval,
-					  sizeof(*prop->src_dpn_prop),
-					  GFP_KERNEL);
+	prop->src_dpn_prop = devm_kzalloc_objs(&slave->dev, *prop->src_dpn_prop,
+					       nval);
 	if (!prop->src_dpn_prop)
 		return -ENOMEM;
 
@@ -324,9 +328,8 @@ static int max98373_read_prop(struct sdw_slave *slave)
 
 	/* do this again for sink now */
 	nval = hweight32(prop->sink_ports);
-	prop->sink_dpn_prop = devm_kcalloc(&slave->dev, nval,
-					   sizeof(*prop->sink_dpn_prop),
-					   GFP_KERNEL);
+	prop->sink_dpn_prop = devm_kzalloc_objs(&slave->dev,
+						*prop->sink_dpn_prop, nval);
 	if (!prop->sink_dpn_prop)
 		return -ENOMEM;
 
@@ -724,7 +727,7 @@ static int max98373_init(struct sdw_slave *slave, struct regmap *regmap)
 	struct device *dev = &slave->dev;
 
 	/*  Allocate and assign private driver data structure  */
-	max98373 = devm_kzalloc(dev, sizeof(*max98373), GFP_KERNEL);
+	max98373 = devm_kzalloc_obj(dev, *max98373);
 	if (!max98373)
 		return -ENOMEM;
 
@@ -735,9 +738,8 @@ static int max98373_init(struct sdw_slave *slave, struct regmap *regmap)
 	regcache_cache_only(max98373->regmap, true);
 
 	max98373->cache_num = ARRAY_SIZE(max98373_sdw_cache_reg);
-	max98373->cache = devm_kcalloc(dev, max98373->cache_num,
-				       sizeof(*max98373->cache),
-				       GFP_KERNEL);
+	max98373->cache = devm_kzalloc_objs(dev, *max98373->cache,
+					    max98373->cache_num);
 	if (!max98373->cache)
 		return -ENOMEM;
 

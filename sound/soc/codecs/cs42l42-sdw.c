@@ -312,7 +312,7 @@ static int cs42l42_sdw_read_prop(struct sdw_slave *peripheral)
 	struct sdw_slave_prop *prop = &peripheral->prop;
 	struct sdw_dpn_prop *ports;
 
-	ports = devm_kcalloc(cs42l42->dev, 2, sizeof(*ports), GFP_KERNEL);
+	ports = devm_kzalloc_objs(cs42l42->dev, *ports, 2);
 	if (!ports)
 		return -ENOMEM;
 
@@ -481,10 +481,20 @@ static int cs42l42_sdw_runtime_resume(struct device *dev)
 	regcache_cache_only(cs42l42->regmap, false);
 
 	/* Sync LATCH_TO_VP first so the VP domain registers sync correctly */
-	regcache_sync_region(cs42l42->regmap, CS42L42_MIC_DET_CTL1, CS42L42_MIC_DET_CTL1);
-	regcache_sync(cs42l42->regmap);
+	ret = regcache_sync_region(cs42l42->regmap, CS42L42_MIC_DET_CTL1, CS42L42_MIC_DET_CTL1);
+	if (ret)
+		goto err_sync;
+
+	ret = regcache_sync(cs42l42->regmap);
+	if (ret)
+		goto err_sync;
 
 	return 0;
+
+err_sync:
+	regcache_cache_only(cs42l42->regmap, true);
+	regcache_mark_dirty(cs42l42->regmap);
+	return ret;
 }
 
 static int cs42l42_sdw_resume(struct device *dev)
@@ -518,7 +528,7 @@ static int cs42l42_sdw_probe(struct sdw_slave *peripheral, const struct sdw_devi
 	struct regmap *regmap;
 	int irq, ret;
 
-	cs42l42 = devm_kzalloc(dev, sizeof(*cs42l42), GFP_KERNEL);
+	cs42l42 = devm_kzalloc_obj(dev, *cs42l42);
 	if (!cs42l42)
 		return -ENOMEM;
 

@@ -172,9 +172,9 @@ static ssize_t arm_spe_pmu_cap_show_hex(struct device *dev,
 	return sysfs_emit(buf, "0x%llx\n", arm_spe_pmu_cap_get(spe_pmu, cap));
 }
 
-#define SPE_EXT_ATTR_ENTRY(_name, _func, _var)				\
-	&((struct dev_ext_attribute[]) {				\
-		{ __ATTR(_name, S_IRUGO, _func, NULL), (void *)_var }	\
+#define SPE_EXT_ATTR_ENTRY(_name, _func, _var)					\
+	&((struct dev_ext_attribute[]) {					\
+		{ __DEVICE_ATTR(_name, S_IRUGO, _func, NULL), (void *)_var }	\
 	})[0].attr.attr
 
 #define SPE_CAP_EXT_ATTR_ENTRY(_name, _var)				\
@@ -343,7 +343,7 @@ static ssize_t cpumask_show(struct device *dev,
 {
 	struct arm_spe_pmu *spe_pmu = dev_get_drvdata(dev);
 
-	return cpumap_print_to_pagebuf(true, buf, &spe_pmu->supported_cpus);
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&spe_pmu->supported_cpus));
 }
 static DEVICE_ATTR_RO(cpumask);
 
@@ -577,7 +577,7 @@ static u64 __arm_spe_pmu_next_off(struct perf_output_handle *handle)
 	 * the page boundary following it. Keep the tail boundary if
 	 * that's lower.
 	 */
-	if (handle->wakeup < (handle->head + handle->size) && head <= wakeup)
+	if ((handle->wakeup - handle->head) < handle->size && head <= wakeup)
 		limit = min(limit, round_up(wakeup, PAGE_SIZE));
 
 	if (limit > head)
@@ -889,6 +889,8 @@ static void arm_spe_pmu_start(struct perf_event *event, int flags)
 		arm_spe_pmu_stop(event, 0);
 		return;
 	}
+
+	perf_event_itrace_started(event);
 
 	reg = arm_spe_event_to_pmsfcr(event);
 	write_sysreg_s(reg, SYS_PMSFCR_EL1);
@@ -1375,7 +1377,7 @@ static int arm_spe_pmu_device_probe(struct platform_device *pdev)
 		return -EPERM;
 	}
 
-	spe_pmu = devm_kzalloc(dev, sizeof(*spe_pmu), GFP_KERNEL);
+	spe_pmu = devm_kzalloc_obj(dev, *spe_pmu);
 	if (!spe_pmu)
 		return -ENOMEM;
 

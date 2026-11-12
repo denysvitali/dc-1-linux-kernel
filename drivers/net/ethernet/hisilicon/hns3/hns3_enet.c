@@ -1072,8 +1072,7 @@ static void hns3_init_tx_spare_buffer(struct hns3_enet_ring *ring)
 		goto not_init;
 	}
 
-	tx_spare = devm_kzalloc(ring_to_dev(ring), sizeof(*tx_spare),
-				GFP_KERNEL);
+	tx_spare = devm_kzalloc_obj(ring_to_dev(ring), *tx_spare);
 	if (!tx_spare) {
 		/* The driver still work without the tx spare buffer */
 		dev_warn(ring_to_dev(ring), "failed to allocate hns3_tx_spare\n");
@@ -2825,32 +2824,28 @@ static int hns3_nic_change_mtu(struct net_device *netdev, int new_mtu)
 	return ret;
 }
 
-static int hns3_get_timeout_queue(struct net_device *ndev)
+static bool hns3_dump_timeout_queue(struct net_device *ndev,
+				    unsigned int txqueue)
 {
-	unsigned int i;
+	unsigned int timedout_ms;
+	struct netdev_queue *q;
 
-	/* Find the stopped queue the same way the stack does */
-	for (i = 0; i < ndev->num_tx_queues; i++) {
-		unsigned int timedout_ms;
-		struct netdev_queue *q;
-
-		q = netdev_get_tx_queue(ndev, i);
-		timedout_ms = netif_xmit_timeout_ms(q);
-		if (timedout_ms) {
+	q = netdev_get_tx_queue(ndev, txqueue);
+	timedout_ms = netif_xmit_timeout_ms(q);
+	if (timedout_ms) {
 #ifdef CONFIG_BQL
-			struct dql *dql = &q->dql;
+		struct dql *dql = &q->dql;
 
-			netdev_info(ndev, "DQL info last_cnt: %u, queued: %u, adj_limit: %u, completed: %u\n",
-				    dql->last_obj_cnt, dql->num_queued,
-				    dql->adj_limit, dql->num_completed);
+		netdev_info(ndev, "DQL info last_cnt: %u, queued: %u, adj_limit: %u, completed: %u\n",
+			    dql->last_obj_cnt, dql->num_queued,
+			    dql->adj_limit, dql->num_completed);
 #endif
-			netdev_info(ndev, "queue state: 0x%lx, delta msecs: %u\n",
-				    q->state, timedout_ms);
-			break;
-		}
+		netdev_info(ndev, "queue state: 0x%lx, delta msecs: %u\n",
+			    q->state, timedout_ms);
+		return true;
 	}
 
-	return i;
+	return false;
 }
 
 static void hns3_dump_queue_stats(struct net_device *ndev,
@@ -2900,15 +2895,15 @@ static void hns3_dump_queue_reg(struct net_device *ndev,
 				      HNS3_RING_TX_RING_EBD_OFFSET_REG));
 }
 
-static bool hns3_get_tx_timeo_queue_info(struct net_device *ndev)
+static bool hns3_get_tx_timeo_queue_info(struct net_device *ndev,
+					 unsigned int txqueue)
 {
 	struct hns3_nic_priv *priv = netdev_priv(ndev);
 	struct hnae3_handle *h = hns3_get_handle(ndev);
 	struct hns3_enet_ring *tx_ring;
-	u32 timeout_queue;
 
-	timeout_queue = hns3_get_timeout_queue(ndev);
-	if (timeout_queue >= ndev->num_tx_queues) {
+	if (txqueue >= h->kinfo.num_tqps ||
+	    !hns3_dump_timeout_queue(ndev, txqueue)) {
 		netdev_info(ndev,
 			    "no netdev TX timeout queue found, timeout count: %llu\n",
 			    priv->tx_timeout_count);
@@ -2917,8 +2912,8 @@ static bool hns3_get_tx_timeo_queue_info(struct net_device *ndev)
 
 	priv->tx_timeout_count++;
 
-	tx_ring = &priv->ring[timeout_queue];
-	hns3_dump_queue_stats(ndev, tx_ring, timeout_queue);
+	tx_ring = &priv->ring[txqueue];
+	hns3_dump_queue_stats(ndev, tx_ring, txqueue);
 
 	/* When mac received many pause frames continuous, it's unable to send
 	 * packets, which may cause tx timeout
@@ -2941,7 +2936,7 @@ static void hns3_nic_net_timeout(struct net_device *ndev, unsigned int txqueue)
 	struct hns3_nic_priv *priv = netdev_priv(ndev);
 	struct hnae3_handle *h = priv->ae_handle;
 
-	if (!hns3_get_tx_timeo_queue_info(ndev))
+	if (!hns3_get_tx_timeo_queue_info(ndev, txqueue))
 		return;
 
 	/* request the reset, and let the hclge to determine
@@ -3157,7 +3152,7 @@ static int hns3_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct hnae3_ae_dev *ae_dev;
 	int ret;
 
-	ae_dev = devm_kzalloc(&pdev->dev, sizeof(*ae_dev), GFP_KERNEL);
+	ae_dev = devm_kzalloc_obj(&pdev->dev, *ae_dev);
 	if (!ae_dev)
 		return -ENOMEM;
 
@@ -4596,7 +4591,7 @@ static int hns3_create_ring_chain(struct hns3_enet_tqp_vector *tqp_vector,
 	}
 
 	while (ring) {
-		chain = devm_kzalloc(&pdev->dev, sizeof(*chain), GFP_KERNEL);
+		chain = devm_kzalloc_obj(&pdev->dev, *chain);
 		if (!chain)
 			return -ENOMEM;
 		if (cur_chain)
@@ -4844,8 +4839,7 @@ static int hns3_nic_alloc_vector_data(struct hns3_nic_priv *priv)
 	/* Should consider 2p/4p later */
 	vector_num = min_t(u16, num_online_cpus(), tqp_num);
 
-	vector = devm_kcalloc(&pdev->dev, vector_num, sizeof(*vector),
-			      GFP_KERNEL);
+	vector = devm_kzalloc_objs(&pdev->dev, *vector, vector_num);
 	if (!vector)
 		return -ENOMEM;
 
@@ -4854,8 +4848,7 @@ static int hns3_nic_alloc_vector_data(struct hns3_nic_priv *priv)
 
 	priv->vector_num = vector_num;
 	priv->tqp_vector = (struct hns3_enet_tqp_vector *)
-		devm_kcalloc(&pdev->dev, vector_num, sizeof(*priv->tqp_vector),
-			     GFP_KERNEL);
+		devm_kzalloc_objs(&pdev->dev, *priv->tqp_vector, vector_num);
 	if (!priv->tqp_vector) {
 		ret = -ENOMEM;
 		goto out;
@@ -5051,8 +5044,8 @@ static int hns3_alloc_ring_memory(struct hns3_enet_ring *ring)
 	if (ring->desc_num <= 0 || ring->buf_size <= 0)
 		return -EINVAL;
 
-	ring->desc_cb = devm_kcalloc(ring_to_dev(ring), ring->desc_num,
-				     sizeof(ring->desc_cb[0]), GFP_KERNEL);
+	ring->desc_cb = devm_kzalloc_objs(ring_to_dev(ring), ring->desc_cb[0],
+					  ring->desc_num);
 	if (!ring->desc_cb) {
 		ret = -ENOMEM;
 		goto out;

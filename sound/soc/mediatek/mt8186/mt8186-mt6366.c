@@ -387,7 +387,7 @@ static int mt8186_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 
 	/* clean param mask first */
 	snd_mask_reset_range(hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT),
-			     0, (__force unsigned int)SNDRV_PCM_FORMAT_LAST);
+			     0, SNDRV_PCM_FORMAT_LAST);
 
 	params_set_format(params, fmt);
 
@@ -1214,7 +1214,7 @@ static int mt8186_mt6366_soc_card_probe(struct mtk_soc_card_data *soc_card_data,
 	struct device *dev = card->dev;
 	int i, ret;
 
-	mach_priv = devm_kzalloc(dev, sizeof(*mach_priv), GFP_KERNEL);
+	mach_priv = devm_kzalloc_obj(dev, *mach_priv);
 	if (!mach_priv)
 		return -ENOMEM;
 

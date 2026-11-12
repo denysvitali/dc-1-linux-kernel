@@ -13,6 +13,7 @@
 
 #include "resource.h"
 #include "include/irq_service_interface.h"
+#include "basics/conversion.h"
 
 #include "dcn42b_resource.h"
 #include "dcn20/dcn20_resource.h"
@@ -30,6 +31,7 @@
 #include "dcn42/dcn42_hubbub.h"
 #include "dcn401/dcn401_mpc.h"
 #include "dcn42/dcn42_mpc.h"
+#include "dcn42/dcn42_rmcm.h"
 #include "dcn35/dcn35_hubp.h"
 #include "dcn42/dcn42_hubp.h"
 #include "irq/dcn42/irq_service_dcn42.h"
@@ -87,7 +89,7 @@
 #include "dc_state_priv.h"
 #include "link_enc_cfg.h"
 
-#include "dml2_0/dml2_wrapper.h"
+#include "dml2_wrapper/dml2_wrapper.h"
 
 #define DC_LOGGER_INIT(logger)
 
@@ -133,6 +135,34 @@
 #define regHUBP3_HUBPREQ_DEBUG_DB_BASE_IDX    2
 #define regHUBP3_HUBPREQ_DEBUG                0x088d
 #define regHUBP3_HUBPREQ_DEBUG_BASE_IDX       2
+
+#define regDP_SYM32_ENC0_DP_SYM32_ENC_VID_CRC_CONTROL                                                   0x3687
+#define regDP_SYM32_ENC0_DP_SYM32_ENC_VID_CRC_CONTROL_BASE_IDX                                          2
+#define regDP_SYM32_ENC1_DP_SYM32_ENC_VID_CRC_CONTROL                                                   0x375b
+#define regDP_SYM32_ENC1_DP_SYM32_ENC_VID_CRC_CONTROL_BASE_IDX                                          2
+#define regDP_SYM32_ENC2_DP_SYM32_ENC_VID_CRC_CONTROL                                                   0x382f
+#define regDP_SYM32_ENC2_DP_SYM32_ENC_VID_CRC_CONTROL_BASE_IDX                                          2
+#define regDP_SYM32_ENC0_DP_SYM32_ENC_HBLANK_CONTROL                                                    0x366b
+#define regDP_SYM32_ENC0_DP_SYM32_ENC_HBLANK_CONTROL_BASE_IDX                                           2
+#define regDP_SYM32_ENC1_DP_SYM32_ENC_HBLANK_CONTROL                                                    0x373f
+#define regDP_SYM32_ENC1_DP_SYM32_ENC_HBLANK_CONTROL_BASE_IDX                                           2
+#define regDP_SYM32_ENC2_DP_SYM32_ENC_HBLANK_CONTROL                                                    0x3813
+#define regDP_SYM32_ENC2_DP_SYM32_ENC_HBLANK_CONTROL_BASE_IDX                                           2
+
+#define DP_SYM32_ENC0_DP_SYM32_ENC_VID_CRC_CONTROL__CRC_ENABLE__SHIFT                                         0x0
+#define DP_SYM32_ENC0_DP_SYM32_ENC_VID_CRC_CONTROL__CRC_CONT_MODE_ENABLE__SHIFT                               0x4
+#define DP_SYM32_ENC0_DP_SYM32_ENC_VID_CRC_CONTROL__CRC_ENABLE_MASK                                           0x00000001L
+#define DP_SYM32_ENC0_DP_SYM32_ENC_VID_CRC_CONTROL__CRC_CONT_MODE_ENABLE_MASK                                 0x00000010L
+#define DP_SYM32_ENC0_DP_SYM32_ENC_HBLANK_CONTROL__HBLANK_MINIMUM_SYMBOL_WIDTH__SHIFT                         0x0
+#define DP_SYM32_ENC0_DP_SYM32_ENC_HBLANK_CONTROL__HBLANK_MINIMUM_SYMBOL_WIDTH_MASK                           0x0000FFFFL
+
+
+#define DP_SYM32_ENC1_DP_SYM32_ENC_VID_CRC_CONTROL__CRC_ENABLE__SHIFT                                         0x0
+#define DP_SYM32_ENC1_DP_SYM32_ENC_VID_CRC_CONTROL__CRC_CONT_MODE_ENABLE__SHIFT                               0x4
+#define DP_SYM32_ENC1_DP_SYM32_ENC_VID_CRC_CONTROL__CRC_ENABLE_MASK                                           0x00000001L
+#define DP_SYM32_ENC1_DP_SYM32_ENC_VID_CRC_CONTROL__CRC_CONT_MODE_ENABLE_MASK                                 0x00000010L
+#define DP_SYM32_ENC1_DP_SYM32_ENC_HBLANK_CONTROL__HBLANK_MINIMUM_SYMBOL_WIDTH__SHIFT                         0x0
+#define DP_SYM32_ENC1_DP_SYM32_ENC_HBLANK_CONTROL__HBLANK_MINIMUM_SYMBOL_WIDTH_MASK                           0x0000FFFFL
 
 enum dcn401_clk_src_array_id {
 	DCN401_CLK_SRC_PLL0,
@@ -253,10 +283,10 @@ static struct bios_registers bios_regs;
 static struct dce110_clk_src_regs clk_src_regs[5];
 
 static const struct dce110_clk_src_shift cs_shift = {
-	CS_COMMON_MASK_SH_LIST_DCN3_2(__SHIFT)
+	CS_COMMON_MASK_SH_LIST_DCN4_0_1(__SHIFT)
 };
 static const struct dce110_clk_src_mask cs_mask = {
-	CS_COMMON_MASK_SH_LIST_DCN3_2(_MASK)
+	CS_COMMON_MASK_SH_LIST_DCN4_0_1(_MASK)
 };
 #define abm_regs_init(id) \
 	ABM_DCN42B_REG_LIST_RI(id)
@@ -351,15 +381,15 @@ static const struct dcn10_link_enc_mask le_mask = {
 	LINK_ENCODER_MASK_SH_LIST_DCN42B(_MASK)};
 
 #define hpo_dp_stream_encoder_reg_init(id) \
-	DCN42B_HPO_DP_STREAM_ENC_REG_LIST_RI(id)
+	DCN42_HPO_DP_STREAM_ENC_REG_LIST_RI(id)
 
 static struct dcn31_hpo_dp_stream_encoder_registers hpo_dp_stream_enc_regs[4];
 
 static const struct dcn31_hpo_dp_stream_encoder_shift hpo_dp_se_shift = {
-	DCN4_2B_HPO_DP_STREAM_ENC_MASK_SH_LIST(__SHIFT)};
+	DCN4_2_HPO_DP_STREAM_ENC_MASK_SH_LIST(__SHIFT)};
 
 static const struct dcn31_hpo_dp_stream_encoder_mask hpo_dp_se_mask = {
-	DCN4_2B_HPO_DP_STREAM_ENC_MASK_SH_LIST(_MASK)};
+	DCN4_2_HPO_DP_STREAM_ENC_MASK_SH_LIST(_MASK)};
 
 #define hpo_dp_link_encoder_reg_init(id) \
 	DCN42B_HPO_DP_LINK_ENC_REG_LIST_RI(id)
@@ -457,15 +487,25 @@ static struct dcn42_mpc_registers mpc_regs;
 		MPC_OUT_MUX_REG_LIST_DCN3_0_RI(1), \
 		MPC_OUT_MUX_REG_LIST_DCN3_0_RI(2), \
 		MPC_OUT_MUX_REG_LIST_DCN3_0_RI(3), \
-		MPC_DWB_MUX_REG_LIST_DCN3_0_RI(0), \
-		MPC_RMCM_REG_LIST_DCN42(0),		   \
-		MPC_RMCM_REG_LIST_DCN42(1)
+		MPC_DWB_MUX_REG_LIST_DCN3_0_RI(0)
 
 static const struct dcn42_mpc_shift mpc_shift = {
 	MPC_COMMON_MASK_SH_LIST_DCN42(__SHIFT)};
 
 static const struct dcn42_mpc_mask mpc_mask = {
 	MPC_COMMON_MASK_SH_LIST_DCN42(_MASK)};
+
+static struct dcn42_rmcm_registers rmcm_regs;
+
+#define dcn_rmcm_regs_init()               \
+	MPC_RMCM_REG_LIST_DCN42(0),            \
+		MPC_RMCM_REG_LIST_DCN42(1)
+
+static const struct dcn42_rmcm_shift rmcm_shift = {
+	MPC_RMCM_COMMON_MASK_SH_LIST_DCN42(__SHIFT)};
+
+static const struct dcn42_rmcm_mask rmcm_mask = {
+	MPC_RMCM_COMMON_MASK_SH_LIST_DCN42(_MASK)};
 
 #define optc_regs_init(id) \
 	OPTC_COMMON_REG_LIST_DCN42B_RI(id)
@@ -729,6 +769,7 @@ static const struct resource_caps res_cap_dcn42b = {
 	.num_ddc = 0,
 	.num_vmid = 16,
 	.num_mpc_3dlut = 2,
+	.num_rmcm = 2,
 	.num_dsc = 3,
 	.num_rmcm = 2,
 	.num_mpc = 4,
@@ -756,13 +797,18 @@ static const struct dc_plane_cap plane_cap = {
 	.min_height = 64};
 
 static const struct dc_debug_options debug_defaults_drv = {
+	.limit_ffe = 3,
 	.disable_dmcu = true,
 	.force_abm_enable = false,
 	.clock_trace = true,
 	.disable_pplib_clock_request = false,
-	.disable_dpp_power_gate = true,
-	.disable_hubp_power_gate = true,
+	.ignore_pg = false,
+	.disable_dpp_power_gate = false,
+	.disable_hubp_power_gate = false,
 	.disable_optc_power_gate = true,
+	.disable_dsc_power_gate = false,
+	.disable_dio_power_gate = true,
+	.disable_hpo_power_gate = true,
 	.pipe_split_policy = MPC_SPLIT_AVOID,
 	.force_single_disp_pipe_split = false,
 	.disable_dcc = DCC_ENABLE,
@@ -775,7 +821,7 @@ static const struct dc_debug_options debug_defaults_drv = {
 	.underflow_assert_delay_us = 0xFFFFFFFF,
 	.dwb_fi_phase = -1, // -1 = disable,
 	.dmub_command_table = true,
-	.pstate_enabled = false,
+	.pstate_enabled = true,
 	.enable_mem_low_power = {
 		.bits = {
 			.vga = false,
@@ -788,24 +834,25 @@ static const struct dc_debug_options debug_defaults_drv = {
 		}},
 	.root_clock_optimization = {
 		.bits = {
-			.dpp = false,
-			.dsc = false,/*dscclk and dsc pg*/
+			.dpp = true,
+			.dsc = true,/*dscclk and dsc pg*/
 			.hdmistream = false,
 			.hdmichar = false,
-			.dpstream = false,
-			.symclk32_se = false,
-			.symclk32_le = false,
-			.symclk_fe = false,
+			.dpstream = true,
+			.symclk32_se = true,
+			.symclk32_le = true,
+			.symclk_fe = true,
 			.physymclk = false,
 			.dpiasymclk = false,
 		}
 	},
 	.seamless_boot_odm_combine = DML_FAIL_SOURCE_PIXEL_FORMAT,
-	.enable_z9_disable_interface = false, /* Allow support for the PMFW interface for disable Z9*/
+	.enable_z9_disable_interface = true, /* Allow support for the PMFW interface for disable Z9*/
 	.minimum_z8_residency_time = 1, /* Always allow when other conditions are met */
 	.support_eDP1_5 = true,
 	.use_max_lb = true,
-	.force_disable_subvp = false,
+	/* SubVP phantom surfaces require MALL, which DCN42B does not have */
+	.force_disable_subvp = true,
 	.exit_idle_opt_for_cursor_updates = true,
 	.using_dml2 = true,
 	.using_dml21 = true,
@@ -823,8 +870,7 @@ static const struct dc_debug_options debug_defaults_drv = {
 	.disable_timeout = true,
 	.min_disp_clk_khz = 50000,
 	.static_screen_wait_frames = 2,
-	.disable_z10 = true,
-	.ignore_pg = true,
+	.disable_z10 = false,
 	.disable_stutter_for_wm_program = true,
 	.min_deep_sleep_dcfclk_khz = 8000,
 	.replay_skip_crtc_disabled = true,
@@ -840,7 +886,7 @@ static struct dce_aux *dcn42b_aux_engine_create(
 	uint32_t inst)
 {
 	struct aux_engine_dce110 *aux_engine =
-		kzalloc(sizeof(struct aux_engine_dce110), GFP_KERNEL);
+		kzalloc_obj(struct aux_engine_dce110);
 
 	if (!aux_engine)
 		return NULL;
@@ -910,7 +956,7 @@ static struct dce_i2c_hw *dcn42b_i2c_hw_create(
 	uint32_t inst)
 {
 	struct dce_i2c_hw *dce_i2c_hw =
-		kzalloc(sizeof(struct dce_i2c_hw), GFP_KERNEL);
+		kzalloc_obj(struct dce_i2c_hw);
 
 	if (!dce_i2c_hw)
 		return NULL;
@@ -938,7 +984,7 @@ static struct clock_source *dcn42b_clock_source_create(
 	bool dp_clk_src)
 {
 	struct dce110_clk_src *clk_src =
-		kzalloc(sizeof(struct dce110_clk_src), GFP_KERNEL);
+		kzalloc_obj(struct dce110_clk_src);
 
 	if (!clk_src)
 		return NULL;
@@ -958,8 +1004,7 @@ static struct hubbub *dcn42b_hubbub_create(struct dc_context *ctx)
 {
 	int i;
 
-	struct dcn20_hubbub *hubbub3 = kzalloc(sizeof(struct dcn20_hubbub),
-					  GFP_KERNEL);
+	struct dcn20_hubbub *hubbub3 = kzalloc_obj(struct dcn20_hubbub);
 
 	if (!hubbub3)
 		return NULL;
@@ -1012,7 +1057,7 @@ static struct hubp *dcn42b_hubp_create(
 	uint32_t inst)
 {
 	struct dcn20_hubp *hubp2 =
-		kzalloc(sizeof(struct dcn20_hubp), GFP_KERNEL);
+		kzalloc_obj(struct dcn20_hubp);
 
 	if (!hubp2)
 		return NULL;
@@ -1034,9 +1079,9 @@ static struct hubp *dcn42b_hubp_create(
 }
 static const struct dc_panel_config dcn42b_panel_config_defaults = {
 	.psr = {
-		.disable_psr = true,
+		.disable_psr = false,
 		.disallow_psrsu = true,
-		.disallow_replay = true,
+		.disallow_replay = false,
 	},
 	.ilr = {
 		.optimize_edp_link_rate = true,
@@ -1054,7 +1099,7 @@ static struct dpp *dcn42b_dpp_create(
 	uint32_t inst)
 {
 	struct dcn42_dpp *dpp42b =
-		kzalloc(sizeof(struct dcn42_dpp), GFP_KERNEL);
+		kzalloc_obj(struct dcn42_dpp);
 
 	if (!dpp42b)
 		return NULL;
@@ -1080,8 +1125,7 @@ static struct mpc *dcn42b_mpc_create(
 	int num_mpcc,
 	int num_rmu)
 {
-	struct dcn42_mpc *mpc42b = kzalloc(sizeof(struct dcn42_mpc),
-										GFP_KERNEL);
+	struct dcn42_mpc *mpc42b = kzalloc_obj(struct dcn42_mpc);
 
 	if (!mpc42b)
 		return NULL;
@@ -1100,11 +1144,34 @@ static struct mpc *dcn42b_mpc_create(
 	return &mpc42b->base;
 }
 
+static struct rmcm *dcn42b_rmcm_create(
+	struct dc_context *ctx,
+	int inst)
+{
+	struct dcn42_rmcm *rmcm42 = kzalloc_obj(struct dcn42_rmcm);
+
+	if (!rmcm42)
+		return NULL;
+
+#undef REG_STRUCT
+#define REG_STRUCT rmcm_regs
+	dcn_rmcm_regs_init();
+
+	dcn42_rmcm_construct(rmcm42,
+		ctx,
+		&rmcm_regs,
+		&rmcm_shift,
+		&rmcm_mask,
+		inst);
+
+	return &rmcm42->base;
+}
+
 static struct output_pixel_processor *dcn42b_opp_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn20_opp *opp4 =
-		kzalloc(sizeof(struct dcn20_opp), GFP_KERNEL);
+		kzalloc_obj(struct dcn20_opp);
 
 	if (!opp4) {
 		BREAK_TO_DEBUGGER();
@@ -1128,7 +1195,7 @@ static struct timing_generator *dcn42b_timing_generator_create(
 	uint32_t instance)
 {
 	struct optc *tgn10 =
-		kzalloc(sizeof(struct optc), GFP_KERNEL);
+		kzalloc_obj(struct optc);
 
 	if (!tgn10)
 		return NULL;
@@ -1166,7 +1233,7 @@ static struct link_encoder *dcn42b_link_encoder_create(
 	const struct encoder_init_data *enc_init_data)
 {
 	struct dcn20_link_encoder *enc20 =
-		kzalloc(sizeof(struct dcn20_link_encoder), GFP_KERNEL);
+		kzalloc_obj(struct dcn20_link_encoder);
 
 	if (!enc20 || enc_init_data->hpd_source >= ARRAY_SIZE(link_enc_hpd_regs))
 		return NULL;
@@ -1241,7 +1308,7 @@ static struct vpg *dcn42b_vpg_create(
 	struct dc_context *ctx,
 	uint32_t inst)
 {
-	struct dcn31_vpg *vpg4 = kzalloc(sizeof(struct dcn31_vpg), GFP_KERNEL);
+	struct dcn31_vpg *vpg4 = kzalloc_obj(struct dcn31_vpg);
 
 	if (!vpg4)
 		return NULL;
@@ -1270,7 +1337,7 @@ static struct apg *dcn42b_apg_create(
 	struct dc_context *ctx,
 	uint32_t inst)
 {
-	struct dcn31_apg *apg31 = kzalloc(sizeof(struct dcn31_apg), GFP_KERNEL);
+	struct dcn31_apg *apg31 = kzalloc_obj(struct dcn31_apg);
 
 	if (!apg31)
 		return NULL;
@@ -1314,7 +1381,7 @@ static struct stream_encoder *dcn42b_stream_encoder_create(
 	} else
 		return NULL;
 
-	enc1 = kzalloc(sizeof(struct dcn10_stream_encoder), GFP_KERNEL);
+	enc1 = kzalloc_obj(struct dcn10_stream_encoder);
 	vpg = dcn42b_vpg_create(ctx, vpg_inst);
 	apg = dcn42b_apg_create(ctx, apg_inst);
 
@@ -1374,7 +1441,7 @@ static struct hpo_dp_stream_encoder *dcn42b_hpo_dp_stream_encoder_create(
 	apg_inst = hpo_dp_inst + 6;
 
 	/* allocate HPO stream encoder and create VPG sub-block */
-	hpo_dp_enc31 = kzalloc(sizeof(struct dcn31_hpo_dp_stream_encoder), GFP_KERNEL);
+	hpo_dp_enc31 = kzalloc_obj(struct dcn31_hpo_dp_stream_encoder);
 	vpg = dcn42b_vpg_create(ctx, vpg_inst);
 	apg = dcn42b_apg_create(ctx, apg_inst);
 
@@ -1407,7 +1474,7 @@ static struct hpo_dp_link_encoder *dcn42b_hpo_dp_link_encoder_create(
 	struct dcn31_hpo_dp_link_encoder *hpo_dp_enc31;
 
 	/* allocate HPO link encoder */
-	hpo_dp_enc31 = kzalloc(sizeof(struct dcn31_hpo_dp_link_encoder), GFP_KERNEL);
+	hpo_dp_enc31 = kzalloc_obj(struct dcn31_hpo_dp_link_encoder);
 	if (!hpo_dp_enc31)
 		return NULL; /* out of memory */
 
@@ -1427,7 +1494,7 @@ static struct hpo_dp_link_encoder *dcn42b_hpo_dp_link_encoder_create(
 static struct dce_hwseq *dcn42b_hwseq_create(
 	struct dc_context *ctx)
 {
-	struct dce_hwseq *hws = kzalloc(sizeof(struct dce_hwseq), GFP_KERNEL);
+	struct dce_hwseq *hws = kzalloc_obj(struct dce_hwseq);
 
 #undef REG_STRUCT
 #define REG_STRUCT hwseq_reg
@@ -1507,6 +1574,12 @@ static void dcn42b_resource_destruct(struct dcn42b_resource_pool *pool)
 	if (pool->base.mpc != NULL) {
 		kfree(TO_DCN20_MPC(pool->base.mpc));
 		pool->base.mpc = NULL;
+	}
+	for (i = 0; i < MAX_RMCM_INST; i++) {
+		if (pool->base.rmcm[i] != NULL) {
+			kfree(TO_DCN42_RMCM(pool->base.rmcm[i]));
+			pool->base.rmcm[i] = NULL;
+		}
 	}
 	if (pool->base.hubbub != NULL) {
 		kfree(TO_DCN20_HUBBUB(pool->base.hubbub));
@@ -1686,8 +1759,7 @@ static bool dcn42b_dwbc_create(struct dc_context *ctx, struct resource_pool *poo
 	uint32_t dwb_count = pool->res_cap->num_dwb;
 
 	for (i = 0; i < dwb_count; i++) {
-		struct dcn30_dwbc *dwbc42 = kzalloc(sizeof(struct dcn30_dwbc),
-											GFP_KERNEL);
+		struct dcn30_dwbc *dwbc42 = kzalloc_obj(struct dcn30_dwbc);
 
 		if (!dwbc42) {
 			dm_error("DC: failed to create dwbc42!\n");
@@ -1723,8 +1795,7 @@ static bool dcn42b_mmhubbub_create(struct dc_context *ctx, struct resource_pool 
 	uint32_t pipe_count = pool->res_cap->num_dwb;
 
 	for (i = 0; i < pipe_count; i++) {
-		struct dcn30_mmhubbub *mcif_wb30 = kzalloc(sizeof(struct dcn30_mmhubbub),
-												   GFP_KERNEL);
+		struct dcn30_mmhubbub *mcif_wb30 = kzalloc_obj(struct dcn30_mmhubbub);
 
 		if (!mcif_wb30) {
 			dm_error("DC: failed to create mcif_wb30!\n");
@@ -1752,7 +1823,7 @@ static struct display_stream_compressor *dcn42b_dsc_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn401_dsc *dsc =
-		kzalloc(sizeof(struct dcn401_dsc), GFP_KERNEL);
+		kzalloc_obj(struct dcn401_dsc);
 
 	if (!dsc) {
 		BREAK_TO_DEBUGGER();
@@ -1842,10 +1913,10 @@ static struct link_encoder *dcn42b_link_enc_create_minimal(
 {
 	struct dcn20_link_encoder *enc20;
 
-	if ((unsigned int)(eng_id - ENGINE_ID_DIGA) > ctx->dc->res_pool->res_cap->num_dig_link_enc)
+	if ((unsigned int)(eng_id - ENGINE_ID_DIGA) >= ctx->dc->res_pool->res_cap->num_dig_link_enc)
 		return NULL;
 
-	enc20 = kzalloc(sizeof(struct dcn20_link_encoder), GFP_KERNEL);
+	enc20 = kzalloc_obj(struct dcn20_link_encoder);
 	if (!enc20)
 		return NULL;
 
@@ -1854,6 +1925,8 @@ static struct link_encoder *dcn42b_link_enc_create_minimal(
 			ctx,
 			&link_enc_feature,
 			&link_enc_regs[eng_id - ENGINE_ID_DIGA],
+			&le_shift,
+			&le_mask,
 			eng_id);
 
 	return &enc20->enc10.base;
@@ -1898,8 +1971,6 @@ static struct resource_funcs dcn42b_res_pool_funcs = {
 	.get_panel_config_defaults = dcn42b_get_panel_config_defaults,
 	//.get_preferred_eng_id_dpia = dcn42b_get_preferred_eng_id_dpia,
 	.update_soc_for_wm_a = dcn30_update_soc_for_wm_a,
-	.add_phantom_pipes = dcn32_add_phantom_pipes,
-	.calculate_mall_ways_from_bytes = dcn32_calculate_mall_ways_from_bytes,
 	.prepare_mcache_programming = dcn42b_prepare_mcache_programming,
 	.build_pipe_pix_clk_params = dcn42b_build_pipe_pix_clk_params,
 	.get_power_profile = dcn401_get_power_profile,
@@ -1965,27 +2036,7 @@ static bool dcn42b_resource_construct(
 	dc->caps.cursor_not_scaled = true;
 	dc->caps.min_horizontal_blanking_period = 80;
 	dc->caps.dmdata_alloc_size = 2048;
-	dc->caps.mall_size_per_mem_channel = 4;
-	/* total size = mall per channel * num channels * 1024 * 1024 */
-	dc->caps.mall_size_total = dc->caps.mall_size_per_mem_channel *
-		dc->ctx->dc_bios->vram_info.num_chans * 1048576;
 	dc->caps.cursor_cache_size = dc->caps.max_cursor_size * dc->caps.max_cursor_size * 8;
-	dc->caps.cache_line_size = 64;
-	dc->caps.cache_num_ways = 16;
-
-	/* Calculate the available MALL space */
-	dc->caps.max_cab_allocation_bytes =
-		dcn32_calc_num_avail_chans_for_mall(dc, dc->ctx->dc_bios->vram_info.num_chans) *
-				dc->caps.mall_size_per_mem_channel * 1024 * 1024;
-	dc->caps.mall_size_total = dc->caps.max_cab_allocation_bytes;
-
-	dc->caps.subvp_fw_processing_delay_us = 15;
-	dc->caps.subvp_drr_max_vblank_margin_us = 40;
-	dc->caps.subvp_prefetch_end_to_mall_start_us = 15;
-	dc->caps.subvp_swath_height_margin_lines = 16;
-	dc->caps.subvp_pstate_allow_width_us = 20;
-	dc->caps.subvp_vertical_int_margin_us = 30;
-	dc->caps.subvp_drr_vblank_start_margin_us = 100; // 100us margin
 
 	dc->caps.max_slave_planes = 2;
 	dc->caps.max_slave_yuv_planes = 2;
@@ -2002,11 +2053,10 @@ static bool dcn42b_resource_construct(
 	dc->caps.dmcub_support = true;
 	dc->caps.is_apu = true;
 	dc->caps.seamless_odm = true;
-	dc->caps.zstate_support = false;
-	dc->caps.ips_support = false;
+	dc->caps.zstate_support = true;
+	dc->caps.ips_support = true;
 	dc->caps.max_v_total = (1 << 15) - 1;
 	dc->caps.vtotal_limited_by_fp2 = true;
-	dc->config.disable_ips = DMUB_IPS_DISABLE_ALL;
 
 	/* Color pipeline capabilities */
 	dc->caps.color.dpp.dcn_arch = 1;
@@ -2066,6 +2116,7 @@ static bool dcn42b_resource_construct(
 	dc->caps.color.mpc.rmcm_3d_lut_caps.mem_format_support.float_fp1_5_10 = 1;
 	dc->caps.color.mpc.rmcm_3d_lut_caps.mem_pixel_order_support.order_rgba = 1;
 	dc->caps.color.mpc.rmcm_3d_lut_caps.mem_pixel_order_support.order_bgra = 1;
+	dc->caps.color.mpc.max_gamut_remap_coeff = dc_fixpt_from_fraction(S3D12_MAX, DIVIDER);
 
 	dc->caps.num_of_host_routers = 0;
 	dc->caps.num_of_dpias_per_host_router = 0;
@@ -2278,6 +2329,16 @@ static bool dcn42b_resource_construct(
 		goto create_fail;
 	}
 
+	/* RMCMs */
+	for (i = 0; i < pool->base.res_cap->num_rmcm && i < MAX_RMCM_INST; i++) {
+		pool->base.rmcm[i] = dcn42b_rmcm_create(ctx, i);
+		if (pool->base.rmcm[i] == NULL) {
+			BREAK_TO_DEBUGGER();
+			dm_error("DC: failed to create rmcm%d!\n", i);
+			goto create_fail;
+		}
+	}
+
 	/* DSCs */
 	for (i = 0; i < pool->base.res_cap->num_dsc; i++) {
 		pool->base.dscs[i] = dcn42b_dsc_create(ctx, i);
@@ -2355,9 +2416,7 @@ static bool dcn42b_resource_construct(
 	dc->dml2_options.dcn_pipe_count = pool->base.pipe_count;
 	 /*this will use real soc clock table*/
 	dc->dml2_options.use_native_soc_bb_construction = true;
-	dc->dml2_options.minimize_dispclk_using_odm = false;
-	if (dc->config.EnableMinDispClkODM)
-		dc->dml2_options.minimize_dispclk_using_odm = true;
+	dc->dml2_options.minimize_dispclk_using_odm = dc->config.EnableMinDispClkODM;
 	dc->dml2_options.enable_windowed_mpo_odm = dc->config.enable_windowed_mpo_odm;
 	dc->dml2_options.map_dc_pipes_with_callbacks = true;
 	dc->dml2_options.force_tdlut_enable = true;
@@ -2365,26 +2424,6 @@ static bool dcn42b_resource_construct(
 	resource_init_common_dml2_callbacks(dc, &dc->dml2_options);
 	dc->dml2_options.callbacks.can_support_mclk_switch_using_fw_based_vblank_stretch =
 			&dcn30_can_support_mclk_switch_using_fw_based_vblank_stretch;
-	dc->dml2_options.svp_pstate.callbacks.release_dsc = &dcn20_release_dsc;
-	dc->dml2_options.svp_pstate.callbacks.calculate_mall_ways_from_bytes =
-		pool->base.funcs->calculate_mall_ways_from_bytes;
-
-	dc->dml2_options.svp_pstate.subvp_fw_processing_delay_us = dc->caps.subvp_fw_processing_delay_us;
-	dc->dml2_options.svp_pstate.subvp_prefetch_end_to_mall_start_us = dc->caps.subvp_prefetch_end_to_mall_start_us;
-	dc->dml2_options.svp_pstate.subvp_pstate_allow_width_us = dc->caps.subvp_pstate_allow_width_us;
-	dc->dml2_options.svp_pstate.subvp_swath_height_margin_lines = dc->caps.subvp_swath_height_margin_lines;
-
-	dc->dml2_options.svp_pstate.force_disable_subvp = dc->debug.force_disable_subvp;
-	dc->dml2_options.svp_pstate.force_enable_subvp = dc->debug.force_subvp_mclk_switch;
-
-	dc->dml2_options.mall_cfg.cache_line_size_bytes = dc->caps.cache_line_size;
-	dc->dml2_options.mall_cfg.cache_num_ways = dc->caps.cache_num_ways;
-	dc->dml2_options.mall_cfg.max_cab_allocation_bytes =
-				dc->caps.max_cab_allocation_bytes;
-	dc->dml2_options.mall_cfg.mblk_height_4bpe_pixels = DCN3_2_MBLK_HEIGHT_4BPE;
-	dc->dml2_options.mall_cfg.mblk_height_8bpe_pixels = DCN3_2_MBLK_HEIGHT_8BPE;
-	dc->dml2_options.mall_cfg.mblk_size_bytes = DCN3_2_MALL_MBLK_SIZE_BYTES;
-	dc->dml2_options.mall_cfg.mblk_width_pixels = DCN3_2_MBLK_WIDTH;
 
 	dc->dml2_options.max_segments_per_hubp = 24;
 	dc->dml2_options.det_segment_size = DCN42_CRB_SEGMENT_SIZE_KB;
@@ -2393,6 +2432,8 @@ static bool dcn42b_resource_construct(
 
 	/* SPL */
 	dc->caps.scl_caps.sharpener_support = true;
+
+	dc->dml2_options.pmo.force_mandatory_uclk_pstate_support = true;
 
 	return true;
 
@@ -2407,7 +2448,7 @@ struct resource_pool *dcn42b_create_resource_pool(
 	struct dc *dc)
 {
 	struct dcn42b_resource_pool *pool =
-		kzalloc(sizeof(struct dcn42b_resource_pool), GFP_KERNEL);
+		kzalloc_obj(struct dcn42b_resource_pool);
 
 	if (!pool)
 		return NULL;

@@ -656,7 +656,7 @@ bool rdtgroup_pseudo_locked_in_hierarchy(struct rdt_ctrl_domain *d)
 	 * associated with them.
 	 */
 	for_each_alloc_capable_rdt_resource(r) {
-		list_for_each_entry(d_i, &r->ctrl_domains, hdr.list) {
+		list_for_each_entry_rcu(d_i, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
 			if (d_i->plr)
 				cpumask_or(cpu_with_psl, cpu_with_psl,
 					   &d_i->hdr.cpu_mask);
@@ -750,17 +750,10 @@ static ssize_t pseudo_lock_measure_trigger(struct file *file,
 					   size_t count, loff_t *ppos)
 {
 	struct rdtgroup *rdtgrp = file->private_data;
-	size_t buf_size;
-	char buf[32];
 	int ret;
 	int sel;
 
-	buf_size = min(count, (sizeof(buf) - 1));
-	if (copy_from_user(buf, user_buf, buf_size))
-		return -EFAULT;
-
-	buf[buf_size] = '\0';
-	ret = kstrtoint(buf, 10, &sel);
+	ret = kstrtoint_from_user(user_buf, count, 10, &sel);
 	if (ret == 0) {
 		if (sel != 1 && sel != 2 && sel != 3)
 			return -EINVAL;

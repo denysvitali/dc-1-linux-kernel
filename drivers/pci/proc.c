@@ -14,6 +14,8 @@
 #include <linux/capability.h>
 #include <linux/uaccess.h>
 #include <linux/security.h>
+#include <linux/panic.h>
+#include <linux/sched.h>
 #include <asm/byteorder.h>
 #include "pci.h"
 
@@ -39,12 +41,15 @@ static ssize_t proc_bus_pci_read(struct file *file, char __user *buf,
 	 * undefined locations (think of Intel PIIX4 as a typical example).
 	 */
 
-	if (capable(CAP_SYS_ADMIN))
+	if (file_ns_capable(file, &init_user_ns, CAP_SYS_ADMIN))
 		size = dev->cfg_size;
 	else if (dev->hdr_type == PCI_HEADER_TYPE_CARDBUS)
 		size = 128;
 	else
 		size = 64;
+
+	if (!nbytes)
+		return 0;
 
 	if (pos >= size)
 		return 0;
@@ -62,7 +67,7 @@ static ssize_t proc_bus_pci_read(struct file *file, char __user *buf,
 	if ((pos & 1) && cnt) {
 		unsigned char val;
 		pci_user_read_config_byte(dev, pos, &val);
-		__put_user(val, buf);
+		put_user(val, buf);
 		buf++;
 		pos++;
 		cnt--;
@@ -71,7 +76,7 @@ static ssize_t proc_bus_pci_read(struct file *file, char __user *buf,
 	if ((pos & 3) && cnt > 2) {
 		unsigned short val;
 		pci_user_read_config_word(dev, pos, &val);
-		__put_user(cpu_to_le16(val), (__le16 __user *) buf);
+		put_user(cpu_to_le16(val), (__le16 __user *) buf);
 		buf += 2;
 		pos += 2;
 		cnt -= 2;
@@ -80,7 +85,7 @@ static ssize_t proc_bus_pci_read(struct file *file, char __user *buf,
 	while (cnt >= 4) {
 		unsigned int val;
 		pci_user_read_config_dword(dev, pos, &val);
-		__put_user(cpu_to_le32(val), (__le32 __user *) buf);
+		put_user(cpu_to_le32(val), (__le32 __user *) buf);
 		buf += 4;
 		pos += 4;
 		cnt -= 4;
@@ -90,7 +95,7 @@ static ssize_t proc_bus_pci_read(struct file *file, char __user *buf,
 	if (cnt >= 2) {
 		unsigned short val;
 		pci_user_read_config_word(dev, pos, &val);
-		__put_user(cpu_to_le16(val), (__le16 __user *) buf);
+		put_user(cpu_to_le16(val), (__le16 __user *) buf);
 		buf += 2;
 		pos += 2;
 		cnt -= 2;
@@ -99,7 +104,7 @@ static ssize_t proc_bus_pci_read(struct file *file, char __user *buf,
 	if (cnt) {
 		unsigned char val;
 		pci_user_read_config_byte(dev, pos, &val);
-		__put_user(val, buf);
+		put_user(val, buf);
 		pos++;
 	}
 
@@ -122,6 +127,15 @@ static ssize_t proc_bus_pci_write(struct file *file, const char __user *buf,
 	if (ret)
 		return ret;
 
+	if (!nbytes)
+		return 0;
+
+	if (resource_is_exclusive(&dev->driver_exclusive_resource, pos, nbytes)) {
+		pci_warn_once(dev, "%s: Unexpected write to kernel-exclusive config offset %x",
+			      current->comm, pos);
+		add_taint(TAINT_USER, LOCKDEP_STILL_OK);
+	}
+
 	if (pos >= size)
 		return 0;
 	if (nbytes >= size)
@@ -137,7 +151,7 @@ static ssize_t proc_bus_pci_write(struct file *file, const char __user *buf,
 
 	if ((pos & 1) && cnt) {
 		unsigned char val;
-		__get_user(val, buf);
+		get_user(val, buf);
 		pci_user_write_config_byte(dev, pos, val);
 		buf++;
 		pos++;
@@ -146,7 +160,7 @@ static ssize_t proc_bus_pci_write(struct file *file, const char __user *buf,
 
 	if ((pos & 3) && cnt > 2) {
 		__le16 val;
-		__get_user(val, (__le16 __user *) buf);
+		get_user(val, (__le16 __user *) buf);
 		pci_user_write_config_word(dev, pos, le16_to_cpu(val));
 		buf += 2;
 		pos += 2;
@@ -155,7 +169,7 @@ static ssize_t proc_bus_pci_write(struct file *file, const char __user *buf,
 
 	while (cnt >= 4) {
 		__le32 val;
-		__get_user(val, (__le32 __user *) buf);
+		get_user(val, (__le32 __user *) buf);
 		pci_user_write_config_dword(dev, pos, le32_to_cpu(val));
 		buf += 4;
 		pos += 4;
@@ -164,7 +178,7 @@ static ssize_t proc_bus_pci_write(struct file *file, const char __user *buf,
 
 	if (cnt >= 2) {
 		__le16 val;
-		__get_user(val, (__le16 __user *) buf);
+		get_user(val, (__le16 __user *) buf);
 		pci_user_write_config_word(dev, pos, le16_to_cpu(val));
 		buf += 2;
 		pos += 2;
@@ -173,7 +187,7 @@ static ssize_t proc_bus_pci_write(struct file *file, const char __user *buf,
 
 	if (cnt) {
 		unsigned char val;
-		__get_user(val, buf);
+		get_user(val, buf);
 		pci_user_write_config_byte(dev, pos, val);
 		pos++;
 	}

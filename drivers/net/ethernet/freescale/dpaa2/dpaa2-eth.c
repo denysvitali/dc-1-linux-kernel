@@ -1403,10 +1403,10 @@ static netdev_tx_t __dpaa2_eth_tx(struct sk_buff *skb,
 	struct dpaa2_eth_fq *fq;
 	struct netdev_queue *nq;
 	struct dpaa2_fd *fd;
+	int err, i, num_tc;
 	u16 queue_mapping;
 	void *swa = NULL;
 	u8 prio = 0;
-	int err, i;
 	u32 fd_len;
 
 	percpu_stats = this_cpu_ptr(priv->percpu_stats);
@@ -1418,9 +1418,9 @@ static netdev_tx_t __dpaa2_eth_tx(struct sk_buff *skb,
 	/* We'll be holding a back-reference to the skb until Tx Confirmation;
 	 * we don't want that overwritten by a concurrent Tx with a cloned skb.
 	 */
-	skb = skb_unshare(skb, GFP_ATOMIC);
+	skb = skb_unclone_full(skb, GFP_ATOMIC);
 	if (unlikely(!skb)) {
-		/* skb_unshare() has already freed the skb */
+		/* skb_unclone_full() has already freed the skb */
 		percpu_stats->tx_dropped++;
 		return NETDEV_TX_OK;
 	}
@@ -1468,12 +1468,14 @@ static netdev_tx_t __dpaa2_eth_tx(struct sk_buff *skb,
 	 */
 	queue_mapping = skb_get_queue_mapping(skb);
 
-	if (net_dev->num_tc) {
+	num_tc = netdev_get_num_tc(net_dev);
+
+	if (num_tc) {
 		prio = netdev_txq_to_tc(net_dev, queue_mapping);
 		/* Hardware interprets priority level 0 as being the highest,
 		 * so we need to do a reverse mapping to the netdev tc index
 		 */
-		prio = net_dev->num_tc - prio - 1;
+		prio = num_tc - prio - 1;
 		/* We have only one FQ array entry for all Tx hardware queues
 		 * with the same flow id (but different priority levels)
 		 */
@@ -2913,7 +2915,7 @@ static int update_xps(struct dpaa2_eth_priv *priv)
 		return -ENOMEM;
 
 	num_queues = dpaa2_eth_queue_count(priv);
-	netdev_queues = (net_dev->num_tc ? : 1) * num_queues;
+	netdev_queues = (netdev_get_num_tc(net_dev) ? : 1) * num_queues;
 
 	/* The first <num_queues> entries in priv->fq array are Tx/Tx conf
 	 * queues, so only process those
@@ -2946,7 +2948,7 @@ static int dpaa2_eth_setup_mqprio(struct net_device *net_dev,
 	num_queues = dpaa2_eth_queue_count(priv);
 	num_tc = mqprio->num_tc;
 
-	if (num_tc == net_dev->num_tc)
+	if (num_tc == netdev_get_num_tc(net_dev))
 		return 0;
 
 	if (num_tc  > dpaa2_eth_tc_count(priv)) {
@@ -3864,9 +3866,8 @@ static int dpaa2_eth_setup_dpni(struct fsl_mc_device *ls_dev)
 	if (err && err != -EOPNOTSUPP)
 		goto close;
 
-	priv->cls_rules = devm_kcalloc(dev, dpaa2_eth_fs_count(priv),
-				       sizeof(struct dpaa2_eth_cls_rule),
-				       GFP_KERNEL);
+	priv->cls_rules = devm_kzalloc_objs(dev, struct dpaa2_eth_cls_rule,
+					    dpaa2_eth_fs_count(priv));
 	if (!priv->cls_rules) {
 		err = -ENOMEM;
 		goto close;
@@ -4769,6 +4770,8 @@ static irqreturn_t dpni_irq0_handler_thread(int irq_num, void *arg)
 			dpaa2_eth_disconnect_mac(priv);
 		else
 			dpaa2_eth_connect_mac(priv);
+
+		dpaa2_eth_dl_port_check(priv);
 	}
 
 	return IRQ_HANDLED;

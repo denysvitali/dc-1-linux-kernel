@@ -145,12 +145,6 @@ struct dcn_hubbub_reg_state {
 	uint32_t compbuf_ctrl;
 };
 
-struct hubbub_system_latencies {
-	uint32_t max_latency_ns;
-	uint32_t avg_latency_ns;
-	uint32_t min_latency_ns;
-};
-
 struct hubbub_urgent_latency_params {
 	uint32_t refclk_mhz;
 	uint32_t t_win_ns;
@@ -158,6 +152,12 @@ struct hubbub_urgent_latency_params {
 	uint32_t bw_factor_x1000;
 };
 
+struct hubbub;
+struct dchub_init_data;
+struct dc_dcc_surface_param;
+struct dc_surface_dcc_cap;
+union dcn_watermark_set;
+struct dml2_display_arb_regs;
 struct hubbub_funcs {
 	void (*update_dchub)(
 			struct hubbub *hubbub,
@@ -216,6 +216,8 @@ struct hubbub_funcs {
 
 	void (*apply_DEDCN21_147_wa)(struct hubbub *hubbub);
 
+	void (*soft_reset)(struct hubbub *hubbub, bool reset);
+
 	void (*force_wm_propagate_to_pipes)(struct hubbub *hubbub);
 
 	void (*hubbub_read_state)(struct hubbub *hubbub, struct dcn_hubbub_state *hubbub_state);
@@ -225,6 +227,8 @@ struct hubbub_funcs {
 	void (*init_watermarks)(struct hubbub *hubbub);
 
 	void (*hubbub_read_reg_state)(struct hubbub *hubbub, struct dcn_hubbub_reg_state *hubbub_reg_state);
+
+	void (*set_sdpif_port_control)(struct hubbub *hubbub, bool ignore_cstate_req);
 
 	/**
 	 * @program_det_size:
@@ -253,6 +257,7 @@ struct hubbub_funcs {
 	void (*wait_for_det_update)(struct hubbub *hubbub, int hubp_inst);
 	bool (*program_arbiter)(struct hubbub *hubbub, struct dml2_display_arb_regs *arb_regs, bool safe_to_lower);
 	void (*dchvm_init)(struct hubbub *hubbub);
+	void (*override_utm_client_qc_profile)(struct hubbub *hubbub, uint8_t qc_profile, int index);
 
 	/* Performance monitoring related functions */
 	struct hubbub_perfmon_funcs {
@@ -274,9 +279,11 @@ struct hubbub_funcs {
 				const struct hubbub_urgent_latency_params *params);
 		uint32_t (*get_urgent_ramp_latency_ns)(struct hubbub *hubbub,
 				uint32_t refclk_mhz);
-		void (*start_measuring_unbounded_bandwidth)(
+		void (*arm_measuring_out_of_order_bandwidth)(
 				struct hubbub *hubbub);
-		uint32_t (*get_unbounded_bandwidth_mbps)(struct hubbub *hubbub,
+		void (*start_measuring_out_of_order_bandwidth)(
+				struct hubbub *hubbub);
+		uint32_t (*get_out_of_order_bandwidth_mbps)(struct hubbub *hubbub,
 				uint32_t refclk_mhz, uint32_t *duration_ns);
 		void (*start_measuring_in_order_bandwidth)(
 				struct hubbub *hubbub);
@@ -298,6 +305,7 @@ struct hubbub_funcs {
 struct hubbub {
 	const struct hubbub_funcs *funcs;
 	struct dc_context *ctx;
+	int inst;
 	bool riommu_active;
 };
 

@@ -156,7 +156,7 @@ static int octep_request_irqs(struct octep_hw *oct_hw, irqreturn_t (*irq_handler
 	else
 		return 0;
 
-	oct_hw->irqs = devm_kcalloc(&pdev->dev, nb_irqs, sizeof(int), GFP_KERNEL);
+	oct_hw->irqs = devm_kzalloc_objs(&pdev->dev, int, nb_irqs);
 	if (!oct_hw->irqs)
 		return -ENOMEM;
 
@@ -170,10 +170,8 @@ static int octep_request_irqs(struct octep_hw *oct_hw, irqreturn_t (*irq_handler
 		irq = pci_irq_vector(pdev, idx);
 		ret = devm_request_irq(&pdev->dev, irq, irq_handler, 0, dev_name(&pdev->dev),
 				       oct_hw);
-		if (ret) {
-			dev_err(&pdev->dev, "Failed to register interrupt handler\n");
+		if (ret)
 			goto free_irqs;
-		}
 		oct_hw->irqs[idx] = irq;
 	}
 	oct_hw->requested_irqs = nb_irqs;
@@ -602,6 +600,8 @@ static int octep_vdpa_dev_add(struct vdpa_mgmt_dev *mdev, const char *name,
 		ret = dev_set_name(&vdpa_dev->dev, "%s", name);
 	else
 		ret = dev_set_name(&vdpa_dev->dev, "vdpa%u", vdpa_dev->index);
+	if (ret)
+		goto vdpa_dev_put;
 
 	ret = _vdpa_register_device(&oct_vdpa->vdpa, oct_hw->nr_vring);
 	if (ret) {
@@ -770,7 +770,7 @@ static int octep_vdpa_probe_vf(struct pci_dev *pdev)
 	}
 	pci_set_master(pdev);
 
-	mgmt_dev = devm_kzalloc(dev, sizeof(struct octep_vdpa_mgmt_dev), GFP_KERNEL);
+	mgmt_dev = devm_kzalloc_obj(dev, struct octep_vdpa_mgmt_dev);
 	if (!mgmt_dev)
 		return -ENOMEM;
 
@@ -935,7 +935,7 @@ static int octep_vdpa_probe_pf(struct pci_dev *pdev)
 		dev_err(dev, "No usable DMA configuration\n");
 		goto disable_pci;
 	}
-	octpf = devm_kzalloc(dev, sizeof(*octpf), GFP_KERNEL);
+	octpf = devm_kzalloc_obj(dev, *octpf);
 	if (!octpf) {
 		ret = -ENOMEM;
 		goto disable_pci;
@@ -979,6 +979,7 @@ static struct pci_device_id octep_pci_vdpa_map[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, OCTEP_VDPA_DEVID_CN103K_VF) },
 	{ 0 },
 };
+MODULE_DEVICE_TABLE(pci, octep_pci_vdpa_map);
 
 static struct pci_driver octep_pci_vdpa = {
 	.name     = OCTEP_VDPA_DRIVER_NAME,

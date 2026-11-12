@@ -156,7 +156,41 @@ typedef enum _SOC24_FIRMWARE_ID_ {
     SOC24_FIRMWARE_ID_SRIOV_CSA_SDMA              = 40,
     SOC24_FIRMWARE_ID_SRIOV_CSA_CP                = 41,
     SOC24_FIRMWARE_ID_UMF_ZONE_PAD                = 42,
-    SOC24_FIRMWARE_ID_MAX                         = 43
+    SOC24_FIRMWARE_ID_SE_F32_IRAM                 = 43,
+    SOC24_FIRMWARE_ID_SE_XT_IRAM                  = 44,
+    SOC24_FIRMWARE_ID_SE_XT_DRAM                  = 45,
+    SOC24_FIRMWARE_ID_RS64_MEC_P4_STACK           = 46,
+    SOC24_FIRMWARE_ID_RS64_MEC_P5_STACK           = 47,
+    SOC24_FIRMWARE_ID_RS64_MEC_P6_STACK           = 48,
+    SOC24_FIRMWARE_ID_RS64_MEC_P7_STACK           = 49,
+    SOC24_FIRMWARE_ID_CP_F32_PFP_G0_A             = 50,
+    SOC24_FIRMWARE_ID_CP_F32_PFP_G1_A             = 51,
+    SOC24_FIRMWARE_ID_CP_F32_PFP_G2               = 52,
+    SOC24_FIRMWARE_ID_CP_F32_ME_G0_A              = 53,
+    SOC24_FIRMWARE_ID_CP_F32_ME_G1_A              = 54,
+    SOC24_FIRMWARE_ID_CP_F32_ME_G2                = 55,
+    SOC24_FIRMWARE_ID_CP_F32_CE_G0_A              = 56,
+    SOC24_FIRMWARE_ID_CP_F32_CE_G1_A              = 57,
+    SOC24_FIRMWARE_ID_CP_F32_CE_G2                = 58,
+    SOC24_FIRMWARE_ID_CP_F32_MEC2_G0              = 59,
+    SOC24_FIRMWARE_ID_CP_F32_MEC2_G1              = 60,
+    SOC24_FIRMWARE_ID_CP_F32_MEC2_G2              = 61,
+    SOC24_FIRMWARE_ID_GFXOFF_CSA_SDMA0            = 62,
+    SOC24_FIRMWARE_ID_GFXOFF_CSA_SDMA1            = 63,
+    SOC24_FIRMWARE_ID_GFXOFF_CSA_SDMA2            = 64,
+    SOC24_FIRMWARE_ID_GFXOFF_CSA_SDMA3            = 65,
+    SOC24_FIRMWARE_ID_RLX6_SCRATCH_SR             = 66,
+    SOC24_FIRMWARE_ID_RLX6_SCRATCH_SR_CORE1       = 67,
+    SOC24_FIRMWARE_ID_CP_F32_PFP_G0_B             = 68,
+    SOC24_FIRMWARE_ID_CP_F32_PFP_G1_B             = 69,
+    SOC24_FIRMWARE_ID_CP_F32_ME_G0_B              = 70,
+    SOC24_FIRMWARE_ID_CP_F32_ME_G1_B              = 71,
+    SOC24_FIRMWARE_ID_CP_F32_CE_G0_B              = 72,
+    SOC24_FIRMWARE_ID_CP_F32_CE_G1_B              = 73,
+    SOC24_FIRMWARE_ID_CP_F32_MEC2_JT_G0           = 74,
+    SOC24_FIRMWARE_ID_CP_F32_MEC2_JT_G1           = 75,
+    SOC24_FIRMWARE_ID_CP_F32_MEC2_JT_G2           = 76,
+    SOC24_FIRMWARE_ID_MAX                         = 77
 } SOC24_FIRMWARE_ID;
 
 typedef struct _RLC_TABLE_OF_CONTENT {
@@ -262,6 +296,11 @@ struct amdgpu_rlc_funcs {
 	bool (*is_rlcg_access_range)(struct amdgpu_device *adev, uint32_t reg);
 };
 
+struct amdgpu_rlc_reg_funcs {
+	u32  (*rreg32)(struct amdgpu_device *adev, u32 reg, u32 acc_flags, u32 hwip, u32 xcc_id);
+	void (*wreg32)(struct amdgpu_device *adev, u32 reg, u32 val, u32 acc_flags, u32 hwip, u32 xcc_id);
+};
+
 struct amdgpu_rlcg_reg_access_ctrl {
 	uint32_t scratch_reg0;
 	uint32_t scratch_reg1;
@@ -303,6 +342,7 @@ struct amdgpu_rlc {
 	/* safe mode for updating CG/PG state */
 	bool in_safe_mode[AMDGPU_MAX_RLC_INSTANCES];
 	const struct amdgpu_rlc_funcs *funcs;
+	const struct amdgpu_rlc_reg_funcs *reg_funcs;
 
 	/* for firmware data */
 	u32 save_and_restore_offset;
@@ -374,4 +414,8 @@ void amdgpu_gfx_rlc_fini(struct amdgpu_device *adev);
 int amdgpu_gfx_rlc_init_microcode(struct amdgpu_device *adev,
 				  uint16_t version_major,
 				  uint16_t version_minor);
+
+void amdgpu_early_init_rlc_reg_funcs(struct amdgpu_device *adev);
+void amdgpu_init_rlc_reg_funcs(struct amdgpu_device *adev);
+
 #endif

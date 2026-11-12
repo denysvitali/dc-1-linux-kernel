@@ -168,8 +168,8 @@ static struct page *hfs_bmap_get_map_page(struct hfs_bnode *node,
 	}
 
 	ctx->len = hfs_brec_lenoff(node, rec_idx, &off16);
-	if (!ctx->len)
-		return ERR_PTR(-ENOENT);
+	if (hfs_brec_len_invalid(node, ctx->len))
+		return ERR_PTR(-EINVAL);
 
 	if (!is_bnode_offset_valid(node, off16))
 		return ERR_PTR(-EIO);
@@ -417,16 +417,19 @@ void hfs_btree_close(struct hfs_btree *tree)
 		return;
 
 	for (i = 0; i < NODE_HASH_SIZE; i++) {
+		spin_lock(&tree->hash_lock);
 		while ((node = tree->node_hash[i])) {
-			tree->node_hash[i] = node->next_hash;
+			hfs_bnode_unhash(node);
+			spin_unlock(&tree->hash_lock);
 			if (atomic_read(&node->refcnt))
 				pr_crit("node %d:%d "
 						"still has %d user(s)!\n",
 					node->tree->cnid, node->this,
 					atomic_read(&node->refcnt));
 			hfs_bnode_free(node);
-			tree->node_hash_cnt--;
+			spin_lock(&tree->hash_lock);
 		}
+		spin_unlock(&tree->hash_lock);
 	}
 	iput(tree->inode);
 	kfree(tree);
@@ -622,6 +625,12 @@ void hfs_bmap_free(struct hfs_bnode *node)
 	if (IS_ERR(node))
 		return;
 	len = hfs_brec_lenoff(node, 2, &off);
+	if (hfs_brec_len_invalid(node, len)) {
+		pr_err("invalid bmap record length: node %u, len %u\n",
+		       node->this, len);
+		hfs_bnode_put(node);
+		return;
+	}
 	while (nidx >= len * 8) {
 		u32 i;
 
@@ -648,6 +657,12 @@ void hfs_bmap_free(struct hfs_bnode *node)
 			return;
 		}
 		len = hfs_brec_lenoff(node, 0, &off);
+		if (hfs_brec_len_invalid(node, len)) {
+			pr_err("invalid bmap record length: node %u, len %u\n",
+			       node->this, len);
+			hfs_bnode_put(node);
+			return;
+		}
 	}
 
 	res = hfs_bmap_clear_bit(node, nidx);

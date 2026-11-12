@@ -555,7 +555,7 @@ static u32 sdhci_arasan_cqhci_irq(struct sdhci_host *host, u32 intmask)
 	if (!sdhci_cqe_irq(host, intmask, &cmd_error, &data_error))
 		return intmask;
 
-	cqhci_irq(host->mmc, intmask, cmd_error, data_error);
+	cqhci_irq(host->mmc, cmd_error, data_error);
 
 	return 0;
 }
@@ -1552,8 +1552,8 @@ sdhci_arasan_register_sdcardclk(struct sdhci_arasan_data *sdhci_arasan,
 				struct device *dev)
 {
 	struct sdhci_arasan_clk_data *clk_data = &sdhci_arasan->clk_data;
+	struct clk_init_data sdcardclk_init = {};
 	struct device_node *np = dev->of_node;
-	struct clk_init_data sdcardclk_init;
 	const char *parent_clk_name;
 	int ret;
 
@@ -1604,8 +1604,8 @@ sdhci_arasan_register_sampleclk(struct sdhci_arasan_data *sdhci_arasan,
 				struct device *dev)
 {
 	struct sdhci_arasan_clk_data *clk_data = &sdhci_arasan->clk_data;
+	struct clk_init_data sampleclk_init = {};
 	struct device_node *np = dev->of_node;
-	struct clk_init_data sampleclk_init;
 	const char *parent_clk_name;
 	int ret;
 
@@ -1811,8 +1811,7 @@ static int sdhci_arasan_add_host(struct sdhci_arasan_data *sdhci_arasan)
 	if (ret)
 		return ret;
 
-	cq_host = devm_kzalloc(host->mmc->parent,
-			       sizeof(*cq_host), GFP_KERNEL);
+	cq_host = devm_kzalloc_obj(host->mmc->parent, *cq_host);
 	if (!cq_host) {
 		ret = -ENOMEM;
 		goto cleanup;

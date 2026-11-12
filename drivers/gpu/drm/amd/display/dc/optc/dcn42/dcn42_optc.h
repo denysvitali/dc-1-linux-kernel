@@ -137,7 +137,9 @@
 	SF(OTG0_OTG_GSL_CONTROL, OTG_GSL_CHECK_ALL_FIELDS, mask_sh),\
 	SF(OTG0_OTG_CRC_CNTL, OTG_CRC_CONT_EN, mask_sh),\
 	SF(OTG0_OTG_CRC_CNTL, OTG_CRC0_SELECT, mask_sh),\
+	SF(OTG0_OTG_CRC_CNTL, OTG_CRC1_SELECT, mask_sh),\
 	SF(OTG0_OTG_CRC_CNTL, OTG_CRC_EN, mask_sh),\
+	SF(OTG0_OTG_CRC_CNTL, OTG_CRC1_EN, mask_sh),\
 	SF(OTG0_OTG_CRC0_DATA_R, CRC0_R_CR, mask_sh),\
 	SF(OTG0_OTG_CRC0_DATA_G, CRC0_G_Y, mask_sh),\
 	SF(OTG0_OTG_CRC0_DATA_B, CRC0_B_CB, mask_sh),\
@@ -315,7 +317,9 @@
 	SF(OTG0_OTG_GSL_CONTROL, OTG_GSL_CHECK_ALL_FIELDS, mask_sh),\
 	SF(OTG0_OTG_CRC_CNTL, OTG_CRC_CONT_EN, mask_sh),\
 	SF(OTG0_OTG_CRC_CNTL, OTG_CRC0_SELECT, mask_sh),\
+	SF(OTG0_OTG_CRC_CNTL, OTG_CRC1_SELECT, mask_sh),\
 	SF(OTG0_OTG_CRC_CNTL, OTG_CRC_EN, mask_sh),\
+	SF(OTG0_OTG_CRC_CNTL, OTG_CRC1_EN, mask_sh),\
 	SF(OTG0_OTG_CRC0_DATA_R, CRC0_R_CR, mask_sh),\
 	SF(OTG0_OTG_CRC0_DATA_G, CRC0_G_Y, mask_sh),\
 	SF(OTG0_OTG_CRC0_DATA_B, CRC0_B_CB, mask_sh),\
@@ -395,4 +399,6 @@ void optc42_clear_optc_underflow(struct timing_generator *optc);
 bool optc42_is_optc_underflow_occurred(struct timing_generator *optc);
 bool optc42_disable_crtc(struct timing_generator *optc);
 void optc42_lock_doublebuffer_enable(struct timing_generator *optc);
+bool optc42_get_crc(struct timing_generator *optc, uint8_t idx,
+	uint32_t *r_cr, uint32_t *g_y, uint32_t *b_cb);
 #endif /* __DC_OPTC_DCN42_H__ */

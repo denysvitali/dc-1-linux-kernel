@@ -32,8 +32,10 @@
 #include "inc/hw/link_encoder.h"
 #include "inc/core_status.h"
 #include "inc/hw/hw_shared.h"
+#include "inc/hw/dchubbub.h"
 #include "dsc/dsc.h"
 #include "link_service_types.h"
+#include "dmub/inc/dmub_cmd.h"
 
 struct pipe_ctx;
 struct dc_state;
@@ -45,6 +47,7 @@ struct resource_pool;
 struct dc_phy_addr_space_config;
 struct dc_virtual_addr_space_config;
 struct dpp;
+struct rmcm;
 struct dce_hwseq;
 struct link_resource;
 struct dc_dmub_cmd;
@@ -52,24 +55,26 @@ struct pg_block_update;
 struct drr_params;
 struct dc_underflow_debug_data;
 struct dsc_optc_config;
+struct dscl_prog_data;
 struct vm_system_aperture_param;
-struct dc_measured_memory_qos;
 struct stream_encoder;
 struct hpo_dp_stream_encoder;
 struct hpo_frl_stream_encoder;
 struct link_training_settings;
 struct dc_link;
 struct dc_crtc_timing;
-struct subvp_pipe_control_lock_fast_params {
+
+struct tg_lock_params {
 	struct dc *dc;
+	struct timing_generator *tg;
 	bool lock;
-	bool subvp_immediate_flip;
+	bool use_dmub_inbox1;
+	bool triplebuffer_flips;
 };
 
-struct pipe_control_lock_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
-	bool lock;
+struct tg_3dlut_wa_unlock_params {
+	struct timing_generator *tg;
+	struct hubp *hubp;
 };
 
 struct set_flip_control_gsl_params {
@@ -78,24 +83,38 @@ struct set_flip_control_gsl_params {
 };
 
 struct program_triplebuffer_params {
-	const struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct hubp *hubp;
 	bool enableTripleBuffer;
 };
 
 struct update_plane_addr_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct hubp *hubp;
+	struct dc_plane_address address;
+	bool flip_immediate;
+	bool dcc;
 };
 
 struct set_input_transfer_func_params {
 	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct dpp *dpp;
+	struct hubp *hubp;
+	struct hubp *primary_hubp;
+	struct mpc *mpc;
+	struct rmcm *rmcm;
+	int mpcc_id;
+	struct dc_stream_state *stream;
+	struct input_pixel_processor *ipp;
 	struct dc_plane_state *plane_state;
 };
 
 struct program_gamut_remap_params {
-	struct pipe_ctx *pipe_ctx;
+	struct transform *xfm;
+	struct dpp *dpp;
+	struct mpc *mpc;
+	int mpcc_id;
+	const struct dc_stream_state *stream;
+	const struct dc_plane_state *plane;
+	bool is_top_pipe;
 };
 
 struct hubp_enable_3dlut_fl_params {
@@ -114,7 +133,7 @@ struct update_info_frame_params {
 };
 
 struct program_manual_trigger_params {
-	struct pipe_ctx *pipe_ctx;
+	struct timing_generator *tg;
 };
 
 struct send_dmcub_cmd_params {
@@ -123,23 +142,42 @@ struct send_dmcub_cmd_params {
 	enum dm_dmub_wait_type wait_type;
 };
 
+struct lsdma_send_pio_copy_params {
+	struct dc_dmub_srv *dc_dmub_srv;
+	uint64_t src_addr;
+	uint64_t dst_addr;
+	uint32_t byte_count;
+	uint32_t overlap_disable;
+};
+
 struct setup_dpp_params {
-	struct pipe_ctx *pipe_ctx;
+	struct dpp *dpp;
+	enum surface_pixel_format format;
+	struct dc_csc_transform input_csc_color_matrix;
+	enum dc_color_space color_space;
 };
 
 struct program_bias_and_scale_params {
-	struct pipe_ctx *pipe_ctx;
+	struct dpp *dpp;
+	struct dc_bias_and_scale bias_and_scale;
 };
 
 struct set_output_transfer_func_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct transform *xfm;
+	struct dpp *dpp;
+	struct mpc *mpc;
+	int mpcc_id;
+	bool is_top_pipe;
 	const struct dc_stream_state *stream;
+};
+struct program_upsp_params {
+	struct dpp *dpp;
+	const struct dscl_prog_data *dscl_prog_data;
 };
 
 struct update_visual_confirm_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct mpc *mpc;
+	struct tg_color *color;
 	int mpcc_id;
 };
 
@@ -170,14 +208,12 @@ struct subvp_save_surf_addr {
 };
 
 struct wait_for_dcc_meta_propagation_params {
-	const struct dc *dc;
-	const struct pipe_ctx *top_pipe_to_program;
+	uint32_t delay;
 };
 
 struct dmub_hw_control_lock_fast_params {
-	struct dc *dc;
-	bool is_required;
-	bool lock;
+	struct dc_dmub_srv *dmub_srv;
+	union dmub_inbox0_cmd_lock_hw command;
 };
 
 struct program_surface_config_params {
@@ -209,16 +245,6 @@ struct program_cursor_update_now_params {
 
 struct hubp_wait_pipe_read_start_params {
 	struct hubp *hubp;
-};
-
-struct apply_update_flags_for_phantom_params {
-	struct pipe_ctx *pipe_ctx;
-};
-
-struct update_phantom_vp_position_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
-	struct dc_state *context;
 };
 
 struct set_odm_combine_params {
@@ -253,8 +279,6 @@ struct dccg_set_dto_dscclk_params {
 
 struct dsc_set_config_params {
 	struct display_stream_compressor *dsc;
-	struct dsc_config *dsc_cfg;
-	struct dsc_optc_config *dsc_optc_cfg;
 };
 
 struct dsc_enable_params {
@@ -264,8 +288,9 @@ struct dsc_enable_params {
 
 struct tg_set_dsc_config_params {
 	struct timing_generator *tg;
-	struct dsc_optc_config *dsc_optc_cfg;
-	bool enable;
+	enum optc_dsc_mode dsc_mode;
+	uint32_t bytes_per_pixel;
+	uint32_t slice_width;
 };
 
 struct dsc_disconnect_params {
@@ -277,15 +302,9 @@ struct dsc_read_state_params {
 	struct dcn_dsc_state *dsc_state;
 };
 
-struct dsc_calculate_and_set_config_params {
-	struct pipe_ctx *pipe_ctx;
-	struct dsc_optc_config dsc_optc_cfg;
-	bool enable;
-	int opp_cnt;
-};
-
 struct dsc_enable_with_opp_params {
-	struct pipe_ctx *pipe_ctx;
+	struct display_stream_compressor *dsc;
+	int opp_inst;
 };
 
 struct program_tg_params {
@@ -323,6 +342,17 @@ struct tg_set_gsl_source_select_params {
 	struct timing_generator *tg;
 	int group_idx;
 	uint32_t gsl_ready_signal;
+};
+
+struct pipe_control_lock_params {
+	bool lock;
+	struct hubp *hubps_to_wait_for_flip[MAX_PIPES];
+	bool gsl_lock;
+	struct tg_set_gsl_params gsl;
+	struct tg_set_gsl_source_select_params gsl_source_select;
+	struct tg_lock_params tg_lock;
+	bool tg_3dlut_wa_unlock;
+	struct tg_3dlut_wa_unlock_params tg_3dlut_wa_unlock_params;
 };
 
 struct setup_vupdate_interrupt_params {
@@ -373,8 +403,7 @@ struct opp_program_fmt_params {
 
 struct opp_program_bit_depth_reduction_params {
 	struct output_pixel_processor *opp;
-	bool use_default_params;
-	struct pipe_ctx *pipe_ctx;
+	struct bit_depth_reduction_params bit_depth_params;
 };
 
 struct opp_set_disp_pattern_generator_params {
@@ -387,6 +416,7 @@ struct opp_set_disp_pattern_generator_params {
 	int width;
 	int height;
 	int offset;
+	bool disable_dyn_exp_for_test_pattern;
 };
 
 struct set_abm_pipe_params {
@@ -443,12 +473,6 @@ struct mpc_remove_mpcc_params {
 	struct mpcc *mpcc_to_remove;
 };
 
-struct opp_set_mpcc_disconnect_pending_params {
-	struct output_pixel_processor *opp;
-	int mpcc_inst;
-	bool pending;
-};
-
 struct dc_set_optimized_required_params {
 	struct dc *dc;
 	bool optimized_required;
@@ -461,7 +485,7 @@ struct hubp_disconnect_params {
 struct hubbub_force_pstate_change_control_params {
 	struct hubbub *hubbub;
 	bool enable;
-	bool wait;
+	bool allow;
 };
 
 struct tg_enable_crtc_params {
@@ -470,7 +494,6 @@ struct tg_enable_crtc_params {
 
 struct hubp_wait_flip_pending_params {
 	struct hubp *hubp;
-	unsigned int timeout_us;
 	unsigned int polling_interval_us;
 };
 
@@ -487,17 +510,6 @@ struct update_force_pstate_params {
 
 struct hubbub_apply_dedcn21_147_wa_params {
 	struct hubbub *hubbub;
-};
-
-struct hubbub_allow_self_refresh_control_params {
-	struct hubbub *hubbub;
-	bool allow;
-	bool *disallow_self_refresh_applied;
-};
-
-struct tg_get_frame_count_params {
-	struct timing_generator *tg;
-	unsigned int *frame_count;
 };
 
 struct mpc_set_dwb_mux_params {
@@ -567,8 +579,78 @@ struct hubp_disable_control_params {
 
 struct hubbub_soft_reset_params {
 	struct hubbub *hubbub;
-	void (*hubbub_soft_reset)(struct hubbub *hubbub, bool reset);
 	bool reset;
+};
+
+struct hubbub_perfmon_reset_params {
+	struct hubbub *hubbub;
+};
+
+struct hubbub_perfmon_arm_out_of_order_bw_params {
+	struct hubbub *hubbub;
+};
+
+struct hubbub_perfmon_start_out_of_order_bw_params {
+	struct hubbub *hubbub;
+};
+
+struct hubbub_perfmon_start_in_order_bw_params {
+	struct hubbub *hubbub;
+};
+
+struct hubbub_perfmon_start_memory_latencies_params {
+	struct hubbub *hubbub;
+};
+
+struct hubbub_perfmon_start_urgent_assertion_count_params {
+	struct hubbub *hubbub;
+};
+
+struct hubbub_perfmon_start_urgent_ramp_latency_params {
+	struct hubbub *hubbub;
+	struct hubbub_urgent_latency_params latency_params;
+};
+
+struct hubbub_perfmon_start_prefetch_data_size_params {
+	struct hubbub *hubbub;
+};
+
+struct hubbub_perfmon_get_out_of_order_bw_params {
+	struct hubbub *hubbub;
+	uint32_t       refclk_mhz;
+	uint32_t      *bandwidth_mbps;
+	uint32_t      *duration_ns;
+};
+
+struct hubbub_perfmon_get_in_order_bw_params {
+	struct hubbub *hubbub;
+	uint32_t       refclk_mhz;
+	uint32_t       min_duration_ns;
+	uint32_t      *bandwidth_mbps;
+	uint32_t      *duration_ns;
+};
+
+struct hubbub_perfmon_get_memory_latencies_params {
+	struct hubbub                        *hubbub;
+	uint32_t                              refclk_mhz;
+	struct dc_probe_latencies            *result;
+};
+
+struct hubbub_perfmon_get_urgent_assertion_count_params {
+	struct hubbub *hubbub;
+	uint32_t       refclk_mhz;
+	uint32_t      *assertion_count;
+};
+
+struct hubbub_perfmon_get_prefetch_data_size_params {
+	struct hubbub *hubbub;
+	uint32_t      *prefetch_data_size;
+};
+
+struct hubbub_perfmon_get_urgent_ramp_latency_params {
+	struct hubbub *hubbub;
+	uint32_t       refclk_mhz;
+	uint32_t      *latency_ns;
 };
 
 struct hubp_clk_cntl_params {
@@ -724,11 +806,6 @@ struct hubp_program_mcache_id_and_split_coordinate_params {
 	struct mcache_regs_struct *mcache_regs;
 };
 
-struct abort_cursor_offload_update_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
-};
-
 struct cursor_lock_params {
 	struct dc *dc;
 	struct pipe_ctx *pipe_ctx;
@@ -736,13 +813,18 @@ struct cursor_lock_params {
 };
 
 struct setup_periodic_interrupt_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct timing_generator *tg;
+	uint32_t start_line;
+	uint32_t end_line;
 };
 
 struct send_cursor_info_to_dmu_params {
-	struct pipe_ctx *pipe_ctx;
-	int pipe_idx;
+	const struct dc_context *ctx;
+	uint8_t pipe_idx;
+	struct hubp *hubp;
+	struct dpp *dpp;
+	uint8_t otg_inst;
+	uint8_t panel_inst;
 };
 
 struct set_cursor_attribute_params {
@@ -762,12 +844,15 @@ struct dpp_set_cursor_attributes_params {
 
 struct set_cursor_position_params {
 	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct hubp *hubp;
+	struct dpp *dpp;
+	struct dc_cursor_position pos;
+	struct dc_cursor_mi_param param;
 };
 
 struct set_cursor_sdr_white_level_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct dpp *dpp;
+	struct dpp_cursor_attributes attr;
 };
 
 struct program_output_csc_params {
@@ -788,18 +873,35 @@ struct phantom_hubp_post_enable_params {
 };
 
 struct begin_cursor_offload_update_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct dmub_srv *dmub;
+	struct dpp *dpp[MAX_PIPES];
+	struct hubp *hubp[MAX_PIPES];
+	uint8_t pipe_count;
+	uint32_t stream_idx;
 };
 
 struct update_cursor_offload_pipe_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct dmub_srv *dmub;
+	const struct dpp *dpp;
+	const struct hubp *hubp;
+	uint32_t stream_idx;
+	uint8_t pipe_idx;
 };
 
 struct commit_cursor_offload_update_params {
-	struct dc *dc;
-	struct pipe_ctx *pipe_ctx;
+	struct dmub_srv *dmub;
+	struct dpp *dpp[MAX_PIPES];
+	struct hubp *hubp[MAX_PIPES];
+	uint8_t pipe_count;
+	uint32_t stream_idx;
+};
+
+struct abort_cursor_offload_update_params {
+	struct dmub_srv *dmub;
+	struct dpp *dpp[MAX_PIPES];
+	struct hubp *hubp[MAX_PIPES];
+	uint8_t pipe_count;
+	uint32_t stream_idx;
 };
 
 struct stream_enc_update_hdmi_info_packets_params {
@@ -826,15 +928,11 @@ struct stream_enc_update_dp_info_packets_params {
 	struct pipe_ctx *pipe_ctx;
 };
 
-struct dsc_set_config_simple_params {
-	struct display_stream_compressor *dsc;
-	struct dsc_config dsc_cfg;
-	struct dsc_optc_config dsc_optc_cfg;
-};
-
 struct stream_enc_dp_set_dsc_config_params {
 	struct stream_encoder *stream_enc;
-	const struct dsc_optc_config *dsc_optc_cfg;
+	enum optc_dsc_mode dsc_mode;
+	uint32_t bytes_per_pixel;
+	uint32_t slice_width;
 };
 
 struct hpo_dp_stream_enc_dp_set_dsc_pps_info_packet_params {
@@ -894,6 +992,36 @@ struct disable_audio_stream_params {
 	struct pipe_ctx *pipe_ctx;
 };
 
+struct clk_mgr_set_max_memclk_params {
+	struct clk_mgr *clk_mgr;
+	unsigned int memclk_mhz;
+};
+
+struct clk_mgr_update_clocks_params {
+	struct clk_mgr *clk_mgr;
+};
+
+struct hubbub_program_watermarks_params {
+	struct dc *dc;
+	struct hubbub *hubbub;
+	union dcn_watermark_set *watermarks;
+	unsigned int refclk_mhz;
+	bool safe_to_lower;
+};
+
+struct hubbub_program_arbiter_params {
+	struct dc *dc;
+	struct hubbub *hubbub;
+	struct dml2_display_arb_regs *arb_regs;
+	bool safe_to_lower;
+};
+
+struct hubbub_program_compbuf_segments_params {
+	struct hubbub *hubbub;
+	unsigned int compbuf_size;
+	bool safe_to_lower;
+};
+
 struct prepare_bandwidth_params {
 	struct dc *dc;
 	struct dc_state *context;
@@ -906,8 +1034,8 @@ struct link_set_dpms_on_params {
 
 union block_sequence_params {
 	struct update_plane_addr_params update_plane_addr_params;
-	struct subvp_pipe_control_lock_fast_params subvp_pipe_control_lock_fast_params;
-	struct pipe_control_lock_params pipe_control_lock_params;
+	struct tg_lock_params tg_lock_params;
+	struct tg_3dlut_wa_unlock_params tg_3dlut_wa_unlock_params;
 	struct set_flip_control_gsl_params set_flip_control_gsl_params;
 	struct program_triplebuffer_params program_triplebuffer_params;
 	struct set_input_transfer_func_params set_input_transfer_func_params;
@@ -917,9 +1045,11 @@ union block_sequence_params {
 	struct update_info_frame_params update_info_frame_params;
 	struct program_manual_trigger_params program_manual_trigger_params;
 	struct send_dmcub_cmd_params send_dmcub_cmd_params;
+	struct lsdma_send_pio_copy_params lsdma_send_pio_copy_params;
 	struct setup_dpp_params setup_dpp_params;
 	struct program_bias_and_scale_params program_bias_and_scale_params;
 	struct set_output_transfer_func_params set_output_transfer_func_params;
+	struct program_upsp_params program_upsp_params;
 	struct update_visual_confirm_params update_visual_confirm_params;
 	struct power_on_mpc_mem_pwr_params power_on_mpc_mem_pwr_params;
 	struct set_output_csc_params set_output_csc_params;
@@ -932,8 +1062,6 @@ union block_sequence_params {
 	struct control_cm_hist_params control_cm_hist_params;
 	struct program_cursor_update_now_params program_cursor_update_now_params;
 	struct hubp_wait_pipe_read_start_params hubp_wait_pipe_read_start_params;
-	struct apply_update_flags_for_phantom_params apply_update_flags_for_phantom_params;
-	struct update_phantom_vp_position_params update_phantom_vp_position_params;
 	struct set_odm_combine_params set_odm_combine_params;
 	struct set_odm_bypass_params set_odm_bypass_params;
 	struct opp_pipe_clock_control_params opp_pipe_clock_control_params;
@@ -944,7 +1072,6 @@ union block_sequence_params {
 	struct tg_set_dsc_config_params tg_set_dsc_config_params;
 	struct dsc_disconnect_params dsc_disconnect_params;
 	struct dsc_read_state_params dsc_read_state_params;
-	struct dsc_calculate_and_set_config_params dsc_calculate_and_set_config_params;
 	struct dsc_enable_with_opp_params dsc_enable_with_opp_params;
 	struct program_tg_params program_tg_params;
 	struct tg_program_global_sync_params tg_program_global_sync_params;
@@ -967,7 +1094,6 @@ union block_sequence_params {
 	struct set_abm_immediate_disable_params set_abm_immediate_disable_params;
 	struct set_disp_pattern_generator_params set_disp_pattern_generator_params;
 	struct mpc_remove_mpcc_params mpc_remove_mpcc_params;
-	struct opp_set_mpcc_disconnect_pending_params opp_set_mpcc_disconnect_pending_params;
 	struct dc_set_optimized_required_params dc_set_optimized_required_params;
 	struct hubp_disconnect_params hubp_disconnect_params;
 	struct hubbub_force_pstate_change_control_params hubbub_force_pstate_change_control_params;
@@ -976,8 +1102,6 @@ union block_sequence_params {
 	struct tg_wait_double_buffer_pending_params tg_wait_double_buffer_pending_params;
 	struct update_force_pstate_params update_force_pstate_params;
 	struct hubbub_apply_dedcn21_147_wa_params hubbub_apply_dedcn21_147_wa_params;
-	struct hubbub_allow_self_refresh_control_params hubbub_allow_self_refresh_control_params;
-	struct tg_get_frame_count_params tg_get_frame_count_params;
 	struct mpc_set_dwb_mux_params mpc_set_dwb_mux_params;
 	struct mpc_disable_dwb_mux_params mpc_disable_dwb_mux_params;
 	struct mcif_wb_config_buf_params mcif_wb_config_buf_params;
@@ -992,6 +1116,20 @@ union block_sequence_params {
 	struct hubp_set_blank_en_params hubp_set_blank_en_params;
 	struct hubp_disable_control_params hubp_disable_control_params;
 	struct hubbub_soft_reset_params hubbub_soft_reset_params;
+	struct hubbub_perfmon_reset_params hubbub_perfmon_reset_params;
+	struct hubbub_perfmon_arm_out_of_order_bw_params hubbub_perfmon_arm_out_of_order_bw_params;
+	struct hubbub_perfmon_start_out_of_order_bw_params hubbub_perfmon_start_out_of_order_bw_params;
+	struct hubbub_perfmon_start_in_order_bw_params hubbub_perfmon_start_in_order_bw_params;
+	struct hubbub_perfmon_start_memory_latencies_params hubbub_perfmon_start_memory_latencies_params;
+	struct hubbub_perfmon_start_urgent_assertion_count_params hubbub_perfmon_start_urgent_assertion_count_params;
+	struct hubbub_perfmon_start_urgent_ramp_latency_params hubbub_perfmon_start_urgent_ramp_latency_params;
+	struct hubbub_perfmon_start_prefetch_data_size_params hubbub_perfmon_start_prefetch_data_size_params;
+	struct hubbub_perfmon_get_out_of_order_bw_params hubbub_perfmon_get_out_of_order_bw_params;
+	struct hubbub_perfmon_get_in_order_bw_params hubbub_perfmon_get_in_order_bw_params;
+	struct hubbub_perfmon_get_memory_latencies_params hubbub_perfmon_get_memory_latencies_params;
+	struct hubbub_perfmon_get_urgent_assertion_count_params hubbub_perfmon_get_urgent_assertion_count_params;
+	struct hubbub_perfmon_get_prefetch_data_size_params hubbub_perfmon_get_prefetch_data_size_params;
+	struct hubbub_perfmon_get_urgent_ramp_latency_params hubbub_perfmon_get_urgent_ramp_latency_params;
 	struct hubp_clk_cntl_params hubp_clk_cntl_params;
 	struct hubp_init_params hubp_init_params;
 	struct hubp_set_vm_system_aperture_settings_params hubp_set_vm_system_aperture_settings_params;
@@ -1043,7 +1181,6 @@ union block_sequence_params {
 	struct hpo_dp_stream_enc_update_dp_info_packets_params hpo_dp_stream_enc_update_dp_info_packets_params;
 	struct stream_enc_update_dp_info_packets_sdp_line_num_params stream_enc_update_dp_info_packets_sdp_line_num_params;
 	struct stream_enc_update_dp_info_packets_params stream_enc_update_dp_info_packets_params;
-	struct dsc_set_config_simple_params dsc_set_config_simple_params;
 	struct stream_enc_dp_set_dsc_config_params stream_enc_dp_set_dsc_config_params;
 	struct hpo_dp_stream_enc_dp_set_dsc_pps_info_packet_params hpo_dp_stream_enc_dp_set_dsc_pps_info_packet_params;
 	struct stream_enc_dp_set_dsc_pps_info_packet_params stream_enc_dp_set_dsc_pps_info_packet_params;
@@ -1057,11 +1194,17 @@ union block_sequence_params {
 	struct disable_audio_stream_params disable_audio_stream_params;
 	struct prepare_bandwidth_params prepare_bandwidth_params;
 	struct link_set_dpms_on_params link_set_dpms_on_params;
+	struct clk_mgr_set_max_memclk_params clk_mgr_set_max_memclk_params;
+	struct clk_mgr_update_clocks_params clk_mgr_update_clocks_params;
+	struct hubbub_program_watermarks_params hubbub_program_watermarks_params;
+	struct hubbub_program_arbiter_params hubbub_program_arbiter_params;
+	struct hubbub_program_compbuf_segments_params hubbub_program_compbuf_segments_params;
 };
 
 enum block_sequence_func {
-	DMUB_SUBVP_PIPE_CONTROL_LOCK_FAST = 0,
-	OPTC_PIPE_CONTROL_LOCK,
+	DMUB_SUBVP_PIPE_CONTROL_LOCK_FAST = 0, /* not used */
+	TG_LOCK,
+	TG_3DLUT_WA_UNLOCK,
 	HUBP_SET_FLIP_CONTROL_GSL,
 	HUBP_PROGRAM_TRIPLEBUFFER,
 	HUBP_UPDATE_PLANE_ADDR,
@@ -1074,10 +1217,12 @@ enum block_sequence_func {
 	HUBP_SET_DMDATA_ATTRIBUTES,
 	OPTC_PROGRAM_MANUAL_TRIGGER,
 	DMUB_SEND_DMCUB_CMD,
+	LSDMA_SEND_PIO_COPY,
 	DPP_SETUP_DPP,
 	DPP_PROGRAM_BIAS_AND_SCALE,
 	DPP_SET_OUTPUT_TRANSFER_FUNC,
 	DPP_SET_HDR_MULTIPLIER,
+	DPP_PROGRAM_UPSP,
 	MPC_UPDATE_VISUAL_CONFIRM,
 	MPC_POWER_ON_MPC_MEM_PWR,
 	MPC_SET_OUTPUT_CSC,
@@ -1090,8 +1235,6 @@ enum block_sequence_func {
 	DPP_PROGRAM_CM_HIST,
 	PROGRAM_CURSOR_UPDATE_NOW,
 	HUBP_WAIT_PIPE_READ_START,
-	HWS_APPLY_UPDATE_FLAGS_FOR_PHANTOM,
-	HWS_UPDATE_PHANTOM_VP_POSITION,
 	OPTC_SET_ODM_COMBINE,
 	OPTC_SET_ODM_BYPASS,
 	OPP_PIPE_CLOCK_CONTROL,
@@ -1102,7 +1245,6 @@ enum block_sequence_func {
 	TG_SET_DSC_CONFIG,
 	DSC_DISCONNECT,
 	DSC_READ_STATE,
-	DSC_CALCULATE_AND_SET_CONFIG,
 	DSC_ENABLE_WITH_OPP,
 	TG_PROGRAM_GLOBAL_SYNC,
 	TG_WAIT_FOR_STATE,
@@ -1118,7 +1260,6 @@ enum block_sequence_func {
 	ABM_SET_LEVEL,
 	ABM_SET_IMMEDIATE_DISABLE,
 	MPC_REMOVE_MPCC,
-	OPP_SET_MPCC_DISCONNECT_PENDING,
 	DC_SET_OPTIMIZED_REQUIRED,
 	HUBP_DISCONNECT,
 	HUBBUB_FORCE_PSTATE_CHANGE_CONTROL,
@@ -1130,8 +1271,6 @@ enum block_sequence_func {
 	UPDATE_FORCE_PSTATE,
 	PROGRAM_MALL_PIPE_CONFIG,
 	HUBBUB_APPLY_DEDCN21_147_WA,
-	HUBBUB_ALLOW_SELF_REFRESH_CONTROL,
-	TG_GET_FRAME_COUNT,
 	MPC_SET_DWB_MUX,
 	MPC_DISABLE_DWB_MUX,
 	MCIF_WB_CONFIG_BUF,
@@ -1196,7 +1335,6 @@ enum block_sequence_func {
 	HPO_DP_STREAM_ENC_UPDATE_DP_INFO_PACKETS,
 	STREAM_ENC_UPDATE_DP_INFO_PACKETS_SDP_LINE_NUM,
 	STREAM_ENC_UPDATE_DP_INFO_PACKETS,
-	DSC_SET_CONFIG_SIMPLE,
 	STREAM_ENC_DP_SET_DSC_CONFIG,
 	HPO_DP_STREAM_ENC_DP_SET_DSC_PPS_INFO_PACKET,
 	STREAM_ENC_DP_SET_DSC_PPS_INFO_PACKET,
@@ -1209,6 +1347,25 @@ enum block_sequence_func {
 	DISABLE_AUDIO_STREAM,
 	PREPARE_BANDWIDTH,
 	LINK_SET_DPMS_ON,
+	CLK_MGR_SET_MAX_MEMCLK,
+	CLK_MGR_UPDATE_CLOCKS,
+	HUBBUB_PROGRAM_WATERMARKS,
+	HUBBUB_PROGRAM_ARBITER,
+	HUBBUB_PROGRAM_COMPBUF_SEGMENTS,
+	HUBBUB_PERFMON_RESET,
+	HUBBUB_PERFMON_ARM_OUT_OF_ORDER_BW,
+	HUBBUB_PERFMON_START_OUT_OF_ORDER_BW,
+	HUBBUB_PERFMON_START_IN_ORDER_BW,
+	HUBBUB_PERFMON_START_MEMORY_LATENCIES,
+	HUBBUB_PERFMON_START_URGENT_ASSERTION_COUNT,
+	HUBBUB_PERFMON_START_URGENT_RAMP_LATENCY,
+	HUBBUB_PERFMON_START_PREFETCH_DATA_SIZE,
+	HUBBUB_PERFMON_GET_OUT_OF_ORDER_BW,
+	HUBBUB_PERFMON_GET_IN_ORDER_BW,
+	HUBBUB_PERFMON_GET_MEMORY_LATENCIES,
+	HUBBUB_PERFMON_GET_URGENT_ASSERTION_COUNT,
+	HUBBUB_PERFMON_GET_PREFETCH_DATA_SIZE,
+	HUBBUB_PERFMON_GET_URGENT_RAMP_LATENCY,
 	/* This must be the last value in this enum, add new ones above */
 	HWSS_BLOCK_SEQUENCE_FUNC_COUNT
 };
@@ -1254,6 +1411,10 @@ struct hw_sequencer_funcs {
 			struct dc_state *context);
 	void (*update_plane_addr)(const struct dc *dc,
 			struct pipe_ctx *pipe_ctx);
+	void (*prepare_plane_addr_update)(const struct dc *dc,
+			struct pipe_ctx *pipe_ctx,
+			struct dc_plane_address *addr_to_program,
+			bool *flip_immediate);
 	void (*update_dchub)(struct dce_hwseq *hws,
 			struct dchub_init_data *dh_data);
 	void (*wait_for_mpcc_disconnect)(struct dc *dc,
@@ -1266,15 +1427,16 @@ struct hw_sequencer_funcs {
 	void (*edp_backlight_control)(
 			struct dc_link *link,
 			bool enable);
-	void (*program_triplebuffer)(const struct dc *dc,
-		struct pipe_ctx *pipe_ctx, bool enableTripleBuffer);
+	void (*program_triplebuffer)(struct hubp *hubp, bool enableTripleBuffer);
 	void (*update_pending_status)(struct pipe_ctx *pipe_ctx);
 	void (*update_dsc_pg)(struct dc *dc, struct dc_state *context, bool safe_to_disable);
 	void (*clear_surface_dcc_and_tiling)(struct pipe_ctx *pipe_ctx, struct dc_plane_state *plane_state, bool clear_tiling);
 
 	/* Pipe Lock Related */
-	void (*pipe_control_lock)(struct dc *dc,
-			struct pipe_ctx *pipe, bool lock);
+	bool (*build_pipe_control_lock_sequence)(struct dc *dc,
+			struct pipe_ctx *pipe, bool lock,
+			struct pipe_control_lock_params *params);
+	void (*tg_lock)(struct tg_lock_params *params);
 	void (*interdependent_update_lock)(struct dc *dc,
 			struct dc_state *context, bool lock);
 	void (*set_flip_control_gsl)(struct pipe_ctx *pipe_ctx,
@@ -1299,8 +1461,9 @@ struct hw_sequencer_funcs {
 	void (*enable_vblanks_synchronization)(struct dc *dc,
 			int group_index, int group_size,
 			struct pipe_ctx *grouped_pipes[]);
-	void (*setup_periodic_interrupt)(struct dc *dc,
-			struct pipe_ctx *pipe_ctx);
+	void (*setup_periodic_interrupt)(struct timing_generator *tg,
+			uint32_t start_line,
+			uint32_t end_line);
 	void (*set_drr)(struct pipe_ctx **pipe_ctx, int num_pipes,
 			struct dc_crtc_timing_adjust adjust);
 	void (*set_static_screen_control)(struct pipe_ctx **pipe_ctx,
@@ -1316,8 +1479,14 @@ struct hw_sequencer_funcs {
 
 	/* Bandwidth Related */
 	void (*prepare_bandwidth)(struct dc *dc, struct dc_state *context);
+	void (*prepare_bandwidth_sequence)(struct dc *dc,
+			struct dc_state *context,
+			struct block_sequence_state *seq_state);
 	bool (*update_bandwidth)(struct dc *dc, struct dc_state *context);
 	void (*optimize_bandwidth)(struct dc *dc, struct dc_state *context);
+	void (*optimize_bandwidth_sequence)(struct dc *dc,
+			struct dc_state *context,
+			struct block_sequence_state *seq_state);
 
 	/* Infopacket Related */
 	void (*set_avmute)(struct pipe_ctx *pipe_ctx, bool enable);
@@ -1331,23 +1500,34 @@ struct hw_sequencer_funcs {
 	bool (*dmdata_status_done)(struct pipe_ctx *pipe_ctx);
 
 	/* Cursor Related */
-	void (*set_cursor_position)(struct pipe_ctx *pipe);
+	void (*set_cursor_position)(struct hubp *hubp, struct dpp *dpp,
+			const struct dc_cursor_position *pos,
+			const struct dc_cursor_mi_param *param);
+	/* Fallback for DCE */
+	void (*set_cursor_position_legacy)(struct pipe_ctx *pipe);
 	void (*set_cursor_attribute)(struct pipe_ctx *pipe);
 	void (*set_cursor_sdr_white_level)(struct pipe_ctx *pipe);
-	void (*abort_cursor_offload_update)(struct dc *dc, const struct pipe_ctx *pipe);
-	void (*begin_cursor_offload_update)(struct dc *dc, const struct pipe_ctx *pipe);
-	void (*commit_cursor_offload_update)(struct dc *dc, const struct pipe_ctx *pipe);
-	void (*update_cursor_offload_pipe)(struct dc *dc, const struct pipe_ctx *pipe);
+	void (*abort_cursor_offload_update)(struct dmub_srv *dmub, struct dpp **dpp,
+			struct hubp **hubp, uint8_t pipe_count, uint32_t stream_idx);
+	void (*begin_cursor_offload_update)(struct dmub_srv *dmub, struct dpp **dpp,
+			struct hubp **hubp, uint8_t pipe_count, uint32_t stream_idx);
+	void (*commit_cursor_offload_update)(struct dmub_srv *dmub, struct dpp **dpp,
+			struct hubp **hubp, uint8_t pipe_count, uint32_t stream_idx);
+	void (*update_cursor_offload_pipe)(struct dmub_srv *dmub,
+			uint32_t stream_idx,
+			uint8_t pipe_idx,
+			const struct dpp *dpp,
+			const struct hubp *hubp);
 	void (*notify_cursor_offload_drr_update)(struct dc *dc, struct dc_state *context,
 						 const struct dc_stream_state *stream);
 	void (*program_cursor_offload_now)(struct dc *dc, const struct pipe_ctx *pipe);
 
 	/* Colour Related */
-	void (*program_gamut_remap)(struct pipe_ctx *pipe_ctx);
+	void (*program_gamut_remap)(struct program_gamut_remap_params *params);
 	void (*program_output_csc)(struct dc *dc, struct pipe_ctx *pipe_ctx,
 			enum dc_color_space colorspace,
 			uint16_t *matrix, int opp_id);
-	void (*trigger_3dlut_dma_load)(struct dc *dc, struct pipe_ctx *pipe_ctx);
+	void (*trigger_3dlut_dma_load)(struct pipe_ctx *pipe_ctx);
 
 	/* VM Related */
 	int (*init_sys_ctx)(struct dce_hwseq *hws,
@@ -1454,7 +1634,7 @@ struct hw_sequencer_funcs {
 			bool should_lock_all_pipes,
 			struct pipe_ctx *top_pipe_to_program,
 			bool subvp_prev_use);
-	void (*subvp_pipe_control_lock_fast)(union block_sequence_params *params);
+	bool (*is_subvp_hw_lock_supported)(const struct dc *dc);
 
 	void (*z10_restore)(const struct dc *dc);
 	void (*z10_save_init)(struct dc *dc);
@@ -1493,15 +1673,14 @@ struct hw_sequencer_funcs {
 	bool (*is_pipe_topology_transition_seamless)(struct dc *dc,
 			const struct dc_state *cur_ctx,
 			const struct dc_state *new_ctx);
-	void (*wait_for_dcc_meta_propagation)(const struct dc *dc,
-		const struct pipe_ctx *top_pipe_to_program);
-	void (*dmub_hw_control_lock)(struct dc *dc,
+	void (*wait_for_dcc_meta_propagation)(uint32_t delay);
+	bool (*dmub_hw_control_lock)(struct dc *dc,
 			struct dc_state *context,
 			bool lock);
 	void (*fams2_update_config)(struct dc *dc,
 			struct dc_state *context,
 			bool enable);
-	void (*dmub_hw_control_lock_fast)(union block_sequence_params *params);
+	bool (*is_dmub_hw_lock_supported)(const struct dc *dc);
 	void (*set_long_vtotal)(struct pipe_ctx **pipe_ctx, int num_pipes, uint32_t v_total_min, uint32_t v_total_max);
 	void (*program_outstanding_updates)(struct dc *dc,
 			struct dc_state *context);
@@ -1536,14 +1715,16 @@ struct hw_sequencer_funcs {
 			struct dc_underflow_debug_data *out_data);
 
 	/**
-	 * measure_memory_qos - Measure memory QoS metrics
-	 * @dc: DC structure
-	 * @qos: Pointer to dc_measured_memory_qos struct to populate with measured values
+	 * program_perfmon - Program/transition perfmon probes for a commit.
+	 * @dc:      DC structure
+	 * @context: target state; probes, probe_count, and probe_status are
+	 *           read from and written to this object
 	 *
-	 * Populates the provided dc_measured_memory_qos struct with peak bandwidth, average bandwidth,
-	 * max latency, min latency, and average latency from hardware performance counters.
+	 * Invoked during the execute phase of dc_update_state. The hook resolves
+	 * each probe's transition by diffing @context against dc->current_state
+	 * and latches MEASURED results into @context->probe_status.
 	 */
-	void (*measure_memory_qos)(struct dc *dc, struct dc_measured_memory_qos *qos);
+	void (*program_perfmon)(struct dc *dc, struct dc_state *context);
 
 };
 
@@ -1614,6 +1795,8 @@ void set_drr_and_clear_adjust_pending(
 		struct dc_stream_state *stream,
 		struct drr_params *params);
 
+struct dpp_cursor_attributes calc_sdr_cursor_attributes(struct pipe_ctx *pipe_ctx);
+
 void hwss_execute_sequence(struct dc *dc,
 		struct block_sequence block_sequence[MAX_HWSS_BLOCK_SEQUENCE_SIZE],
 		int num_steps);
@@ -1627,6 +1810,16 @@ void hwss_build_fast_sequence(struct dc *dc,
 		struct dc_stream_status *stream_status,
 		struct dc_state *context);
 
+void hwss_build_full_sequence(struct dc *dc,
+	struct block_sequence block_sequence[MAX_HWSS_BLOCK_SEQUENCE_SIZE],
+	unsigned int *num_steps,
+	struct dc_state *context, bool program_phantom_pipe);
+
+void hwss_build_post_unlock_full_sequence(struct dc *dc,
+	struct block_sequence block_sequence[MAX_HWSS_BLOCK_SEQUENCE_SIZE],
+	unsigned int *num_steps,
+	struct dc_state *context);
+
 void hwss_wait_for_all_blank_complete(struct dc *dc,
 		struct dc_state *context);
 
@@ -1636,6 +1829,9 @@ void hwss_wait_for_odm_update_pending_complete(struct dc *dc,
 void hwss_wait_for_no_pipes_pending(struct dc *dc,
 		struct dc_state *context);
 
+void hwss_reset_unused_det(struct dc *dc,
+		struct dc_state *context);
+
 void hwss_wait_for_outstanding_hw_updates(struct dc *dc,
 		struct dc_state *dc_context);
 
@@ -1643,12 +1839,17 @@ void hwss_process_outstanding_hw_updates(struct dc *dc,
 		struct dc_state *dc_context);
 
 void hwss_send_dmcub_cmd(union block_sequence_params *params);
+void hwss_lsdma_send_pio_copy(union block_sequence_params *params);
+
+void hwss_program_triplebuffer(union block_sequence_params *params);
 
 void hwss_program_manual_trigger(union block_sequence_params *params);
 
 void hwss_setup_dpp(union block_sequence_params *params);
 
 void hwss_program_bias_and_scale(union block_sequence_params *params);
+
+void hwss_program_upsp(union block_sequence_params *params);
 
 void hwss_power_on_mpc_mem_pwr(union block_sequence_params *params);
 
@@ -1686,11 +1887,7 @@ void hwss_dsc_disconnect(union block_sequence_params *params);
 
 void hwss_dsc_read_state(union block_sequence_params *params);
 
-void hwss_dsc_calculate_and_set_config(union block_sequence_params *params);
-
 void hwss_dsc_enable_with_opp(union block_sequence_params *params);
-
-void hwss_dsc_set_config_simple(union block_sequence_params *params);
 
 void hwss_stream_enc_update_hdmi_info_packets(union block_sequence_params *params);
 
@@ -1766,8 +1963,6 @@ void hwss_set_abm_immediate_disable(union block_sequence_params *params);
 
 void hwss_mpc_remove_mpcc(union block_sequence_params *params);
 
-void hwss_opp_set_mpcc_disconnect_pending(union block_sequence_params *params);
-
 void hwss_dc_set_optimized_required(union block_sequence_params *params);
 
 void hwss_hubp_disconnect(union block_sequence_params *params);
@@ -1780,17 +1975,14 @@ void hwss_tg_set_gsl(union block_sequence_params *params);
 
 void hwss_tg_set_gsl_source_select(union block_sequence_params *params);
 
-void hwss_hubp_wait_flip_pending(union block_sequence_params *params);
+void hwss_hubp_wait_flip_pending(struct hubp *hubp,
+		unsigned int polling_interval_us);
 
 void hwss_tg_wait_double_buffer_pending(union block_sequence_params *params);
 
 void hwss_update_force_pstate(union block_sequence_params *params);
 
 void hwss_hubbub_apply_dedcn21_147_wa(union block_sequence_params *params);
-
-void hwss_hubbub_allow_self_refresh_control(union block_sequence_params *params);
-
-void hwss_tg_get_frame_count(union block_sequence_params *params);
 
 void hwss_mpc_set_dwb_mux(union block_sequence_params *params);
 
@@ -1819,6 +2011,34 @@ void hwss_hubp_set_blank_en(union block_sequence_params *params);
 void hwss_hubp_disable_control(union block_sequence_params *params);
 
 void hwss_hubbub_soft_reset(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_reset(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_arm_out_of_order_bw(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_start_out_of_order_bw(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_start_in_order_bw(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_start_memory_latencies(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_start_urgent_assertion_count(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_start_urgent_ramp_latency(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_start_prefetch_data_size(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_get_out_of_order_bw(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_get_in_order_bw(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_get_memory_latencies(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_get_urgent_assertion_count(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_get_prefetch_data_size(union block_sequence_params *params);
+
+void hwss_hubbub_perfmon_get_urgent_ramp_latency(union block_sequence_params *params);
 
 void hwss_hubp_clk_cntl(union block_sequence_params *params);
 
@@ -1880,8 +2100,6 @@ void hwss_dpp_set_scaler(union block_sequence_params *params);
 
 void hwss_hubp_mem_program_viewport(union block_sequence_params *params);
 
-void hwss_abort_cursor_offload_update(union block_sequence_params *params);
-
 void hwss_send_cursor_info_to_dmu(union block_sequence_params *params);
 
 void hwss_set_cursor_attribute(union block_sequence_params *params);
@@ -1892,9 +2110,11 @@ void hwss_dpp_set_cursor_attributes(union block_sequence_params *params);
 
 void hwss_set_cursor_position(union block_sequence_params *params);
 
+void hwss_program_cursor_position(struct dc *dc, struct pipe_ctx *pipe_ctx);
+
 void hwss_set_cursor_sdr_white_level(union block_sequence_params *params);
 
-void hwss_program_gamut_remap(union block_sequence_params *params);
+void hwss_program_gamut_remap(struct pipe_ctx *pipe_ctx);
 
 void hwss_program_output_csc(union block_sequence_params *params);
 
@@ -1906,42 +2126,54 @@ void hwss_phantom_hubp_post_enable(union block_sequence_params *params);
 
 void hwss_cursor_lock(union block_sequence_params *params);
 
-void hwss_begin_cursor_offload_update(union block_sequence_params *params);
+void hwss_begin_cursor_offload_update(struct dc *dc, union block_sequence_params *params);
 
-void hwss_commit_cursor_offload_update(union block_sequence_params *params);
+void hwss_commit_cursor_offload_update(struct dc *dc, union block_sequence_params *params);
 
-void hwss_update_cursor_offload_pipe(union block_sequence_params *params);
+void hwss_update_cursor_offload_pipe(struct dc *dc, union block_sequence_params *params);
 
-void hwss_setup_periodic_interrupt(struct dc *dc, union block_sequence_params *params);
+void hwss_abort_cursor_offload_update(struct dc *dc, union block_sequence_params *params);
+
+void hwss_setup_periodic_interrupt(struct dc *dc, struct pipe_ctx *pipe_ctx);
 
 void hwss_disable_audio_stream(struct dc *dc, union block_sequence_params *params);
 
+void hwss_hubp_wait_for_dcc_meta_prop(struct dc *dc, struct pipe_ctx *top_pipe_to_program);
+
+void hwss_set_input_transfer_func(struct dc *dc, struct pipe_ctx *pipe_ctx);
+
 void hwss_add_optc_pipe_control_lock(struct block_sequence_state *seq_state,
 		struct dc *dc, struct pipe_ctx *pipe_ctx, bool lock);
+
+void hwss_pipe_control_lock(struct dc *dc,
+		struct pipe_ctx *pipe_ctx, bool lock);
 
 void hwss_add_hubp_set_flip_control_gsl(struct block_sequence_state *seq_state,
 		struct hubp *hubp, bool flip_immediate);
 
 void hwss_add_hubp_program_triplebuffer(struct block_sequence_state *seq_state,
-		struct dc *dc, struct pipe_ctx *pipe_ctx, bool enableTripleBuffer);
+		struct hubp *hubp, bool enableTripleBuffer);
 
 void hwss_add_hubp_update_plane_addr(struct block_sequence_state *seq_state,
 		struct dc *dc, struct pipe_ctx *pipe_ctx);
 
 void hwss_add_dpp_set_input_transfer_func(struct block_sequence_state *seq_state,
-		struct dc *dc, struct pipe_ctx *pipe_ctx, struct dc_plane_state *plane_state);
+		struct dc *dc, struct pipe_ctx *pipe_ctx);
 
 void hwss_add_dpp_program_gamut_remap(struct block_sequence_state *seq_state,
 		struct pipe_ctx *pipe_ctx);
 
 void hwss_add_dpp_program_bias_and_scale(struct block_sequence_state *seq_state,
-		struct pipe_ctx *pipe_ctx);
+		struct dpp *dpp,
+		struct dc_plane_state *plane_state);
 
 void hwss_add_optc_program_manual_trigger(struct block_sequence_state *seq_state,
-		struct pipe_ctx *pipe_ctx);
+		struct timing_generator *tg);
 
 void hwss_add_dpp_set_output_transfer_func(struct block_sequence_state *seq_state,
-		struct dc *dc, struct pipe_ctx *pipe_ctx, struct dc_stream_state *stream);
+		struct dc *dc, struct pipe_ctx *pipe_ctx);
+
+void hwss_set_output_transfer_func(struct dc *dc, struct pipe_ctx *pipe_ctx);
 
 void hwss_add_mpc_update_visual_confirm(struct block_sequence_state *seq_state,
 		struct dc *dc, struct pipe_ctx *pipe_ctx, int mpcc_id);
@@ -1961,17 +2193,11 @@ void hwss_add_dmub_send_dmcub_cmd(struct block_sequence_state *seq_state,
 void hwss_add_dmub_subvp_save_surf_addr(struct block_sequence_state *seq_state,
 		struct dc_dmub_srv *dc_dmub_srv, struct dc_plane_address *addr, uint8_t subvp_index);
 
-void hwss_add_hubp_wait_for_dcc_meta_prop(struct block_sequence_state *seq_state,
-		struct dc *dc, struct pipe_ctx *top_pipe_to_program);
-
+void hwss_add_lsdma_send_pio_copy(struct block_sequence_state *seq_state,
+		struct dc_dmub_srv *dc_dmub_srv, uint64_t src_addr, uint64_t dst_addr,
+		uint32_t byte_count, uint32_t overlap_disable);
 void hwss_add_hubp_wait_pipe_read_start(struct block_sequence_state *seq_state,
 		struct hubp *hubp);
-
-void hwss_add_hws_apply_update_flags_for_phantom(struct block_sequence_state *seq_state,
-		struct pipe_ctx *pipe_ctx);
-
-void hwss_add_hws_update_phantom_vp_position(struct block_sequence_state *seq_state,
-		struct dc *dc, struct dc_state *context, struct pipe_ctx *pipe_ctx);
 
 void hwss_add_optc_set_odm_combine(struct block_sequence_state *seq_state,
 		struct timing_generator *tg, int opp_inst[MAX_PIPES], int opp_head_count,
@@ -2010,7 +2236,7 @@ void hwss_add_hubp_program_mcache_id(struct block_sequence_state *seq_state,
 		struct hubp *hubp, struct dml2_hubp_pipe_mcache_regs *mcache_regs);
 
 void hwss_add_hubbub_force_pstate_change_control(struct block_sequence_state *seq_state,
-		struct hubbub *hubbub, bool enable, bool wait);
+		struct hubbub *hubbub, bool enable, bool allow);
 
 void hwss_add_hubp_program_det_segments(struct block_sequence_state *seq_state,
 		struct hubbub *hubbub, unsigned int hubp_inst, unsigned int det_size);
@@ -2033,7 +2259,7 @@ void hwss_add_tg_enable_crtc(struct block_sequence_state *seq_state,
 		struct timing_generator *tg);
 
 void hwss_add_hubp_wait_flip_pending(struct block_sequence_state *seq_state,
-		struct hubp *hubp, unsigned int timeout_us, unsigned int polling_interval_us);
+		struct hubp *hubp, unsigned int polling_interval_us);
 
 void hwss_add_tg_wait_double_buffer_pending(struct block_sequence_state *seq_state,
 		struct timing_generator *tg, unsigned int timeout_us, unsigned int polling_interval_us);
@@ -2041,14 +2267,12 @@ void hwss_add_tg_wait_double_buffer_pending(struct block_sequence_state *seq_sta
 void hwss_add_dccg_set_dto_dscclk(struct block_sequence_state *seq_state,
 		struct dccg *dccg, int inst, int num_slices_h);
 
-void hwss_add_dsc_calculate_and_set_config(struct block_sequence_state *seq_state,
-		struct pipe_ctx *pipe_ctx, bool enable, int opp_cnt);
+/* Resolves DSC geometry and driver state for pipe; pass NULL if the caller does not need OPTC parameters. */
+bool hwss_prepare_dsc_config_for_pipe(struct pipe_ctx *pipe_ctx, int opp_cnt, uint32_t dsc_padding,
+			struct dsc_optc_config *dsc_optc_cfg);
 
 void hwss_add_mpc_remove_mpcc(struct block_sequence_state *seq_state,
 		struct mpc *mpc, struct mpc_tree *mpc_tree_params, struct mpcc *mpcc_to_remove);
-
-void hwss_add_opp_set_mpcc_disconnect_pending(struct block_sequence_state *seq_state,
-		struct output_pixel_processor *opp, int mpcc_inst, bool pending);
 
 void hwss_add_hubp_disconnect(struct block_sequence_state *seq_state,
 		struct hubp *hubp);
@@ -2074,7 +2298,8 @@ void hwss_add_opp_set_disp_pattern_generator(struct block_sequence_state *seq_st
 		bool use_solid_color,
 		int width,
 		int height,
-		int offset);
+		int offset,
+		bool disable_dyn_exp_for_test_pattern);
 
 void hwss_add_opp_program_bit_depth_reduction(struct block_sequence_state *seq_state,
 		struct output_pixel_processor *opp,
@@ -2153,8 +2378,55 @@ void hwss_add_hubp_disable_control(struct block_sequence_state *seq_state,
 
 void hwss_add_hubbub_soft_reset(struct block_sequence_state *seq_state,
 		struct hubbub *hubbub,
-		void (*hubbub_soft_reset)(struct hubbub *hubbub, bool reset),
 		bool reset);
+
+void hwss_add_hubbub_perfmon_reset(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub);
+
+void hwss_add_hubbub_perfmon_arm_out_of_order_bw(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub);
+
+void hwss_add_hubbub_perfmon_start_out_of_order_bw(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub);
+
+void hwss_add_hubbub_perfmon_start_in_order_bw(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub);
+
+void hwss_add_hubbub_perfmon_start_memory_latencies(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub);
+
+void hwss_add_hubbub_perfmon_start_urgent_assertion_count(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub);
+
+void hwss_add_hubbub_perfmon_start_urgent_ramp_latency(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub,
+		const struct hubbub_urgent_latency_params *latency_params);
+
+void hwss_add_hubbub_perfmon_start_prefetch_data_size(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub);
+
+void hwss_add_hubbub_perfmon_get_out_of_order_bw(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub, uint32_t refclk_mhz,
+		uint32_t *bandwidth_mbps, uint32_t *duration_ns);
+
+void hwss_add_hubbub_perfmon_get_in_order_bw(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub, uint32_t refclk_mhz, uint32_t min_duration_ns,
+		uint32_t *bandwidth_mbps, uint32_t *duration_ns);
+
+void hwss_add_hubbub_perfmon_get_memory_latencies(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub, uint32_t refclk_mhz,
+		struct dc_probe_latencies *result);
+
+void hwss_add_hubbub_perfmon_get_urgent_assertion_count(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub, uint32_t refclk_mhz,
+		uint32_t *assertion_count);
+
+void hwss_add_hubbub_perfmon_get_prefetch_data_size(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub, uint32_t *prefetch_data_size);
+
+void hwss_add_hubbub_perfmon_get_urgent_ramp_latency(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub, uint32_t refclk_mhz,
+		uint32_t *latency_ns);
 
 void hwss_add_hubp_clk_cntl(struct block_sequence_state *seq_state,
 		struct hubp *hubp,
@@ -2272,7 +2544,8 @@ void hwss_add_hubp_program_surface_config(struct block_sequence_state *seq_state
 		int compat_level);
 
 void hwss_add_dpp_setup_dpp(struct block_sequence_state *seq_state,
-		struct pipe_ctx *pipe_ctx);
+		struct dpp *dpp,
+		struct dc_plane_state *plane_state);
 
 void hwss_add_dpp_set_cursor_matrix(struct block_sequence_state *seq_state,
 		struct dpp *dpp,
@@ -2301,6 +2574,10 @@ void hwss_add_dpp_set_scaler(struct block_sequence_state *seq_state,
 		struct dpp *dpp,
 		const struct scaler_data *scl_data);
 
+void hwss_add_dpp_program_upsp(struct block_sequence_state *seq_state,
+		struct dpp *dpp,
+		const struct dscl_prog_data *dscl_prog_data);
+
 void hwss_add_hubp_mem_program_viewport(struct block_sequence_state *seq_state,
 		struct hubp *hubp,
 		const struct rect *viewport,
@@ -2327,7 +2604,6 @@ void hwss_add_set_cursor_position(struct block_sequence_state *seq_state,
 		struct pipe_ctx *pipe_ctx);
 
 void hwss_add_set_cursor_sdr_white_level(struct block_sequence_state *seq_state,
-		struct dc *dc,
 		struct pipe_ctx *pipe_ctx);
 
 void hwss_add_program_output_csc(struct block_sequence_state *seq_state,
@@ -2347,18 +2623,9 @@ void hwss_add_update_force_pstate(struct block_sequence_state *seq_state,
 void hwss_add_hubbub_apply_dedcn21_147_wa(struct block_sequence_state *seq_state,
 		struct hubbub *hubbub);
 
-void hwss_add_hubbub_allow_self_refresh_control(struct block_sequence_state *seq_state,
-		struct hubbub *hubbub,
-		bool allow,
-		bool *disallow_self_refresh_applied);
-
-void hwss_add_tg_get_frame_count(struct block_sequence_state *seq_state,
-		struct timing_generator *tg,
-		unsigned int *frame_count);
-
 void hwss_add_tg_set_dsc_config(struct block_sequence_state *seq_state,
 		struct timing_generator *tg,
-		struct dsc_optc_config *dsc_optc_cfg,
+		const struct dsc_optc_config *dsc_optc_cfg,
 		bool enable);
 
 void hwss_add_opp_program_left_edge_extra_pixel(struct block_sequence_state *seq_state,
@@ -2368,6 +2635,10 @@ void hwss_add_opp_program_left_edge_extra_pixel(struct block_sequence_state *seq
 
 void hwss_add_hubp_enable_3dlut_fl(struct block_sequence_state *seq_state,
 		struct hubp *hubp);
+
+uint8_t hwss_build_cursor_offload_pipe_list(struct pipe_ctx *pipe_ctx,
+		struct dpp **dpp,
+		struct hubp **hubp);
 
 void hwss_add_begin_cursor_offload_update(struct block_sequence_state *seq_state,
 		struct dc *dc,
@@ -2379,8 +2650,7 @@ void hwss_add_cursor_lock(struct block_sequence_state *seq_state,
 		bool lock);
 
 void hwss_add_send_update_cursor_info_to_dmu(struct block_sequence_state *seq_state,
-		struct pipe_ctx *pipe_ctx,
-		int index);
+		struct pipe_ctx *pipe_ctx);
 
 void hwss_add_update_cursor_offload_pipe(struct block_sequence_state *seq_state,
 		struct dc *dc,
@@ -2408,10 +2678,18 @@ void hwss_add_stream_enc_update_dp_info_packets_sdp_line_num(struct block_sequen
 void hwss_add_stream_enc_update_dp_info_packets(struct block_sequence_state *seq_state,
 		struct pipe_ctx *pipe_ctx);
 
-void hwss_add_dsc_set_config(struct block_sequence_state *seq_state,
-		struct display_stream_compressor *dsc,
-		const struct dsc_config *dsc_cfg,
-		const struct dsc_optc_config *dsc_optc_cfg);
+bool hwss_add_dsc_set_config(struct block_sequence_state *seq_state,
+		struct display_stream_compressor *dsc);
+
+/* Composes DSC sub-sequence (prepare, set config, enable with OPP) for a pipe. */
+bool hwss_add_dsc_sequence_for_pipe(struct block_sequence_state *seq_state,
+		struct pipe_ctx *pipe_ctx, int opp_cnt, uint32_t dsc_padding,
+		struct dsc_optc_config *dsc_optc_cfg);
+
+/* Composes full DSC sequence (DCCG DTO clocks, DSC, OPP, TG) for a stream. */
+bool hwss_add_dsc_sequence_for_stream(struct block_sequence_state *seq_state,
+		struct pipe_ctx *pipe_ctx, uint32_t dsc_padding,
+		struct dsc_optc_config *dsc_optc_cfg);
 
 void hwss_add_stream_enc_dp_set_dsc_config(struct block_sequence_state *seq_state,
 		struct stream_encoder *stream_enc,
@@ -2474,5 +2752,45 @@ void hwss_add_prepare_bandwidth(struct block_sequence_state *seq_state,
 void hwss_add_link_set_dpms_on(struct block_sequence_state *seq_state,
 		struct dc_state *state,
 		struct pipe_ctx *pipe_ctx);
+
+/* Clock manager BLS executor functions */
+void hwss_clk_mgr_set_max_memclk(union block_sequence_params *params);
+void hwss_clk_mgr_update_clocks(union block_sequence_params *params);
+
+void hwss_hubbub_program_watermarks(union block_sequence_params *params);
+
+void hwss_hubbub_program_arbiter(union block_sequence_params *params);
+
+void hwss_hubbub_program_compbuf_segments(union block_sequence_params *params);
+
+/* Clock manager BLS add-helper functions */
+void hwss_add_clk_mgr_set_max_memclk(struct block_sequence_state *seq_state,
+		struct clk_mgr *clk_mgr,
+		unsigned int memclk_mhz);
+
+void hwss_add_clk_mgr_update_clocks(struct block_sequence_state *seq_state,
+		struct clk_mgr *clk_mgr);
+
+void hwss_add_hubbub_program_watermarks(struct block_sequence_state *seq_state,
+		struct dc *dc,
+		struct hubbub *hubbub,
+		union dcn_watermark_set *watermarks,
+		unsigned int refclk_mhz,
+		bool safe_to_lower);
+
+void hwss_add_hubbub_program_arbiter(struct block_sequence_state *seq_state,
+		struct dc *dc,
+		struct hubbub *hubbub,
+		struct dml2_display_arb_regs *arb_regs,
+		bool safe_to_lower);
+
+void hwss_add_hubbub_program_compbuf_segments(struct block_sequence_state *seq_state,
+		struct hubbub *hubbub,
+		unsigned int compbuf_size,
+		bool safe_to_lower);
+
+void hwss_dmub_hw_control_lock_fast(union block_sequence_params *params);
+void hwss_add_dmub_hw_control_lock_fast(struct block_sequence_state *seq_state,
+		struct dc *dc, bool lock);
 
 #endif /* __DC_HW_SEQUENCER_H__ */

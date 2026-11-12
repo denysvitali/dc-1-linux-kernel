@@ -256,6 +256,10 @@
 	type DSCCLK1_EN;\
 	type DSCCLK2_EN;\
 	type DSCCLK3_EN;\
+	type DSCCLK0_DTO_DB_EN;\
+	type DSCCLK1_DTO_DB_EN;\
+	type DSCCLK2_DTO_DB_EN;\
+	type DSCCLK3_DTO_DB_EN;\
 	type DISPCLK_DCCG_GATE_DISABLE;\
 	type DCCG_GLOBAL_FGCG_REP_DIS; \
 	type PHYASYMCLK_EN;\
@@ -377,6 +381,13 @@
 	type OTG3_DROP_PIXEL;\
 	type RESYNC_FIFO_LEVEL_ADJUST_EN;
 
+#define DCCG60_REG_FIELD_LIST(type) \
+	type OTG_ADD_DROP_PIXEL_DONE;\
+	type DSCCLK0_SRC_SEL;\
+	type DSCCLK1_SRC_SEL;\
+	type DSCCLK2_SRC_SEL;\
+	type DSCCLK3_SRC_SEL;
+
 struct dccg_shift {
 	DCCG_REG_FIELD_LIST(uint8_t)
 	DCCG3_REG_FIELD_LIST(uint8_t)
@@ -386,6 +397,7 @@ struct dccg_shift {
 	DCCG35_REG_FIELD_LIST(uint8_t)
 	DCCG401_REG_FIELD_LIST(uint8_t)
 	DCCG42_REG_FIELD_LIST(uint8_t)
+	DCCG60_REG_FIELD_LIST(uint8_t)
 };
 
 struct dccg_mask {
@@ -397,6 +409,7 @@ struct dccg_mask {
 	DCCG35_REG_FIELD_LIST(uint32_t)
 	DCCG401_REG_FIELD_LIST(uint32_t)
 	DCCG42_REG_FIELD_LIST(uint32_t)
+	DCCG60_REG_FIELD_LIST(uint32_t)
 };
 
 #define DCCG_REG_VARIABLE_LIST \
@@ -511,6 +524,7 @@ struct dccg_mask {
 struct dccg_registers {
 	DCCG_REG_VARIABLE_LIST;
 	uint32_t OTG_ADD_DROP_PIXEL_CNTL;
+	uint32_t DSCCLK_SRC_SEL;
 };
 
 struct dcn_dccg {

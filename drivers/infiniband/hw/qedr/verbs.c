@@ -114,11 +114,9 @@ int qedr_query_device(struct ib_device *ibdev,
 		return -EINVAL;
 	}
 
-	rc = ib_is_udata_in_empty(udata);
+	rc = ib_no_udata_io(udata);
 	if (rc)
 		return rc;
-
-	memset(attr, 0, sizeof(*attr));
 
 	attr->fw_ver = qattr->fw_ver;
 	attr->sys_image_guid = qattr->sys_image_guid;
@@ -148,7 +146,7 @@ int qedr_query_device(struct ib_device *ibdev,
 	attr->max_qp_init_rd_atom =
 	    1 << (fls(qattr->max_qp_req_rd_atomic_resc) - 1);
 	attr->max_qp_rd_atom =
-	    min(1 << (fls(qattr->max_qp_resp_rd_atomic_resc) - 1),
+	    min(1U << (fls(qattr->max_qp_resp_rd_atomic_resc) - 1),
 		attr->max_qp_init_rd_atom);
 
 	attr->max_srq = qattr->max_srq;
@@ -160,7 +158,7 @@ int qedr_query_device(struct ib_device *ibdev,
 	attr->max_pkeys = qattr->max_pkey;
 	attr->max_ah = qattr->max_ah;
 
-	return ib_respond_empty_udata(udata);
+	return 0;
 }
 
 static inline void get_link_speed_and_width(int speed, u16 *ib_speed,
@@ -777,16 +775,23 @@ static inline int qedr_init_user_queue(struct ib_udata *udata,
 				       struct qedr_userq *q, u64 buf_addr,
 				       size_t buf_len, bool requires_db_rec,
 				       int access,
-				       int alloc_and_init)
+				       int alloc_and_init, bool is_cq)
 {
 	u32 fw_pages;
 	int rc;
 
 	q->buf_addr = buf_addr;
 	q->buf_len = buf_len;
-	q->umem = ib_umem_get_va(&dev->ibdev, q->buf_addr, q->buf_len, access);
+	if (is_cq)
+		q->umem = ib_umem_get_cq_buf_or_va(&dev->ibdev, NULL,
+						   q->buf_addr, q->buf_len,
+						   access);
+	else
+		q->umem = ib_umem_get_va(&dev->ibdev, q->buf_addr, q->buf_len,
+					 access);
 	if (IS_ERR(q->umem)) {
-		DP_ERR(dev, "create user queue: failed ib_umem_get_va, got %ld\n",
+		DP_ERR(dev, "create user queue: failed %s, got %ld\n",
+		       is_cq ? "ib_umem_get_cq_buf_or_va" : "ib_umem_get_va",
 		       PTR_ERR(q->umem));
 		return PTR_ERR(q->umem);
 	}
@@ -948,7 +953,7 @@ int qedr_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 
 		rc = qedr_init_user_queue(udata, dev, &cq->q, ureq.addr,
 					  ureq.len, true, IB_ACCESS_LOCAL_WRITE,
-					  1);
+					  1, true);
 		if (rc)
 			goto err0;
 
@@ -1077,7 +1082,7 @@ int qedr_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata)
 	/* We don't want the IRQ handler to handle a non-existing CQ so we
 	 * wait until all CNQ interrupts, if any, are received. This will always
 	 * happen and will always happen very fast. If not, then a serious error
-	 * has occured. That is why we can use a long delay.
+	 * has occurred. That is why we can use a long delay.
 	 * We spin for a short time so we don’t lose time on context switching
 	 * in case all the completions are handled in that span. Otherwise
 	 * we sleep for a while and check again. Since the CNQ may be
@@ -1440,7 +1445,7 @@ static int qedr_init_srq_user_params(struct ib_udata *udata,
 	int rc;
 
 	rc = qedr_init_user_queue(udata, srq->dev, &srq->usrq, ureq->srq_addr,
-				  ureq->srq_len, false, access, 1);
+				  ureq->srq_len, false, access, 1, false);
 	if (rc)
 		return rc;
 
@@ -1833,7 +1838,8 @@ static int qedr_create_user_qp(struct qedr_dev *dev,
 	if (qedr_qp_has_sq(qp)) {
 		/* SQ - read access only (0) */
 		rc = qedr_init_user_queue(udata, dev, &qp->usq, ureq.sq_addr,
-					  ureq.sq_len, true, 0, alloc_and_init);
+					  ureq.sq_len, true, 0, alloc_and_init,
+					  false);
 		if (rc)
 			return rc;
 	}
@@ -1841,7 +1847,8 @@ static int qedr_create_user_qp(struct qedr_dev *dev,
 	if (qedr_qp_has_rq(qp)) {
 		/* RQ - read access only (0) */
 		rc = qedr_init_user_queue(udata, dev, &qp->urq, ureq.rq_addr,
-					  ureq.rq_len, true, 0, alloc_and_init);
+					  ureq.rq_len, true, 0, alloc_and_init,
+					  false);
 		if (rc) {
 			ib_umem_release(qp->usq.umem);
 			qp->usq.umem = NULL;

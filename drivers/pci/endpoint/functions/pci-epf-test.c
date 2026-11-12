@@ -183,12 +183,8 @@ static int pci_epf_test_data_transfer(struct pci_epf_test *epf_test,
 		else
 			sconf.src_addr = dma_remote;
 
-		if (dmaengine_slave_config(chan, &sconf)) {
-			dev_err(dev, "DMA slave config fail\n");
-			return -EIO;
-		}
-		tx = dmaengine_prep_slave_single(chan, dma_local, len, dir,
-						 flags);
+		tx = dmaengine_prep_config_single(chan, dma_local, len,
+						  dir, flags, &sconf);
 	} else {
 		tx = dmaengine_prep_dma_memcpy(chan, dma_dst, dma_src, len,
 					       flags);
@@ -1487,7 +1483,7 @@ static int pci_epf_test_probe(struct pci_epf *epf,
 	struct device *dev = &epf->dev;
 	enum pci_barno bar;
 
-	epf_test = devm_kzalloc(dev, sizeof(*epf_test), GFP_KERNEL);
+	epf_test = devm_kzalloc_obj(dev, *epf_test);
 	if (!epf_test)
 		return -ENOMEM;
 

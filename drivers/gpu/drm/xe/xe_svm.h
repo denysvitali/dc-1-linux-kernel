@@ -21,6 +21,7 @@ struct drm_file;
 struct xe_bo;
 struct xe_gt;
 struct xe_device;
+struct xe_pagefault;
 struct xe_vram_region;
 struct xe_tile;
 struct xe_vm;
@@ -31,11 +32,20 @@ struct xe_vram_region;
 struct xe_svm_range {
 	/** @base: base drm_gpusvm_range */
 	struct drm_gpusvm_range base;
+	/** @pages: Page/DMA mapping state for this range (single drm_device). */
+	struct drm_gpusvm_pages pages;
 	/**
 	 * @garbage_collector_link: Link into VM's garbage collect SVM range
 	 * list. Protected by VM's garbage collect lock.
 	 */
 	struct list_head garbage_collector_link;
+	/**
+	 * @lock: Protects fault handler, garbage collector, and prefetch
+	 * critical sections, ensuring only one thread operates on a range at a
+	 * time. Locking order: inside vm->lock and garbage collector, outside
+	 * dma-resv locks, vm->svm.range_lock.
+	 */
+	struct mutex lock;
 	/**
 	 * @tile_present: Tile mask of binding is present for this range.
 	 * Protected by GPU SVM notifier lock.
@@ -46,7 +56,21 @@ struct xe_svm_range {
 	 * range. Protected by GPU SVM notifier lock.
 	 */
 	u8 tile_invalidated;
+	/**
+	 * @removed: Range has been removed from GPU SVM tree, protected by
+	 * @lock.
+	 */
+	bool removed;
 };
+
+/**
+ * xe_svm_range_put() - SVM range put
+ * @range: SVM range
+ */
+static inline void xe_svm_range_put(struct xe_svm_range *range)
+{
+	drm_gpusvm_range_put(&range->base);
+}
 
 /**
  * struct xe_pagemap - Manages xe device_private memory for SVM.
@@ -74,7 +98,7 @@ struct xe_pagemap {
  */
 static inline bool xe_svm_range_pages_valid(struct xe_svm_range *range)
 {
-	return drm_gpusvm_range_pages_valid(range->base.gpusvm, &range->base);
+	return drm_gpusvm_pages_valid(range->base.gpusvm, &range->pages);
 }
 
 int xe_devm_add(struct xe_tile *tile, struct xe_vram_region *vr);
@@ -86,8 +110,8 @@ void xe_svm_fini(struct xe_vm *vm);
 void xe_svm_close(struct xe_vm *vm);
 
 int xe_svm_handle_pagefault(struct xe_vm *vm, struct xe_vma *vma,
-			    struct xe_gt *gt, u64 fault_addr,
-			    bool atomic);
+			    struct xe_pagefault *pf, struct xe_gt *gt,
+			    u64 fault_addr, bool atomic);
 
 bool xe_svm_has_mapping(struct xe_vm *vm, u64 start, u64 end);
 
@@ -104,6 +128,12 @@ struct xe_svm_range *xe_svm_range_find_or_insert(struct xe_vm *vm, u64 addr,
 int xe_svm_range_get_pages(struct xe_vm *vm, struct xe_svm_range *range,
 			   struct drm_gpusvm_ctx *ctx);
 
+void xe_svm_devmem_lru_bump(struct drm_pagemap_devmem *devmem_allocation);
+
+void xe_svm_range_prefetch_lru_bump(struct xe_vm *vm, struct xe_vma *vma,
+				    struct xe_svm_range *range,
+				    struct drm_pagemap *dpagemap);
+
 bool xe_svm_range_needs_migrate_to_vram(struct xe_svm_range *range, struct xe_vma *vma,
 					const struct drm_pagemap *dpagemap);
 
@@ -111,7 +141,8 @@ void xe_svm_range_migrate_to_smem(struct xe_vm *vm, struct xe_svm_range *range);
 
 bool xe_svm_range_validate(struct xe_vm *vm,
 			   struct xe_svm_range *range,
-			   u8 tile_mask, const struct drm_pagemap *dpagemap);
+			   u8 tile_mask, const struct drm_pagemap *dpagemap,
+			   bool *valid_pages);
 
 u64 xe_svm_find_vma_start(struct xe_vm *vm, u64 addr, u64 end,  struct xe_vma *vma);
 
@@ -132,7 +163,20 @@ void *xe_svm_private_page_owner(struct xe_vm *vm, bool force_smem);
 static inline bool xe_svm_range_has_dma_mapping(struct xe_svm_range *range)
 {
 	lockdep_assert_held(&range->base.gpusvm->notifier_lock);
-	return range->base.pages.flags.has_dma_mapping;
+	return range->pages.flags.has_dma_mapping;
+}
+
+/**
+ * xe_svm_range_is_removed() - SVM range is removed from GPU SVM tree
+ * @range: SVM range
+ *
+ * Return: True if SVM range is removed from GPU SVM tree, False otherwise
+ */
+static inline bool xe_svm_range_is_removed(struct xe_svm_range *range)
+{
+	lockdep_assert_held(&range->lock);
+
+	return range->removed;
 }
 
 /**
@@ -182,6 +226,19 @@ static inline unsigned long xe_svm_range_size(struct xe_svm_range *range)
 	return drm_gpusvm_range_size(&range->base);
 }
 
+/**
+ * xe_svm_range_first_dma() - Resolve the device address array of a SVM range
+ * @range: SVM range
+ * @contiguous: Where to store whether one entry spans the whole range
+ *
+ * Return: Pointer to the first device address, NULL if none is populated.
+ */
+static inline const struct drm_pagemap_addr *
+xe_svm_range_first_dma(struct xe_svm_range *range, bool *contiguous)
+{
+	return drm_gpusvm_pages_first_dma(&range->pages, contiguous);
+}
+
 void xe_svm_flush(struct xe_vm *vm);
 
 int xe_pagemap_shrinker_create(struct xe_device *xe);
@@ -210,13 +267,18 @@ struct xe_vram_region;
 struct xe_svm_range {
 	struct {
 		struct interval_tree_node itree;
-		struct {
-			const struct drm_pagemap_addr *dma_addr;
-		} pages;
 	} base;
+	struct {
+		const struct drm_pagemap_addr *dma_addr;
+	} pages;
+	struct mutex lock;
 	u32 tile_present;
 	u32 tile_invalidated;
 };
+
+static inline void xe_svm_range_put(struct xe_svm_range *range)
+{
+}
 
 static inline bool xe_svm_range_pages_valid(struct xe_svm_range *range)
 {
@@ -233,7 +295,7 @@ static inline
 int xe_svm_init(struct xe_vm *vm)
 {
 #if IS_ENABLED(CONFIG_DRM_GPUSVM)
-	return drm_gpusvm_init(&vm->svm.gpusvm, "Xe SVM (simple)", &vm->xe->drm,
+	return drm_gpusvm_init(&vm->svm.gpusvm, "Xe SVM (simple)",
 			       NULL, 0, 0, 0, NULL, NULL, 0);
 #else
 	return 0;
@@ -256,8 +318,8 @@ void xe_svm_close(struct xe_vm *vm)
 
 static inline
 int xe_svm_handle_pagefault(struct xe_vm *vm, struct xe_vma *vma,
-			    struct xe_gt *gt, u64 fault_addr,
-			    bool atomic)
+			    struct xe_pagefault *pf, struct xe_gt *gt,
+			    u64 fault_addr, bool atomic)
 {
 	return 0;
 }
@@ -300,6 +362,18 @@ int xe_svm_range_get_pages(struct xe_vm *vm, struct xe_svm_range *range,
 	return -EINVAL;
 }
 
+static inline
+void xe_svm_devmem_lru_bump(struct drm_pagemap_devmem *devmem_allocation)
+{
+}
+
+static inline
+void xe_svm_range_prefetch_lru_bump(struct xe_vm *vm, struct xe_vma *vma,
+				    struct xe_svm_range *range,
+				    struct drm_pagemap *dpagemap)
+{
+}
+
 static inline struct xe_svm_range *to_xe_range(struct drm_gpusvm_range *r)
 {
 	return NULL;
@@ -335,7 +409,8 @@ void xe_svm_range_migrate_to_smem(struct xe_vm *vm, struct xe_svm_range *range)
 static inline
 bool xe_svm_range_validate(struct xe_vm *vm,
 			   struct xe_svm_range *range,
-			   u8 tile_mask, bool devmem_preferred)
+			   u8 tile_mask, const struct drm_pagemap *dpagemap,
+			   bool *valid_pages)
 {
 	return false;
 }
@@ -385,6 +460,18 @@ static inline int xe_pagemap_cache_create(struct xe_tile *tile)
 static inline struct drm_pagemap *xe_drm_pagemap_from_fd(int fd, u32 region_instance)
 {
 	return ERR_PTR(-ENOENT);
+}
+
+static inline bool xe_svm_range_is_removed(struct xe_svm_range *range)
+{
+	return false;
+}
+
+static inline const struct drm_pagemap_addr *
+xe_svm_range_first_dma(struct xe_svm_range *range, bool *contiguous)
+{
+	*contiguous = false;
+	return NULL;
 }
 
 #define xe_svm_range_has_dma_mapping(...) false

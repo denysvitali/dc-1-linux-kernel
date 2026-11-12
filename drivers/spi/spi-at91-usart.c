@@ -231,16 +231,16 @@ static int at91_usart_spi_dma_transfer(struct spi_controller *ctlr,
 	rxdesc->callback = dma_callback;
 	rxdesc->callback_param = ctlr;
 
-	cookie = rxdesc->tx_submit(rxdesc);
+	cookie = dmaengine_submit(rxdesc);
 	if (dma_submit_error(cookie))
 		goto at91_usart_spi_err_dma;
 
-	cookie = txdesc->tx_submit(txdesc);
+	cookie = dmaengine_submit(txdesc);
 	if (dma_submit_error(cookie))
 		goto at91_usart_spi_err_dma;
 
-	rxchan->device->device_issue_pending(rxchan);
-	txchan->device->device_issue_pending(txchan);
+	dma_async_issue_pending(rxchan);
+	dma_async_issue_pending(txchan);
 
 	return 0;
 
@@ -571,7 +571,7 @@ at91_usart_fail_dma:
 	return ret;
 }
 
-__maybe_unused static int at91_usart_spi_suspend(struct device *dev)
+static int at91_usart_spi_suspend(struct device *dev)
 {
 	struct spi_controller *ctrl = dev_get_drvdata(dev);
 	struct at91_usart_spi *aus = spi_controller_get_devdata(ctrl);
@@ -587,7 +587,7 @@ __maybe_unused static int at91_usart_spi_suspend(struct device *dev)
 	return 0;
 }
 
-__maybe_unused static int at91_usart_spi_resume(struct device *dev)
+static int at91_usart_spi_resume(struct device *dev)
 {
 	struct spi_controller *ctrl = dev_get_drvdata(dev);
 	struct at91_usart_spi *aus = spi_controller_get_devdata(ctrl);
@@ -616,13 +616,13 @@ static void at91_usart_spi_remove(struct platform_device *pdev)
 }
 
 static const struct dev_pm_ops at91_usart_spi_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(at91_usart_spi_suspend, at91_usart_spi_resume)
+	SYSTEM_SLEEP_PM_OPS(at91_usart_spi_suspend, at91_usart_spi_resume)
 };
 
 static struct platform_driver at91_usart_spi_driver = {
 	.driver = {
 		.name = "at91_usart_spi",
-		.pm = &at91_usart_spi_pm_ops,
+		.pm = pm_sleep_ptr(&at91_usart_spi_pm_ops),
 	},
 	.probe = at91_usart_spi_probe,
 	.remove = at91_usart_spi_remove,

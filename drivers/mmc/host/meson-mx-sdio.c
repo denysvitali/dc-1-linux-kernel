@@ -580,7 +580,7 @@ static struct clk *meson_mx_mmc_register_clk(struct device *dev,
 	 * prevent use-after-free as meson_mx_mmc_host is free'd before
 	 * dev (controller dev, not mmc_host->dev) is free'd.
 	 */
-	host_clkc = devm_kzalloc(dev, sizeof(*host_clkc), GFP_KERNEL);
+	host_clkc = devm_kzalloc_obj(dev, *host_clkc);
 	if (!host_clkc)
 		return ERR_PTR(-ENOMEM);
 
@@ -683,11 +683,8 @@ static int meson_mx_mmc_probe(struct platform_device *pdev)
 					meson_mx_mmc_irq,
 					meson_mx_mmc_irq_thread, IRQF_ONESHOT,
 					NULL, host);
-	if (ret) {
-		dev_err_probe(host->controller_dev, ret,
-			      "Failed to request IRQ\n");
+	if (ret)
 		goto error_unregister_slot_pdev;
-	}
 
 	core_clk = devm_clk_get_enabled(host->controller_dev, "core");
 	if (IS_ERR(core_clk)) {

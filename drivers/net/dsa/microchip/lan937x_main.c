@@ -776,8 +776,8 @@ static int lan937x_setup(struct dsa_switch *ds)
 
 	regs = dev->info->regs;
 
-	dev->vlan_cache = devm_kcalloc(dev->dev, sizeof(struct vlan_table),
-				       dev->info->num_vlans, GFP_KERNEL);
+	dev->vlan_cache = devm_kzalloc_objs(dev->dev, struct vlan_table,
+					    dev->info->num_vlans);
 	if (!dev->vlan_cache)
 		return -ENOMEM;
 
@@ -786,10 +786,6 @@ static int lan937x_setup(struct dsa_switch *ds)
 		dev_err(ds->dev, "failed to reset switch\n");
 		return ret;
 	}
-
-	ret = ksz_parse_drive_strength(dev);
-	if (ret)
-		return ret;
 
 	/* set broadcast storm protection 10% rate */
 	storm_mask = BROADCAST_STORM_RATE;
@@ -871,6 +867,7 @@ static int lan937x_setup(struct dsa_switch *ds)
 		}
 	}
 
+	ksz_ptp_set_caps(ds);
 	ret = ksz_ptp_clock_register(ds);
 	if (ret) {
 		dev_err(dev->dev, "Failed to register PTP clock: %d\n",
@@ -983,7 +980,7 @@ const struct dsa_switch_ops lan937x_switch_ops = {
 	.get_stats64		= ksz_get_stats64,
 	.get_pause_stats	= ksz_get_pause_stats,
 	.port_change_mtu	= lan937x_change_mtu,
-	.port_max_mtu		= ksz_max_mtu,
+	.port_max_mtu		= ksz9477_max_mtu,
 	.suspend		= ksz_suspend,
 	.resume			= ksz_resume,
 	.get_ts_info		= ksz_get_ts_info,

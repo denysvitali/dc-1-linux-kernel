@@ -26,8 +26,13 @@ bool host_cpu_is_amd;
 bool host_cpu_is_intel;
 bool host_cpu_is_hygon;
 bool host_cpu_is_amd_compatible;
+bool host_cpu_is_zhaoxin;
+bool host_cpu_is_intel_compatible;
 bool is_forced_emulation_enabled;
 u64 guest_tsc_khz;
+struct kvm_mmu guest_mmu;
+
+struct guest_regs guest_regs;
 
 const char *ex_str(int vector)
 {
@@ -155,7 +160,7 @@ static void sregs_dump(FILE *stream, struct kvm_sregs *sregs, u8 indent)
 
 bool kvm_is_tdp_enabled(void)
 {
-	if (host_cpu_is_intel)
+	if (host_cpu_is_intel_compatible)
 		return get_kvm_intel_param_bool("ept");
 	else
 		return get_kvm_amd_param_bool("npt");
@@ -526,7 +531,10 @@ void tdp_identity_map_default_memslots(struct kvm_vm *vm)
 
 	/* Only memslot 0 is mapped here, ensure it's the only one being used */
 	for (s = 0; s < NR_MEM_REGIONS; s++)
-		TEST_ASSERT_EQ(vm->memslots[s], 0);
+		TEST_ASSERT(!vm->memslots[s] ||
+			    vm->memslots[s] == KVM_INVALID_MEMSLOT,
+			    "Unhandled memslot '%u' for type '%u'",
+			    vm->memslots[s], s);
 
 	i = (region->region.guest_phys_addr >> vm->page_shift) - 1;
 	last = i + (region->region.memory_size >> vm->page_shift);
@@ -778,6 +786,30 @@ void assert_on_unhandled_exception(struct kvm_vcpu *vcpu)
 		REPORT_GUEST_ASSERT(uc);
 }
 
+gva_t vm_alloc_stack(struct kvm_vm *vm, int nr_pages)
+{
+	int size = nr_pages * getpagesize();
+	gva_t stack_gva;
+
+	stack_gva = __vm_alloc(vm, size, DEFAULT_GUEST_STACK_VADDR_MIN, MEM_REGION_DATA);
+	stack_gva += size;
+
+	/*
+	 * Align stack to match calling sequence requirements in section "The
+	 * Stack Frame" of the System V ABI AMD64 Architecture Processor
+	 * Supplement, which requires the value (%rsp + 8) to be a multiple of
+	 * 16 when control is transferred to the function entry point.
+	 *
+	 * If this code is ever used to launch a vCPU with 32-bit entry point it
+	 * may need to subtract 4 bytes instead of 8 bytes.
+	 */
+	TEST_ASSERT(IS_ALIGNED(stack_gva, PAGE_SIZE),
+		    "__vm_alloc() did not provide a page-aligned address");
+	stack_gva -= 8;
+
+	return stack_gva;
+}
+
 void kvm_arch_vm_post_create(struct kvm_vm *vm, unsigned int nr_vcpus)
 {
 	int r;
@@ -792,6 +824,8 @@ void kvm_arch_vm_post_create(struct kvm_vm *vm, unsigned int nr_vcpus)
 	sync_global_to_guest(vm, host_cpu_is_amd);
 	sync_global_to_guest(vm, host_cpu_is_hygon);
 	sync_global_to_guest(vm, host_cpu_is_amd_compatible);
+	sync_global_to_guest(vm, host_cpu_is_zhaoxin);
+	sync_global_to_guest(vm, host_cpu_is_intel_compatible);
 	sync_global_to_guest(vm, is_forced_emulation_enabled);
 	sync_global_to_guest(vm, pmu_errata_mask);
 
@@ -805,6 +839,17 @@ void kvm_arch_vm_post_create(struct kvm_vm *vm, unsigned int nr_vcpus)
 	TEST_ASSERT(r > 0, "KVM_GET_TSC_KHZ did not provide a valid TSC frequency.");
 	guest_tsc_khz = r;
 	sync_global_to_guest(vm, guest_tsc_khz);
+
+	/*
+	 * The guest MMU is just a placeholder to provide access to PTE masks
+	 * (for now). The guest does not have mappings for its own page tables
+	 * by default, so any meaningful use of guest page tables requires
+	 * explicit setup by the test. Zero the PGD to make it obvious the guest
+	 * page tables are not immediately usable by guest code.
+	 */
+	guest_mmu = vm->mmu;
+	guest_mmu.pgd = 0;
+	sync_global_to_guest(vm, guest_mmu);
 }
 
 void vcpu_arch_set_entry_point(struct kvm_vcpu *vcpu, void *guest_code)
@@ -820,26 +865,7 @@ struct kvm_vcpu *vm_arch_vcpu_add(struct kvm_vm *vm, u32 vcpu_id)
 {
 	struct kvm_mp_state mp_state;
 	struct kvm_regs regs;
-	gva_t stack_gva;
 	struct kvm_vcpu *vcpu;
-
-	stack_gva = __vm_alloc(vm, DEFAULT_STACK_PGS * getpagesize(),
-			       DEFAULT_GUEST_STACK_VADDR_MIN, MEM_REGION_DATA);
-
-	stack_gva += DEFAULT_STACK_PGS * getpagesize();
-
-	/*
-	 * Align stack to match calling sequence requirements in section "The
-	 * Stack Frame" of the System V ABI AMD64 Architecture Processor
-	 * Supplement, which requires the value (%rsp + 8) to be a multiple of
-	 * 16 when control is transferred to the function entry point.
-	 *
-	 * If this code is ever used to launch a vCPU with 32-bit entry point it
-	 * may need to subtract 4 bytes instead of 8 bytes.
-	 */
-	TEST_ASSERT(IS_ALIGNED(stack_gva, PAGE_SIZE),
-		    "__vm_alloc() did not provide a page-aligned address");
-	stack_gva -= 8;
 
 	vcpu = __vm_vcpu_add(vm, vcpu_id);
 	vcpu_init_cpuid(vcpu, kvm_get_supported_cpuid());
@@ -849,7 +875,7 @@ struct kvm_vcpu *vm_arch_vcpu_add(struct kvm_vm *vm, u32 vcpu_id)
 	/* Setup guest general purpose registers */
 	vcpu_regs_get(vcpu, &regs);
 	regs.rflags = regs.rflags | X86_EFLAGS_FIXED;
-	regs.rsp = stack_gva;
+	regs.rsp = vm_alloc_stack(vm, DEFAULT_STACK_PGS);
 	vcpu_regs_set(vcpu, &regs);
 
 	/* Setup the MP state */
@@ -1425,6 +1451,8 @@ void kvm_selftest_arch_init(void)
 	host_cpu_is_amd = this_cpu_is_amd();
 	host_cpu_is_hygon = this_cpu_is_hygon();
 	host_cpu_is_amd_compatible = host_cpu_is_amd || host_cpu_is_hygon;
+	host_cpu_is_zhaoxin = this_cpu_is_zhaoxin();
+	host_cpu_is_intel_compatible = host_cpu_is_intel || host_cpu_is_zhaoxin;
 	is_forced_emulation_enabled = kvm_is_forced_emulation_enabled();
 
 	kvm_init_pmu_errata();
@@ -1446,13 +1474,13 @@ bool kvm_arch_has_default_irqchip(void)
 	return true;
 }
 
-void setup_smram(struct kvm_vm *vm, struct kvm_vcpu *vcpu, u64 smram_gpa,
+void setup_smram(struct kvm_vm *vm, struct kvm_vcpu *vcpu, gpa_t smram_gpa,
 		 const void *smi_handler, size_t handler_size)
 {
-	vm_userspace_mem_region_add(vm, VM_MEM_SRC_ANONYMOUS, smram_gpa,
-				    SMRAM_MEMSLOT, SMRAM_PAGES, 0);
-	TEST_ASSERT(vm_phy_pages_alloc(vm, SMRAM_PAGES, smram_gpa,
-				       SMRAM_MEMSLOT) == smram_gpa,
+	vm_override_mem_region(vm, MEM_REGION_TEST_EXTRA, VM_MEM_SRC_ANONYMOUS,
+			       smram_gpa, SMRAM_MEMSLOT, SMRAM_PAGES);
+
+	TEST_ASSERT(vm_phy_pages_alloc(vm, SMRAM_PAGES, MEM_REGION_TEST_EXTRA) == smram_gpa,
 		    "Could not allocate guest physical addresses for SMRAM");
 
 	memset(addr_gpa2hva(vm, smram_gpa), 0x0, SMRAM_SIZE);

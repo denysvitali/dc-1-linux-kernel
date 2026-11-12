@@ -56,6 +56,7 @@ enum {
 	HEADER_CPU_DOMAIN_INFO,
 	HEADER_E_MACHINE,
 	HEADER_CLN_SIZE,
+	HEADER_MEMORY_RANGES,
 	HEADER_LAST_FEATURE,
 	HEADER_FEAT_BITS	= 256,
 };
@@ -158,7 +159,7 @@ int perf_session__inject_header(struct perf_session *session,
 				struct feat_copier *fc,
 				bool write_attrs_after_data);
 
-size_t perf_session__data_offset(const struct evlist *evlist);
+size_t perf_session__data_offset(struct evlist *evlist);
 
 void perf_header__set_feat(struct perf_header *header, int feat);
 void perf_header__clear_feat(struct perf_header *header, int feat);

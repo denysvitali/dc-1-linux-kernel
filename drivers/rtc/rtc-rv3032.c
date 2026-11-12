@@ -752,7 +752,7 @@ static int rv3032_clkout_register_clk(struct rv3032_data *rv3032,
 {
 	int ret;
 	struct clk *clk;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct device_node *node = client->dev.of_node;
 
 	ret = regmap_update_bits(rv3032->regmap, RV3032_TLSB, RV3032_TLSB_CLKF, 0);
@@ -914,8 +914,7 @@ static int rv3032_probe(struct i2c_client *client)
 		.reg_write = rv3032_eeprom_write,
 	};
 
-	rv3032 = devm_kzalloc(&client->dev, sizeof(struct rv3032_data),
-			      GFP_KERNEL);
+	rv3032 = devm_kzalloc_obj(&client->dev, struct rv3032_data);
 	if (!rv3032)
 		return -ENOMEM;
 

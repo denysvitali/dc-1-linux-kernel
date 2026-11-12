@@ -474,10 +474,7 @@ static void hns3_update_limit_promisc_mode(struct net_device *netdev,
 {
 	struct hnae3_handle *handle = hns3_get_handle(netdev);
 
-	if (enable)
-		set_bit(HNAE3_PFLAG_LIMIT_PROMISC, &handle->priv_flags);
-	else
-		clear_bit(HNAE3_PFLAG_LIMIT_PROMISC, &handle->priv_flags);
+	assign_bit(HNAE3_PFLAG_LIMIT_PROMISC, &handle->priv_flags, enable);
 
 	hns3_request_update_promisc_mode(handle);
 }
@@ -1210,10 +1207,7 @@ static int hns3_set_tx_push(struct net_device *netdev, u32 tx_push)
 	netdev_dbg(netdev, "Changing tx push from %s to %s\n",
 		   str_on_off(old_state), str_on_off(tx_push));
 
-	if (tx_push)
-		set_bit(HNS3_NIC_STATE_TX_PUSH_ENABLE, &priv->state);
-	else
-		clear_bit(HNS3_NIC_STATE_TX_PUSH_ENABLE, &priv->state);
+	assign_bit(HNS3_NIC_STATE_TX_PUSH_ENABLE, &priv->state, tx_push);
 
 	return 0;
 }
@@ -1895,6 +1889,12 @@ static int hns3_get_tunable(struct net_device *netdev,
 	case ETHTOOL_TX_COPYBREAK_BUF_SIZE:
 		*(u32 *)data = h->kinfo.tx_spare_buf_size;
 		break;
+	case ETHTOOL_PFC_PREVENTION_TOUT:
+		if (!h->ae_algo->ops->get_pfc_prevention_tout)
+			return -EOPNOTSUPP;
+
+		ret = h->ae_algo->ops->get_pfc_prevention_tout(h, (u16 *)data);
+		break;
 	default:
 		ret = -EOPNOTSUPP;
 		break;
@@ -2020,6 +2020,12 @@ static int hns3_set_tunable(struct net_device *netdev,
 			netdev_info(netdev, "the active tx spare buf size is %u, due to page order\n",
 				    priv->ring->tx_spare->len);
 
+		break;
+	case ETHTOOL_PFC_PREVENTION_TOUT:
+		if (!h->ae_algo->ops->set_pfc_prevention_tout)
+			return -EOPNOTSUPP;
+
+		ret = h->ae_algo->ops->set_pfc_prevention_tout(h, *(u16 *)data);
 		break;
 	default:
 		ret = -EOPNOTSUPP;

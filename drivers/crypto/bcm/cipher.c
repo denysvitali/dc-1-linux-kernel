@@ -2387,9 +2387,7 @@ static int ahash_hmac_setkey(struct crypto_ahash *ahash, const u8 *key,
 	 * outer hashing in software.
 	 */
 	if (iproc_priv.spu.spu_type == SPU_TYPE_SPUM) {
-		memcpy(ctx->ipad, ctx->authkey, ctx->authkeylen);
-		memset(ctx->ipad + ctx->authkeylen, 0,
-		       blocksize - ctx->authkeylen);
+		memcpy_and_pad(ctx->ipad, blocksize, ctx->authkey, ctx->authkeylen, 0);
 		ctx->authkeylen = 0;
 		unsafe_memcpy(ctx->opad, ctx->ipad, blocksize,
 			      "fortified memcpy causes -Wrestrict warning");
@@ -4292,8 +4290,8 @@ static int spu_mb_init(struct device *dev)
 	struct mbox_client *mcl = &iproc_priv.mcl;
 	int err, i;
 
-	iproc_priv.mbox = devm_kcalloc(dev, iproc_priv.spu.num_chan,
-				  sizeof(struct mbox_chan *), GFP_KERNEL);
+	iproc_priv.mbox = devm_kzalloc_objs(dev, struct mbox_chan *,
+					    iproc_priv.spu.num_chan);
 	if (!iproc_priv.mbox)
 		return -ENOMEM;
 

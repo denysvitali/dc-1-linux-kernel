@@ -47,6 +47,86 @@
 #include "drm_crtc_internal.h"
 #include "drm_internal.h"
 
+/**
+ * DOC: state lifetime
+ *
+ * &drm_atomic_commit represents an update to modeset pipeline state.
+ * It's a transient object that holds a state update as a collection of
+ * pointers to individual objects' states. &drm_atomic_commit has a much
+ * shorter lifetime than the objects' states, since it's only allocated
+ * while preparing, checking or committing the update, while object
+ * states are allocated when preparing the update and kept alive as long
+ * as they are active in the device.
+ *
+ * Their respective lifetimes are:
+ *
+ * - at driver initialization time, the driver calls
+ *   drm_mode_config_create_initial_state() to allocate an initial,
+ *   pristine, state for each object and stores it in the objects state
+ *   pointer. Historically, this was one of drm_mode_config_reset() job,
+ *   so one might still encounter it in a driver.
+ *
+ * - When resuming from suspend, drm_mode_config_reset() resets the
+ *   software and hardware state to a known default and stores it in the
+ *   object's state pointer. Not all objects are affected by
+ *   drm_mode_config_reset() though.
+ *
+ * - whenever a new update is needed:
+ *
+ *   + drm_atomic_commit_alloc() allocates a new &drm_atomic_commit
+ *     instance.
+ *
+ *   + The code triggering the commit (ioctl, client modeset,
+ *     drm_atomic_helper_reset_crtc(), etc.) copies the current active
+ *     state of all entities affected by the update into this new
+ *     &drm_atomic_commit using drm_atomic_get_plane_state(),
+ *     drm_atomic_get_crtc_state(), drm_atomic_get_connector_state(), or
+ *     drm_atomic_get_private_obj_state(). This new state can then be
+ *     modified.
+ *
+ *     At that point, &drm_atomic_commit stores three state pointers for
+ *     any affected entity: the "old" and "new" states, and
+ *     state_to_destroy. The old state is the state currently active in
+ *     the hardware, which is either the one initialized by reset() or a
+ *     newer one if a commit has been made. The new state is the state
+ *     we just allocated and we might eventually commit to the hardware.
+ *     The state_to_destroy points to the state we'll eventually have to
+ *     free when the drm_atomic_commit will be destroyed, and points to
+ *     the new state for now since the old state is still the active
+ *     state.
+ *
+ *   + After the calling code populated the commit with the entities
+ *     states, it updates the new states with the new values we need to
+ *     commit. The new commit instance is now ready.
+ *
+ *   + Then we have two branches depending on the calling code intent:
+ *
+ *     - If the calling code only wants to check that the commit would
+ *       work (for example because of the DRM_MODE_ATOMIC_TEST_ONLY
+ *       flag). It calls drm_atomic_check_only(), which in turn checks
+ *       all these states by invoking atomic_check on all affected
+ *       pipeline stages.
+ *
+ *     - If the calling code actually wants to trigger a commit, it
+ *       calls drm_atomic_commit(). The first stage is the check
+ *       mentioned above, and if the check is successful, it performs
+ *       the commit. Part of the commit is a call to
+ *       drm_atomic_helper_swap_state() which turns the new states into
+ *       the active states. After swapping states, each object's state
+ *       pointer now refers to the formerly new state. The
+ *       state_to_destroy now refers to the formerly old state.
+ *
+ *   + Once done, and when the last reference to our &drm_atomic_commit
+ *     is given up through drm_atomic_commit_put(), it calls
+ *     __drm_atomic_commit_free(). In turn, __drm_atomic_commit_free()
+ *     calls drm_atomic_commit_clear() that will free all
+ *     state_to_destroy (ie. old states), and it finally frees
+ *     &drm_atomic_commit instance.
+ *
+ *   + Now, we don't have any active &drm_atomic_commit anymore, and
+ *     only the entity active states remain allocated.
+ */
+
 void __drm_crtc_commit_free(struct kref *kref)
 {
 	struct drm_crtc_commit *commit =
@@ -213,8 +293,10 @@ void drm_atomic_commit_default_clear(struct drm_atomic_commit *state)
 		if (!connector)
 			continue;
 
-		connector->funcs->atomic_destroy_state(connector,
-						       state->connectors[i].state_to_destroy);
+		if (state->connectors[i].state_to_destroy)
+			connector->funcs->atomic_destroy_state(connector,
+							       state->connectors[i].state_to_destroy);
+
 		state->connectors[i].ptr = NULL;
 		state->connectors[i].state_to_destroy = NULL;
 		state->connectors[i].old_state = NULL;
@@ -228,8 +310,9 @@ void drm_atomic_commit_default_clear(struct drm_atomic_commit *state)
 		if (!crtc)
 			continue;
 
-		crtc->funcs->atomic_destroy_state(crtc,
-						  state->crtcs[i].state_to_destroy);
+		if (state->crtcs[i].state_to_destroy)
+			crtc->funcs->atomic_destroy_state(crtc,
+							  state->crtcs[i].state_to_destroy);
 
 		state->crtcs[i].ptr = NULL;
 		state->crtcs[i].state_to_destroy = NULL;
@@ -248,8 +331,10 @@ void drm_atomic_commit_default_clear(struct drm_atomic_commit *state)
 		if (!plane)
 			continue;
 
-		plane->funcs->atomic_destroy_state(plane,
-						   state->planes[i].state_to_destroy);
+		if (state->planes[i].state_to_destroy)
+			plane->funcs->atomic_destroy_state(plane,
+							   state->planes[i].state_to_destroy);
+
 		state->planes[i].ptr = NULL;
 		state->planes[i].state_to_destroy = NULL;
 		state->planes[i].old_state = NULL;
@@ -263,9 +348,9 @@ void drm_atomic_commit_default_clear(struct drm_atomic_commit *state)
 			continue;
 
 		drm_colorop_atomic_destroy_state(colorop,
-						 state->colorops[i].state);
+						 state->colorops[i].state_to_destroy);
 		state->colorops[i].ptr = NULL;
-		state->colorops[i].state = NULL;
+		state->colorops[i].state_to_destroy = NULL;
 		state->colorops[i].old_state = NULL;
 		state->colorops[i].new_state = NULL;
 	}
@@ -273,8 +358,13 @@ void drm_atomic_commit_default_clear(struct drm_atomic_commit *state)
 	for (i = 0; i < state->num_private_objs; i++) {
 		struct drm_private_obj *obj = state->private_objs[i].ptr;
 
-		obj->funcs->atomic_destroy_state(obj,
-						 state->private_objs[i].state_to_destroy);
+		if (!obj)
+			continue;
+
+		if (state->private_objs[i].state_to_destroy)
+			obj->funcs->atomic_destroy_state(obj,
+							 state->private_objs[i].state_to_destroy);
+
 		state->private_objs[i].ptr = NULL;
 		state->private_objs[i].state_to_destroy = NULL;
 		state->private_objs[i].old_state = NULL;
@@ -628,7 +718,7 @@ drm_atomic_get_colorop_state(struct drm_atomic_commit *state,
 	if (!colorop_state)
 		return ERR_PTR(-ENOMEM);
 
-	state->colorops[index].state = colorop_state;
+	state->colorops[index].state_to_destroy = colorop_state;
 	state->colorops[index].ptr = colorop;
 	state->colorops[index].old_state = colorop->state;
 	state->colorops[index].new_state = colorop_state;
@@ -844,6 +934,10 @@ static void drm_atomic_colorop_print_state(struct drm_printer *p,
 		drm_printf_indent(p, 1, "interpolation=%s\n",
 				  drm_get_colorop_lut3d_interpolation_name(state->lut3d_interpolation));
 		drm_printf_indent(p, 1, "data blob id=%d\n", state->data ? state->data->base.id : 0);
+		break;
+	case DRM_COLOROP_FIXED_MATRIX:
+		drm_printf_indent(p, 1, "fixed_matrix_type=%s\n",
+				  drm_get_colorop_fixed_matrix_type_name(state->fixed_matrix_type));
 		break;
 	default:
 		break;
@@ -1474,7 +1568,7 @@ drm_atomic_add_encoder_bridges(struct drm_atomic_commit *state,
 		       "Adding all bridges for [encoder:%d:%s] to %p\n",
 		       encoder->base.id, encoder->name, state);
 
-	drm_for_each_bridge_in_chain_scoped(encoder, bridge) {
+	drm_for_each_bridge_in_chain(encoder, bridge) {
 		/* Skip bridges that don't implement the atomic state hooks. */
 		if (!bridge->funcs->atomic_duplicate_state)
 			continue;

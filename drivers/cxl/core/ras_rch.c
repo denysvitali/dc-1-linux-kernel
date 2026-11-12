@@ -19,7 +19,7 @@ void cxl_dport_map_rch_aer(struct cxl_dport *dport)
 		aer_phys = aer_cap + dport->rcrb.base;
 		dport->regs.dport_aer =
 			devm_cxl_iomap_block(host, aer_phys,
-					     sizeof(struct aer_capability_regs));
+					     PCIE_AER_CAP_HW_SIZE);
 	}
 }
 
@@ -58,16 +58,20 @@ void cxl_disable_rch_root_ints(struct cxl_dport *dport)
 static bool cxl_rch_get_aer_info(void __iomem *aer_base,
 				 struct aer_capability_regs *aer_regs)
 {
-	int read_cnt = sizeof(struct aer_capability_regs) / sizeof(u32);
-	u32 *aer_regs_buf = (u32 *)aer_regs;
-	int n;
+	/* A flat copy cannot fill the struct; aer_cap_regs_unpack() places it. */
+	__le32 raw[PCIE_AER_CAP_HW_SIZE / sizeof(__le32)];
 
 	if (!aer_base)
 		return false;
 
-	/* Use readl() to guarantee 32-bit accesses */
-	for (n = 0; n < read_cnt; n++)
-		aer_regs_buf[n] = readl(aer_base + n * sizeof(u32));
+	/*
+	 * Use readl() to guarantee 32-bit accesses; it returns host order, so
+	 * put the registers back little-endian for aer_cap_regs_unpack().
+	 */
+	for (int n = 0; n < ARRAY_SIZE(raw); n++)
+		raw[n] = cpu_to_le32(readl(aer_base + n * sizeof(u32)));
+
+	aer_cap_regs_unpack(aer_regs, raw, sizeof(raw));
 
 	writel(aer_regs->uncor_status, aer_base + PCI_ERR_UNCOR_STATUS);
 	writel(aer_regs->cor_status, aer_base + PCI_ERR_COR_STATUS);
@@ -79,11 +83,11 @@ static bool cxl_rch_get_aer_info(void __iomem *aer_base,
 static bool cxl_rch_get_aer_severity(struct aer_capability_regs *aer_regs,
 				     int *severity)
 {
-	if (aer_regs->uncor_status & ~aer_regs->uncor_mask) {
-		if (aer_regs->uncor_status & PCI_ERR_ROOT_FATAL_RCV)
-			*severity = AER_FATAL;
-		else
-			*severity = AER_NONFATAL;
+	u32 uncor_status = aer_regs->uncor_status & ~aer_regs->uncor_mask;
+
+	if (uncor_status) {
+		*severity = (uncor_status & aer_regs->uncor_severity) ?
+			     AER_FATAL : AER_NONFATAL;
 		return true;
 	}
 
@@ -103,8 +107,18 @@ void cxl_handle_rdport_errors(struct cxl_dev_state *cxlds)
 	int severity;
 
 	struct cxl_port *port __free(put_cxl_port) =
-		cxl_pci_find_port(pdev, &dport);
+		cxl_pci_find_port(pdev);
 	if (!port)
+		return;
+
+	/*
+	 * The dport may have been freed since the lookup above, so take the
+	 * lock that pins it and find it again.
+	 */
+	guard(device)(cxl_port_dport_host(port));
+
+	dport = cxl_pci_find_dport(pdev, port);
+	if (!dport)
 		return;
 
 	if (!cxl_rch_get_aer_info(dport->regs.dport_aer, &aer_regs))

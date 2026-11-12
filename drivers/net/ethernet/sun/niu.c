@@ -6021,11 +6021,11 @@ static void niu_set_irq_name(struct niu *np)
 	int port = np->port;
 	int i, j = 1;
 
-	sprintf(np->irq_name[0], "%s:MAC", np->dev->name);
+	snprintf(np->irq_name[0], sizeof(np->irq_name[0]), "%s:MAC", np->dev->name);
 
 	if (port == 0) {
-		sprintf(np->irq_name[1], "%s:MIF", np->dev->name);
-		sprintf(np->irq_name[2], "%s:SYSERR", np->dev->name);
+		snprintf(np->irq_name[1], sizeof(np->irq_name[1]), "%s:MIF", np->dev->name);
+		snprintf(np->irq_name[2], sizeof(np->irq_name[2]), "%s:SYSERR", np->dev->name);
 		j = 3;
 	}
 
@@ -9835,15 +9835,11 @@ static int niu_pci_init_one(struct pci_dev *pdev,
 		PCI_EXP_DEVCTL_RELAX_EN);
 
 	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(44));
-	if (!err)
-		dev->features |= NETIF_F_HIGHDMA;
 	if (err) {
-		err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
-		if (err) {
-			dev_err(&pdev->dev, "No usable DMA configuration, aborting\n");
-			goto err_out_release_parent;
-		}
+		dev_err(&pdev->dev, "No usable DMA configuration, aborting\n");
+		goto err_out_release_parent;
 	}
+	dev->features |= NETIF_F_HIGHDMA;
 
 	niu_set_basic_features(dev);
 

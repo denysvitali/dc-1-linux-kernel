@@ -183,7 +183,7 @@ static int apple_sart_probe(struct platform_device *pdev)
 	struct apple_sart *sart;
 	struct device *dev = &pdev->dev;
 
-	sart = devm_kzalloc(dev, sizeof(*sart), GFP_KERNEL);
+	sart = devm_kzalloc_obj(dev, *sart);
 	if (!sart)
 		return -ENOMEM;
 
@@ -218,6 +218,7 @@ struct apple_sart *devm_apple_sart_get(struct device *dev)
 {
 	struct device_node *sart_node;
 	struct platform_device *sart_pdev;
+	struct device_link *link;
 	struct apple_sart *sart;
 
 	sart_node = of_parse_phandle(dev->of_node, "apple,sart", 0);
@@ -236,8 +237,12 @@ struct apple_sart *devm_apple_sart_get(struct device *dev)
 		return ERR_PTR(-EPROBE_DEFER);
 	}
 
-	device_link_add(dev, &sart_pdev->dev,
-			DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_SUPPLIER);
+	link = device_link_add(dev, &sart_pdev->dev,
+			       DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_SUPPLIER);
+	if (!link) {
+		put_device(&sart_pdev->dev);
+		return ERR_PTR(-ENODEV);
+	}
 
 	put_device(&sart_pdev->dev);
 

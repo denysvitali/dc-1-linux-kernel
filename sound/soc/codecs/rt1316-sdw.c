@@ -59,13 +59,13 @@ static const struct reg_default rt1316_reg_defaults[] = {
 	{ 0xd101, 0x00 },
 	{ 0xd102, 0x30 },
 	{ 0xd103, 0x00 },
-	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_UDMPU21, RT1316_SDCA_CTL_UDMPU_CLUSTER, 0), 0x00 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_FU21, RT1316_SDCA_CTL_FU_MUTE, CH_L), 0x01 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_FU21, RT1316_SDCA_CTL_FU_MUTE, CH_R), 0x01 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_XU24, RT1316_SDCA_CTL_BYPASS, 0), 0x01 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_PDE23, RT1316_SDCA_CTL_REQ_POWER_STATE, 0), 0x03 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_PDE22, RT1316_SDCA_CTL_REQ_POWER_STATE, 0), 0x03 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_PDE24, RT1316_SDCA_CTL_REQ_POWER_STATE, 0), 0x03 },
+	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_UDMPU21, RT1316_SDCA_CTL_UDMPU_CLUSTER, 0), 0x00 },
 };
 
 static const struct reg_sequence rt1316_blind_write[] = {
@@ -211,8 +211,8 @@ static int rt1316_read_prop(struct sdw_slave *slave)
 	prop->sink_ports = 0x2; /* BITMAP:  00000010 */
 
 	nval = hweight32(prop->source_ports);
-	prop->src_dpn_prop = devm_kcalloc(&slave->dev, nval,
-		sizeof(*prop->src_dpn_prop), GFP_KERNEL);
+	prop->src_dpn_prop = devm_kzalloc_objs(&slave->dev, *prop->src_dpn_prop,
+					       nval);
 	if (!prop->src_dpn_prop)
 		return -ENOMEM;
 
@@ -229,8 +229,8 @@ static int rt1316_read_prop(struct sdw_slave *slave)
 
 	/* do this again for sink now */
 	nval = hweight32(prop->sink_ports);
-	prop->sink_dpn_prop = devm_kcalloc(&slave->dev, nval,
-		sizeof(*prop->sink_dpn_prop), GFP_KERNEL);
+	prop->sink_dpn_prop = devm_kzalloc_objs(&slave->dev,
+						*prop->sink_dpn_prop, nval);
 	if (!prop->sink_dpn_prop)
 		return -ENOMEM;
 
@@ -658,7 +658,7 @@ static int rt1316_sdw_init(struct device *dev, struct regmap *regmap,
 	struct rt1316_sdw_priv *rt1316;
 	int ret;
 
-	rt1316 = devm_kzalloc(dev, sizeof(*rt1316), GFP_KERNEL);
+	rt1316 = devm_kzalloc_obj(dev, *rt1316);
 	if (!rt1316)
 		return -ENOMEM;
 
@@ -756,7 +756,12 @@ static int rt1316_dev_resume(struct device *dev)
 	}
 
 	regcache_cache_only(rt1316->regmap, false);
-	regcache_sync(rt1316->regmap);
+	ret = regcache_sync(rt1316->regmap);
+	if (ret) {
+		regcache_cache_only(rt1316->regmap, true);
+		regcache_mark_dirty(rt1316->regmap);
+		return ret;
+	}
 
 	return 0;
 }

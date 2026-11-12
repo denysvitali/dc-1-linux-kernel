@@ -7,6 +7,7 @@
 #define IONIC_DEV_INFO_SIGNATURE		0x44455649      /* 'DEVI' */
 #define IONIC_DEV_INFO_VERSION			1
 #define IONIC_IFNAMSIZ				16
+#define IONIC_CREATE_CQ_CMD_V2_MAGIC		-1
 
 /*
  * enum ionic_cmd_opcode - Device commands
@@ -514,6 +515,23 @@ enum ionic_lif_rdma_cap_stats {
 };
 
 /**
+ * enum ionic_lif_rdma_alloc_qid - RDMA QID allocation capability
+ *
+ * Bitmask of RDMA queue types for which firmware can automatically
+ * allocate queue IDs. When a bit is set, the driver can request the
+ * firmware to allocate QIDs for that queue type during creation.
+ *
+ * @IONIC_LIF_RDMA_ALLOC_QID_CQ:  Firmware can allocate QIDs for
+ *                                Completion Queues
+ * @IONIC_LIF_RDMA_ALLOC_QID_SRQ: Firmware can allocate QIDs for
+ *                                Shared Receive Queues
+ */
+enum ionic_lif_rdma_alloc_qid {
+	IONIC_LIF_RDMA_ALLOC_QID_CQ = BIT(0),
+	IONIC_LIF_RDMA_ALLOC_QID_SRQ = BIT(1),
+};
+
+/**
  * struct ionic_lif_identity - LIF identity information (type-specific)
  *
  * @capabilities:        LIF capabilities
@@ -555,6 +573,12 @@ enum ionic_lif_rdma_cap_stats {
  *	@rdma.eq_qtype:        RDMA Event Qtype
  *	@rdma.stats_type:      Supported statistics type
  *	                       (enum ionic_lif_rdma_cap_stats)
+ *	@rdma.rsvd:            Reserved byte
+ *	@rdma.rcq_sign_bit:    RCQ sign bit
+ *	@rdma.srq_qtype:       RDMA Shared Receive Qtype
+ *	@rdma.rsvd2:           Reserved byte(s)
+ *	@rdma.alloc_qid_cap:   RDMA queue type QID allocation capability
+ *	                       (bitmask of enum ionic_lif_rdma_alloc_qid)
  *	@rdma.rsvd1:           Reserved byte(s)
  * @words:               word access to struct contents
  */
@@ -600,7 +624,12 @@ union ionic_lif_identity {
 			struct ionic_lif_logical_qtype cq_qtype;
 			struct ionic_lif_logical_qtype eq_qtype;
 			__le16 stats_type;
-			u8 rsvd1[162];
+			u8 rsvd;
+			u8 rcq_sign_bit;
+			struct ionic_lif_logical_qtype srq_qtype;
+			u8 rsvd2[5];
+			u8 alloc_qid_cap;
+			u8 rsvd1[142];
 		} __packed rdma;
 	} __packed;
 	__le32 words[478];
@@ -1181,6 +1210,7 @@ enum ionic_eth_hw_features {
 	IONIC_ETH_HW_TX_CSUM_GENEVE	= BIT(18),
 	IONIC_ETH_HW_TSO_GENEVE		= BIT(19),
 	IONIC_ETH_HW_TIMESTAMP		= BIT(20),
+	IONIC_ETH_HW_RDMA_TIMESTAMP	= BIT(21),
 };
 
 /**
@@ -2603,6 +2633,7 @@ struct ionic_rdma_reset_cmd {
  * @depth_log2:    log base two of queue depth
  * @stride_log2:   log base two of queue stride
  * @dma_addr:      address of the queue memory
+ * @udma_idx:      udma index
  * @rsvd2:         reserved byte(s)
  *
  * The same command struct is used to create an RDMA event queue, completion
@@ -2632,7 +2663,8 @@ struct ionic_rdma_queue_cmd {
 	u8     depth_log2;
 	u8     stride_log2;
 	__le64 dma_addr;
-	u8     rsvd2[40];
+	u8     udma_idx;
+	u8     rsvd2[39];
 };
 
 /******************************************************************

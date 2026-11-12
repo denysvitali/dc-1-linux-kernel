@@ -196,7 +196,7 @@ int audit_match_class(int class, unsigned int syscall)
 }
 
 #ifdef CONFIG_AUDITSYSCALL
-static inline int audit_match_class_bits(int class, u32 *mask)
+static inline int audit_match_class_bits(int class, const u32 *mask)
 {
 	int i;
 
@@ -208,29 +208,61 @@ static inline int audit_match_class_bits(int class, u32 *mask)
 	return 1;
 }
 
-static int audit_match_signal(struct audit_entry *entry)
+static int audit_match_signal(const struct audit_krule *rule)
 {
-	struct audit_field *arch = entry->rule.arch_f;
+	struct audit_field *arch = rule->arch_f;
 
 	if (!arch) {
 		/* When arch is unspecified, we must check both masks on biarch
 		 * as syscall number alone is ambiguous. */
 		return (audit_match_class_bits(AUDIT_CLASS_SIGNAL,
-					       entry->rule.mask) &&
+					       rule->mask) &&
 			audit_match_class_bits(AUDIT_CLASS_SIGNAL_32,
-					       entry->rule.mask));
+					       rule->mask));
 	}
 
 	switch (audit_classify_arch(arch->val)) {
 	case 0: /* native */
 		return (audit_match_class_bits(AUDIT_CLASS_SIGNAL,
-					       entry->rule.mask));
+					       rule->mask));
 	case 1: /* 32bit on biarch */
 		return (audit_match_class_bits(AUDIT_CLASS_SIGNAL_32,
-					       entry->rule.mask));
+					       rule->mask));
 	default:
 		return 1;
 	}
+}
+
+static bool audit_rule_counts_syscalls(const struct audit_krule *rule)
+{
+	switch (rule->listnr) {
+	case AUDIT_FILTER_USER:
+	case AUDIT_FILTER_EXCLUDE:
+	case AUDIT_FILTER_FS:
+		return false;
+	default:
+		return true;
+	}
+}
+
+void audit_rule_account(const struct audit_krule *rule)
+{
+	lockdep_assert_held(&audit_filter_mutex);
+
+	if (audit_rule_counts_syscalls(rule))
+		audit_n_rules++;
+	if (!audit_match_signal(rule))
+		audit_signals++;
+}
+
+void audit_rule_unaccount(const struct audit_krule *rule)
+{
+	lockdep_assert_held(&audit_filter_mutex);
+
+	if (audit_rule_counts_syscalls(rule))
+		audit_n_rules--;
+	if (!audit_match_signal(rule))
+		audit_signals--;
 }
 #endif
 
@@ -943,17 +975,6 @@ static inline int audit_add_rule(struct audit_entry *entry)
 	struct audit_tree *tree = entry->rule.tree;
 	struct list_head *list;
 	int err = 0;
-#ifdef CONFIG_AUDITSYSCALL
-	int dont_count = 0;
-
-	/* If any of these, don't count towards total */
-	switch (entry->rule.listnr) {
-	case AUDIT_FILTER_USER:
-	case AUDIT_FILTER_EXCLUDE:
-	case AUDIT_FILTER_FS:
-		dont_count = 1;
-	}
-#endif
 
 	mutex_lock(&audit_filter_mutex);
 	e = audit_find_rule(entry, &list);
@@ -1007,13 +1028,7 @@ static inline int audit_add_rule(struct audit_entry *entry)
 			      &audit_rules_list[entry->rule.listnr]);
 		list_add_tail_rcu(&entry->list, list);
 	}
-#ifdef CONFIG_AUDITSYSCALL
-	if (!dont_count)
-		audit_n_rules++;
-
-	if (!audit_match_signal(entry))
-		audit_signals++;
-#endif
+	audit_rule_account(&entry->rule);
 	mutex_unlock(&audit_filter_mutex);
 
 	return err;
@@ -1023,20 +1038,8 @@ static inline int audit_add_rule(struct audit_entry *entry)
 int audit_del_rule(struct audit_entry *entry)
 {
 	struct audit_entry  *e;
-	struct audit_tree *tree = entry->rule.tree;
 	struct list_head *list;
 	int ret = 0;
-#ifdef CONFIG_AUDITSYSCALL
-	int dont_count = 0;
-
-	/* If any of these, don't count towards total */
-	switch (entry->rule.listnr) {
-	case AUDIT_FILTER_USER:
-	case AUDIT_FILTER_EXCLUDE:
-	case AUDIT_FILTER_FS:
-		dont_count = 1;
-	}
-#endif
 
 	mutex_lock(&audit_filter_mutex);
 	e = audit_find_rule(entry, &list);
@@ -1044,6 +1047,10 @@ int audit_del_rule(struct audit_entry *entry)
 		ret = -ENOENT;
 		goto out;
 	}
+
+	list_del_rcu(&e->list);
+	list_del(&e->rule.list);
+	synchronize_rcu();
 
 	if (e->rule.watch)
 		audit_remove_watch_rule(&e->rule);
@@ -1054,23 +1061,11 @@ int audit_del_rule(struct audit_entry *entry)
 	if (e->rule.exe)
 		audit_remove_mark_rule(&e->rule);
 
-#ifdef CONFIG_AUDITSYSCALL
-	if (!dont_count)
-		audit_n_rules--;
-
-	if (!audit_match_signal(entry))
-		audit_signals--;
-#endif
-
-	list_del_rcu(&e->list);
-	list_del(&e->rule.list);
+	audit_rule_unaccount(&e->rule);
 	call_rcu(&e->rcu, audit_free_rule_rcu);
 
 out:
 	mutex_unlock(&audit_filter_mutex);
-
-	if (tree)
-		audit_put_tree(tree);	/* that's the temporary one */
 
 	return ret;
 }
@@ -1156,6 +1151,8 @@ int audit_rule_change(int type, int seq, void *data, size_t datasz)
 	}
 
 	if (err || type == AUDIT_DEL_RULE) {
+		if (type == AUDIT_DEL_RULE && entry->rule.tree)
+			audit_put_tree(entry->rule.tree);
 		if (entry->rule.exe)
 			audit_remove_mark(entry->rule.exe);
 		audit_free_rule(entry);
@@ -1427,6 +1424,7 @@ static int update_lsm_rule(struct audit_krule *r)
 			list_del(&r->rlist);
 		list_del_rcu(&entry->list);
 		list_del(&r->list);
+		audit_rule_unaccount(r);
 	} else {
 		if (r->watch || r->tree)
 			list_replace_init(&r->rlist, &nentry->rule.rlist);

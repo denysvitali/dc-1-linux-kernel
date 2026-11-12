@@ -278,12 +278,14 @@ static int keembay_pcie_setup_msi_irq(struct keembay_pcie *pcie)
 	return 0;
 }
 
-static void keembay_pcie_ep_init(struct dw_pcie_ep *ep)
+static int keembay_pcie_ep_init(struct dw_pcie_ep *ep)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	struct keembay_pcie *pcie = dev_get_drvdata(pci->dev);
 
 	writel(EDMA_INT_EN, pcie->apb_base + PCIE_REGS_INTERRUPT_ENABLE);
+
+	return 0;
 }
 
 static int keembay_pcie_ep_raise_irq(struct dw_pcie_ep *ep, u8 func_no,
@@ -399,7 +401,7 @@ static int keembay_pcie_probe(struct platform_device *pdev)
 
 	mode = (enum dw_pcie_device_mode)data->mode;
 
-	pcie = devm_kzalloc(dev, sizeof(*pcie), GFP_KERNEL);
+	pcie = devm_kzalloc_obj(dev, *pcie);
 	if (!pcie)
 		return -ENOMEM;
 

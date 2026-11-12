@@ -64,10 +64,8 @@ err_free_primary:
 static void ivpu_preemption_buffers_free(struct ivpu_device *vdev,
 					 struct ivpu_file_priv *file_priv, struct ivpu_cmdq *cmdq)
 {
-	if (cmdq->primary_preempt_buf)
-		ivpu_bo_free(cmdq->primary_preempt_buf);
-	if (cmdq->secondary_preempt_buf)
-		ivpu_bo_free(cmdq->secondary_preempt_buf);
+	ivpu_bo_free(cmdq->primary_preempt_buf);
+	ivpu_bo_free(cmdq->secondary_preempt_buf);
 }
 
 static int ivpu_preemption_job_init(struct ivpu_device *vdev, struct ivpu_file_priv *file_priv,
@@ -323,6 +321,11 @@ static inline u8 ivpu_job_to_jsm_priority(u8 priority)
 	return priority - 1;
 }
 
+static inline u8 ivpu_jsm_to_job_priority(u8 priority)
+{
+	return priority + 1;
+}
+
 static void ivpu_cmdq_destroy(struct ivpu_file_priv *file_priv, struct ivpu_cmdq *cmdq)
 {
 	lockdep_assert_held(&file_priv->lock);
@@ -535,6 +538,20 @@ static void ivpu_job_destroy(struct ivpu_job *job)
 	kfree(job);
 }
 
+void ivpu_job_destroy_work_fn(struct work_struct *work)
+{
+	struct ivpu_device *vdev = container_of(work, struct ivpu_device, job_destroy_work);
+	struct ivpu_job *job, *tmp;
+	struct llist_node *list;
+
+	list = llist_del_all(&vdev->job_destroy_list);
+
+	llist_for_each_entry_safe(job, tmp, list, destroy_node) {
+		ivpu_job_destroy(job);
+		ivpu_rpm_put(vdev);
+	}
+}
+
 static struct ivpu_job *
 ivpu_job_create(struct ivpu_file_priv *file_priv, u32 engine_idx, u32 bo_count)
 {
@@ -607,7 +624,6 @@ bool ivpu_job_handle_engine_error(struct ivpu_device *vdev, u32 job_id, u32 job_
 		 * status and ensure both are handled in the same way
 		 */
 		job->file_priv->has_mmu_faults = true;
-		atomic_set(&vdev->faults_detected, 1);
 		queue_work(system_percpu_wq, &vdev->context_abort_work);
 		return true;
 	}
@@ -619,7 +635,7 @@ bool ivpu_job_handle_engine_error(struct ivpu_device *vdev, u32 job_id, u32 job_
 	return false;
 }
 
-static int ivpu_job_signal_and_destroy(struct ivpu_device *vdev, u32 job_id, u32 job_status)
+static struct ivpu_job *ivpu_job_signal(struct ivpu_device *vdev, u32 job_id, u32 job_status)
 {
 	struct ivpu_job *job;
 
@@ -627,7 +643,7 @@ static int ivpu_job_signal_and_destroy(struct ivpu_device *vdev, u32 job_id, u32
 
 	job = xa_load(&vdev->submitted_jobs_xa, job_id);
 	if (!job)
-		return -ENOENT;
+		return NULL;
 
 	ivpu_job_remove_from_submitted_jobs(vdev, job_id);
 
@@ -646,13 +662,36 @@ static int ivpu_job_signal_and_destroy(struct ivpu_device *vdev, u32 job_id, u32
 		 job->job_id, job->file_priv->ctx.id, job->cmdq_id, job->engine_idx,
 		 job->job_status);
 
-	ivpu_job_destroy(job);
 	ivpu_stop_job_timeout_detection(vdev);
-
-	ivpu_rpm_put(vdev);
 
 	if (!xa_empty(&vdev->submitted_jobs_xa))
 		ivpu_start_job_timeout_detection(vdev);
+
+	return job;
+}
+
+static int ivpu_job_signal_and_destroy(struct ivpu_device *vdev, u32 job_id, u32 job_status)
+{
+	struct ivpu_job *job = ivpu_job_signal(vdev, job_id, job_status);
+
+	if (!job)
+		return -ENOENT;
+
+	ivpu_job_destroy(job);
+	ivpu_rpm_put(vdev);
+
+	return 0;
+}
+
+static int ivpu_job_signal_and_defer_destroy(struct ivpu_device *vdev, u32 job_id, u32 job_status)
+{
+	struct ivpu_job *job = ivpu_job_signal(vdev, job_id, job_status);
+
+	if (!job)
+		return -ENOENT;
+
+	llist_add(&job->destroy_node, &vdev->job_destroy_list);
+	queue_work(vdev->job_destroy_wq, &vdev->job_destroy_work);
 
 	return 0;
 }
@@ -689,6 +728,7 @@ static int ivpu_job_submit(struct ivpu_job *job, u8 priority, u32 cmdq_id)
 	struct ivpu_file_priv *file_priv = job->file_priv;
 	struct ivpu_device *vdev = job->vdev;
 	struct ivpu_cmdq *cmdq;
+	bool flushed = false;
 	bool is_first_job;
 	int ret;
 
@@ -696,6 +736,7 @@ static int ivpu_job_submit(struct ivpu_job *job, u8 priority, u32 cmdq_id)
 	if (ret < 0)
 		return ret;
 
+retry:
 	mutex_lock(&vdev->submitted_jobs_lock);
 	mutex_lock(&file_priv->lock);
 
@@ -709,6 +750,14 @@ static int ivpu_job_submit(struct ivpu_job *job, u8 priority, u32 cmdq_id)
 	}
 
 	ret = ivpu_cmdq_register(file_priv, cmdq);
+	if (ret == -EBUSY && !flushed) {
+		/* Doorbell may be held by jobs pending deferred cleanup */
+		mutex_unlock(&file_priv->lock);
+		mutex_unlock(&vdev->submitted_jobs_lock);
+		flush_work(&vdev->job_destroy_work);
+		flushed = true;
+		goto retry;
+	}
 	if (ret) {
 		ivpu_err(vdev, "Failed to register command queue: %d\n", ret);
 		goto err_unlock;
@@ -865,7 +914,7 @@ static int ivpu_submit(struct drm_file *file, struct ivpu_file_priv *file_priv, 
 	u32 *buf_handles;
 	int idx, ret;
 
-	buf_handles = kcalloc(buffer_count, sizeof(u32), GFP_KERNEL);
+	buf_handles = kzalloc_objs(u32, buffer_count);
 	if (!buf_handles)
 		return -ENOMEM;
 
@@ -1080,6 +1129,86 @@ int ivpu_cmdq_destroy_ioctl(struct drm_device *dev, void *data, struct drm_file 
 	return ret;
 }
 
+static int ivpu_cmdq_priority_args_check(struct ivpu_device *vdev, u32 cmdq_id, u64 priority)
+{
+	if (!ivpu_is_capable(vdev, DRM_IVPU_CAP_CMDQ_SET_PRIORITY)) {
+		ivpu_dbg(vdev, IOCTL, "Command queue priority not supported\n");
+		return -ENODEV;
+	}
+
+	if (cmdq_id < IVPU_CMDQ_MIN_ID || cmdq_id > IVPU_CMDQ_MAX_ID) {
+		ivpu_dbg(vdev, IOCTL, "Invalid command queue ID %u\n", cmdq_id);
+		return -EINVAL;
+	}
+
+	if (priority > DRM_IVPU_JOB_PRIORITY_REALTIME)
+		return -EINVAL;
+
+	return 0;
+}
+
+int ivpu_cmdq_get_priority(struct ivpu_file_priv *file_priv, u32 cmdq_id, u64 *priority)
+{
+	struct ivpu_device *vdev = file_priv->vdev;
+	struct ivpu_cmdq *cmdq;
+	int ret;
+
+	ret = ivpu_cmdq_priority_args_check(vdev, cmdq_id, DRM_IVPU_JOB_PRIORITY_NORMAL);
+	if (ret)
+		return ret;
+
+	guard(mutex)(&file_priv->lock);
+
+	cmdq = ivpu_cmdq_acquire(file_priv, cmdq_id);
+	if (!cmdq || cmdq->is_legacy)
+		return -EINVAL;
+
+	*priority = ivpu_jsm_to_job_priority(cmdq->priority);
+	return 0;
+}
+
+int ivpu_cmdq_set_priority(struct ivpu_file_priv *file_priv, u32 cmdq_id, u64 priority)
+{
+	struct ivpu_device *vdev = file_priv->vdev;
+	struct ivpu_cmdq *cmdq;
+	u8 jsm_priority;
+	int ret = 0;
+
+	ret = ivpu_cmdq_priority_args_check(vdev, cmdq_id, priority);
+	if (ret)
+		return ret;
+
+	ret = ivpu_rpm_get(vdev);
+	if (ret < 0)
+		return ret;
+
+	mutex_lock(&file_priv->lock);
+
+	cmdq = ivpu_cmdq_acquire(file_priv, cmdq_id);
+	if (!cmdq || cmdq->is_legacy) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	jsm_priority = ivpu_job_to_jsm_priority(priority);
+	if (cmdq->priority == jsm_priority)
+		goto out;
+
+	if (cmdq->db_id) {
+		ret = ivpu_jsm_hws_set_context_sched_properties(vdev, file_priv->ctx.id, cmdq_id,
+								jsm_priority);
+		if (ret)
+			goto out;
+	}
+
+	cmdq->priority = jsm_priority;
+
+out:
+	mutex_unlock(&file_priv->lock);
+	ivpu_rpm_put(vdev);
+	return ret;
+}
+
 static void
 ivpu_job_done_callback(struct ivpu_device *vdev, struct ivpu_ipc_hdr *ipc_hdr,
 		       struct vpu_jsm_msg *jsm_msg)
@@ -1101,7 +1230,7 @@ ivpu_job_done_callback(struct ivpu_device *vdev, struct ivpu_ipc_hdr *ipc_hdr,
 	mutex_lock(&vdev->submitted_jobs_lock);
 	if (!ivpu_job_handle_engine_error(vdev, payload->job_id, payload->job_status))
 		/* No engine error, complete the job normally */
-		ivpu_job_signal_and_destroy(vdev, payload->job_id, payload->job_status);
+		ivpu_job_signal_and_defer_destroy(vdev, payload->job_id, payload->job_status);
 	mutex_unlock(&vdev->submitted_jobs_lock);
 }
 
@@ -1128,10 +1257,10 @@ static int reset_engine_and_mark_faulty_contexts(struct ivpu_device *vdev)
 		return ret;
 
 	/*
-	 * If faults are detected, ignore guilty contexts from engine reset as NPU may not be stuck
-	 * and could return currently running good context and faulty contexts are already marked
+	 * If job timeout is detected, read guilty context from engine reset, for other reasons
+	 * faulty context is already known
 	 */
-	if (atomic_cmpxchg(&vdev->faults_detected, 1, 0) == 1)
+	if (atomic_cmpxchg(&vdev->job_timeout_detected, 1, 0) == 0)
 		return 0;
 
 	num_impacted_contexts = resp.payload.engine_reset_done.num_impacted_contexts;
@@ -1169,8 +1298,11 @@ void ivpu_context_abort_work_fn(struct work_struct *work)
 	unsigned long ctx_id;
 	unsigned long id;
 
-	if (drm_WARN_ON(&vdev->drm, pm_runtime_get_if_active(vdev->drm.dev) <= 0))
+	if (!down_read_trylock(&vdev->pm->reset_lock))
 		return;
+
+	if (drm_WARN_ON(&vdev->drm, pm_runtime_get_if_active(vdev->drm.dev) <= 0))
+		goto unlock;
 
 	if (vdev->fw->sched_mode == VPU_SCHEDULING_MODE_HW)
 		if (reset_engine_and_mark_faulty_contexts(vdev))
@@ -1212,4 +1344,6 @@ void ivpu_context_abort_work_fn(struct work_struct *work)
 
 runtime_put:
 	pm_runtime_put_autosuspend(vdev->drm.dev);
+unlock:
+	up_read(&vdev->pm->reset_lock);
 }

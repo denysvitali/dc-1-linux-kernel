@@ -98,7 +98,7 @@ static void ieee80211_send_addba_request(struct sta_info *sta, u16 tid,
 	if (sta->sta.deflink.he_cap.has_he)
 		ieee80211_add_addbaext(skb, 0, agg_size);
 
-	ieee80211_tx_skb_tid(sdata, skb, tid, -1);
+	ieee80211_tx_skb_tid(sdata, skb, NULL, tid, -1);
 }
 
 void ieee80211_send_bar(struct ieee80211_vif *vif, u8 *ra, u16 tid, u16 ssn)
@@ -127,7 +127,7 @@ void ieee80211_send_bar(struct ieee80211_vif *vif, u8 *ra, u16 tid, u16 ssn)
 
 	IEEE80211_SKB_CB(skb)->flags |= IEEE80211_TX_INTFL_DONT_ENCRYPT |
 					IEEE80211_TX_CTL_REQ_TX_STATUS;
-	ieee80211_tx_skb_tid(sdata, skb, tid, -1);
+	ieee80211_tx_skb_tid(sdata, skb, NULL, tid, -1);
 }
 EXPORT_SYMBOL(ieee80211_send_bar);
 
@@ -212,10 +212,7 @@ ieee80211_agg_start_txq(struct sta_info *sta, int tid, bool enable)
 
 	txqi = to_txq_info(txq);
 
-	if (enable)
-		set_bit(IEEE80211_TXQ_AMPDU, &txqi->flags);
-	else
-		clear_bit(IEEE80211_TXQ_AMPDU, &txqi->flags);
+	assign_bit(IEEE80211_TXQ_AMPDU, &txqi->flags, enable);
 
 	clear_bit(IEEE80211_TXQ_STOP, &txqi->flags);
 	local_bh_disable();
@@ -915,6 +912,7 @@ void ieee80211_stop_tx_ba_cb(struct sta_info *sta, int tid,
 			     struct tid_ampdu_tx *tid_tx)
 {
 	struct ieee80211_sub_if_data *sdata = sta->sdata;
+	bool ndp = ndp = tid_tx->ndp;
 	bool send_delba = false;
 	bool start_txq = false;
 
@@ -934,6 +932,7 @@ void ieee80211_stop_tx_ba_cb(struct sta_info *sta, int tid,
 		send_delba = true;
 
 	ieee80211_remove_tid_tx(sta, tid);
+	/* tid_tx is now invalid since ieee80211_remove_tid_tx() frees it */
 	start_txq = true;
 
  unlock_sta:
@@ -946,7 +945,7 @@ void ieee80211_stop_tx_ba_cb(struct sta_info *sta, int tid,
 		ieee80211_send_delba(sdata, sta->sta.addr, tid,
 				     WLAN_BACK_INITIATOR,
 				     WLAN_REASON_QSTA_NOT_USE,
-				     tid_tx->ndp);
+				     ndp);
 }
 
 void ieee80211_stop_tx_ba_cb_irqsafe(struct ieee80211_vif *vif,

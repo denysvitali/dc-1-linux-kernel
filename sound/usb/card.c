@@ -618,93 +618,70 @@ static void usb_audio_make_shortname(struct usb_device *dev,
 {
 	struct snd_card *card = chip->card;
 	const struct usb_audio_device_name *preset;
-	const char *s = NULL;
 
+	*card->shortname = 0;
 	preset = lookup_device_name(chip->usb_id);
 	if (preset && preset->product_name)
-		s = preset->product_name;
+		strscpy(card->shortname, preset->product_name);
 	else if (quirk && quirk->product_name)
-		s = quirk->product_name;
-	if (s && *s) {
-		strscpy(card->shortname, s, sizeof(card->shortname));
+		strscpy(card->shortname, quirk->product_name);
+	if (*card->shortname)
+		return;
+
+	if (dev->product && *dev->product) {
+		strscpy(card->shortname, dev->product);
+		strim(card->shortname);
 		return;
 	}
 
-	/* retrieve the device string as shortname */
-	if (dev->product && *dev->product) {
-		strscpy(card->shortname, dev->product);
-	} else {
-		/* no name available from anywhere, so use ID */
-		scnprintf(card->shortname, sizeof(card->shortname),
-			  "USB Device %#04x:%#04x",
-			  USB_ID_VENDOR(chip->usb_id),
-			  USB_ID_PRODUCT(chip->usb_id));
-	}
-
-	strim(card->shortname);
+	scnprintf(card->shortname, sizeof(card->shortname), "USB Device %#04x:%#04x",
+		  USB_ID_VENDOR(chip->usb_id), USB_ID_PRODUCT(chip->usb_id));
 }
 
 static void usb_audio_make_longname(struct usb_device *dev,
 				    struct snd_usb_audio *chip,
 				    const struct snd_usb_audio_quirk *quirk)
 {
+	static const char * const speed_suffixes[] = {
+		[USB_SPEED_LOW] = ", low speed",
+		[USB_SPEED_FULL] = ", full speed",
+		[USB_SPEED_HIGH] = ", high speed",
+		[USB_SPEED_SUPER] = ", super speed",
+		[USB_SPEED_SUPER_PLUS] = ", super speed plus",
+	};
 	struct snd_card *card = chip->card;
 	const struct usb_audio_device_name *preset;
-	const char *s = NULL;
-	int len;
+	enum usb_device_speed speed = snd_usb_get_speed(dev);
+	int len, ret;
 
 	preset = lookup_device_name(chip->usb_id);
 
 	/* shortcut - if any pre-defined string is given, use it */
-	if (preset && preset->profile_name)
-		s = preset->profile_name;
-	if (s && *s) {
-		strscpy(card->longname, s, sizeof(card->longname));
+	if (preset && preset->profile_name && *preset->profile_name) {
+		strscpy(card->longname, preset->profile_name);
 		return;
 	}
 
-	if (preset && preset->vendor_name)
-		s = preset->vendor_name;
-	else if (quirk && quirk->vendor_name)
-		s = quirk->vendor_name;
 	*card->longname = 0;
-	if (s && *s)
-		strscpy(card->longname, s);
-	else if (dev->manufacturer && *dev->manufacturer)
-		strscpy(card->longname, dev->manufacturer);
+	if (preset && preset->vendor_name)
+		strscpy(card->longname, preset->vendor_name);
+	else if (quirk && quirk->vendor_name)
+		strscpy(card->longname, quirk->vendor_name);
+	if (!*card->longname)
+		strscpy(card->longname, dev->manufacturer ?: "");
 
-	if (*card->longname) {
-		strim(card->longname);
-		if (*card->longname)
-			strlcat(card->longname, " ", sizeof(card->longname));
-	}
+	strim(card->longname);
+	len = strlen(card->longname);
+	len += scnprintf(card->longname + len, sizeof(card->longname) - len,
+			 "%s%s at ", len ? " " : "", card->shortname);
 
-	strlcat(card->longname, card->shortname, sizeof(card->longname));
+	ret = usb_make_path(dev, card->longname + len, sizeof(card->longname) - len);
+	if (ret < 0)
+		return;
+	len += ret;
 
-	len = strlcat(card->longname, " at ", sizeof(card->longname));
-
-	if (len < sizeof(card->longname))
-		usb_make_path(dev, card->longname + len, sizeof(card->longname) - len);
-
-	switch (snd_usb_get_speed(dev)) {
-	case USB_SPEED_LOW:
-		strlcat(card->longname, ", low speed", sizeof(card->longname));
-		break;
-	case USB_SPEED_FULL:
-		strlcat(card->longname, ", full speed", sizeof(card->longname));
-		break;
-	case USB_SPEED_HIGH:
-		strlcat(card->longname, ", high speed", sizeof(card->longname));
-		break;
-	case USB_SPEED_SUPER:
-		strlcat(card->longname, ", super speed", sizeof(card->longname));
-		break;
-	case USB_SPEED_SUPER_PLUS:
-		strlcat(card->longname, ", super speed plus", sizeof(card->longname));
-		break;
-	default:
-		break;
-	}
+	if (speed < ARRAY_SIZE(speed_suffixes) && speed_suffixes[speed])
+		strscpy(card->longname + len, speed_suffixes[speed], sizeof(card->longname) - len);
 }
 
 static void snd_usb_init_quirk_flags(int idx, struct snd_usb_audio *chip)
@@ -715,7 +692,7 @@ static void snd_usb_init_quirk_flags(int idx, struct snd_usb_audio *chip)
 
 	/* old style option found: the position-based integer value */
 	if (quirk_flags[idx] &&
-	    !kstrtou32(quirk_flags[idx], 0, &chip->quirk_flags)) {
+	    !kstrtou64(quirk_flags[idx], 0, &chip->quirk_flags)) {
 		snd_usb_apply_flag_dbg("module param", chip, chip->quirk_flags);
 		return;
 	}
@@ -905,6 +882,40 @@ static int try_to_register_card(struct snd_usb_audio *chip, int ifnum)
 	return 0;
 }
 
+static void usb_audio_disconnect_components(struct snd_usb_audio *chip)
+{
+	struct snd_usb_stream *as;
+	struct snd_usb_endpoint *ep;
+	struct usb_mixer_interface *mixer;
+	struct list_head *p;
+
+	/* release the pcm resources */
+	list_for_each_entry(as, &chip->pcm_list, list) {
+		snd_usb_stream_disconnect(as);
+	}
+	/* release the endpoint resources */
+	list_for_each_entry(ep, &chip->ep_list, list) {
+		snd_usb_endpoint_release(ep);
+	}
+	/* release the midi resources */
+	list_for_each(p, &chip->midi_list) {
+		snd_usbmidi_disconnect(p);
+	}
+	snd_usb_midi_v2_disconnect_all(chip);
+	/*
+	 * Nice to check quirk && quirk->shares_media_device and
+	 * then call the snd_media_device_delete(). Don't have
+	 * access to the quirk here. snd_media_device_delete()
+	 * accesses mixer_list
+	 */
+	snd_media_device_delete(chip);
+
+	/* release mixer resources */
+	list_for_each_entry(mixer, &chip->mixer_list, list) {
+		snd_usb_mixer_disconnect(mixer);
+	}
+}
+
 /*
  * probe the active usb device
  *
@@ -1077,8 +1088,10 @@ static int usb_audio_probe(struct usb_interface *intf,
 		 * decrement before memory is possibly returned.
 		 */
 		atomic_dec(&chip->active);
-		if (!chip->num_interfaces)
+		if (!chip->num_interfaces) {
+			usb_audio_disconnect_components(chip);
 			snd_card_free(chip->card);
+		}
 	}
 	return err;
 }
@@ -1091,48 +1104,18 @@ static bool __usb_audio_disconnect(struct usb_interface *intf,
 				   struct snd_usb_audio *chip,
 				   struct snd_card *card)
 {
-	struct list_head *p;
-
 	guard(mutex)(&register_mutex);
 
 	if (platform_ops && platform_ops->disconnect_cb)
 		platform_ops->disconnect_cb(chip);
 
 	if (atomic_inc_return(&chip->shutdown) == 1) {
-		struct snd_usb_stream *as;
-		struct snd_usb_endpoint *ep;
-		struct usb_mixer_interface *mixer;
-
 		/* wait until all pending tasks done;
 		 * they are protected by snd_usb_lock_shutdown()
 		 */
 		snd_refcount_sync(&chip->usage_count);
 		snd_card_disconnect(card);
-		/* release the pcm resources */
-		list_for_each_entry(as, &chip->pcm_list, list) {
-			snd_usb_stream_disconnect(as);
-		}
-		/* release the endpoint resources */
-		list_for_each_entry(ep, &chip->ep_list, list) {
-			snd_usb_endpoint_release(ep);
-		}
-		/* release the midi resources */
-		list_for_each(p, &chip->midi_list) {
-			snd_usbmidi_disconnect(p);
-		}
-		snd_usb_midi_v2_disconnect_all(chip);
-		/*
-		 * Nice to check quirk && quirk->shares_media_device and
-		 * then call the snd_media_device_delete(). Don't have
-		 * access to the quirk here. snd_media_device_delete()
-		 * accesses mixer_list
-		 */
-		snd_media_device_delete(chip);
-
-		/* release mixer resources */
-		list_for_each_entry(mixer, &chip->mixer_list, list) {
-			snd_usb_mixer_disconnect(mixer);
-		}
+		usb_audio_disconnect_components(chip);
 	}
 
 	if (chip->quirk_flags & QUIRK_FLAG_DISABLE_AUTOSUSPEND)
@@ -1276,8 +1259,11 @@ static int usb_audio_resume(struct usb_interface *intf)
 
 	list_for_each_entry(as, &chip->pcm_list, list) {
 		err = snd_usb_pcm_resume(as);
-		if (err < 0)
-			goto err_out;
+		if (err < 0) {
+			if (!chip->system_suspend)
+				goto err_out;
+			goto out;
+		}
 	}
 
 	/*
@@ -1286,8 +1272,11 @@ static int usb_audio_resume(struct usb_interface *intf)
 	 */
 	list_for_each_entry(mixer, &chip->mixer_list, list) {
 		err = snd_usb_mixer_resume(mixer);
-		if (err < 0)
-			goto err_out;
+		if (err < 0) {
+			if (!chip->system_suspend)
+				goto err_out;
+			goto out;
+		}
 	}
 
 	list_for_each(p, &chip->midi_list) {

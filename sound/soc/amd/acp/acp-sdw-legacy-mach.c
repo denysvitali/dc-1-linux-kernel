@@ -205,9 +205,19 @@ static int create_sdw_dailink(struct snd_soc_card *card,
 			return -EINVAL;
 		}
 
+		if (!soc_end->link_mask) {
+			dev_err(dev, "invalid zero link_mask\n");
+			return -EINVAL;
+		}
+		if ((ffs(soc_end->link_mask) - 1) >= amd_ctx->max_sdw_links) {
+			dev_err(dev, "link_id %d exceeds max_sdw_links %d\n",
+				ffs(soc_end->link_mask) - 1, amd_ctx->max_sdw_links);
+			return -EINVAL;
+		}
+
 		switch (amd_ctx->acp_rev) {
 		case ACP63_PCI_REV:
-			ret = get_acp63_cpu_pin_id(ffs(soc_end->link_mask - 1),
+			ret = get_acp63_cpu_pin_id(ffs(soc_end->link_mask) - 1,
 						   *be_id, &cpu_pin_id, dev);
 			if (ret)
 				return ret;
@@ -215,7 +225,7 @@ static int create_sdw_dailink(struct snd_soc_card *card,
 		case ACP70_PCI_REV:
 		case ACP71_PCI_REV:
 		case ACP72_PCI_REV:
-			ret = get_acp70_cpu_pin_id(ffs(soc_end->link_mask - 1),
+			ret = get_acp70_cpu_pin_id(ffs(soc_end->link_mask) - 1,
 						   *be_id, &cpu_pin_id, dev);
 			if (ret)
 				return ret;
@@ -239,20 +249,28 @@ static int create_sdw_dailink(struct snd_soc_card *card,
 		if (!name)
 			return -ENOMEM;
 
-		cpus = devm_kcalloc(dev, num_cpus, sizeof(*cpus), GFP_KERNEL);
+		cpus = devm_kzalloc_objs(dev, *cpus, num_cpus);
 		if (!cpus)
 			return -ENOMEM;
 
-		codecs = devm_kcalloc(dev, num_codecs, sizeof(*codecs), GFP_KERNEL);
+		codecs = devm_kzalloc_objs(dev, *codecs, num_codecs);
 		if (!codecs)
 			return -ENOMEM;
 
-		codec_maps = devm_kcalloc(dev, num_codecs, sizeof(*codec_maps), GFP_KERNEL);
+		codec_maps = devm_kzalloc_objs(dev, *codec_maps, num_codecs);
 		if (!codec_maps)
 			return -ENOMEM;
 
 		list_for_each_entry(soc_end, &soc_dai->endpoints, list) {
 			if (!soc_end->dai_info->direction[stream])
+				continue;
+
+			/*
+			 * skip adding reference stream for amp type
+			 * as legacy AMD doesn't use the DSP.
+			 */
+			if (soc_end->dai_info->dai_type == SOC_SDW_DAI_TYPE_AMP &&
+			    stream == SNDRV_PCM_STREAM_CAPTURE)
 				continue;
 
 			int link_num = ffs(soc_end->link_mask) - 1;
@@ -313,8 +331,8 @@ static int create_sdw_dailinks(struct snd_soc_card *card,
 	int i;
 	int ret;
 
-	sdw_platform_component = devm_kzalloc(dev, sizeof(struct snd_soc_dai_link_component),
-					      GFP_KERNEL);
+	sdw_platform_component = devm_kzalloc_obj(dev,
+						  struct snd_soc_dai_link_component);
 	if (!sdw_platform_component)
 		return -ENOMEM;
 
@@ -358,11 +376,11 @@ static int create_dmic_dailinks(struct snd_soc_card *card,
 	struct snd_soc_dai_link_component *pdm_platform;
 	int ret;
 
-	pdm_cpu = devm_kzalloc(dev, sizeof(struct snd_soc_dai_link_component), GFP_KERNEL);
+	pdm_cpu = devm_kzalloc_obj(dev, struct snd_soc_dai_link_component);
 	if (!pdm_cpu)
 		return -ENOMEM;
 
-	pdm_platform = devm_kzalloc(dev, sizeof(struct snd_soc_dai_link_component), GFP_KERNEL);
+	pdm_platform = devm_kzalloc_obj(dev, struct snd_soc_dai_link_component);
 	if (!pdm_platform)
 		return -ENOMEM;
 
@@ -428,15 +446,39 @@ static int soc_card_dai_links_create(struct snd_soc_card *card)
 	if (!soc_ends)
 		return -ENOMEM;
 
-	soc_aux = devm_kcalloc(dev, num_aux, sizeof(*soc_aux), GFP_KERNEL);
+	soc_aux = devm_kzalloc_objs(dev, *soc_aux, num_aux);
 	if (!soc_aux)
 		return -ENOMEM;
 
-	ret = asoc_sdw_parse_sdw_endpoints(card, soc_aux, soc_dais, soc_ends, &num_confs);
+	ret = asoc_sdw_parse_sdw_endpoints(dev, ctx, soc_aux, soc_dais, soc_ends, &num_confs);
 	if (ret < 0)
 		return ret;
 
 	sdw_be_num = ret;
+
+	/*
+	 * Legacy AMD has no DSP, so AMP reference capture streams are not
+	 * supported. Subtract them from num_devs so create_sdw_dailink()
+	 * uses the correct count directly, and decrement sdw_be_num when
+	 * all capture endpoints on a DAI are AMP type.
+	 */
+	for (int i = 0; i < num_ends; i++) {
+		struct asoc_sdw_dailink *d = &soc_dais[i];
+		struct asoc_sdw_endpoint *e;
+
+		if (!d->initialised)
+			break;
+		if (!d->num_devs[SNDRV_PCM_STREAM_CAPTURE])
+			continue;
+
+		list_for_each_entry(e, &d->endpoints, list) {
+			if (e->dai_info->direction[SNDRV_PCM_STREAM_CAPTURE] &&
+			    e->dai_info->dai_type == SOC_SDW_DAI_TYPE_AMP)
+				d->num_devs[SNDRV_PCM_STREAM_CAPTURE]--;
+		}
+		if (!d->num_devs[SNDRV_PCM_STREAM_CAPTURE])
+			sdw_be_num--;
+	}
 
 	/* enable dmic */
 	if (soc_sdw_quirk & ASOC_SDW_ACP_DMIC)
@@ -444,13 +486,13 @@ static int soc_card_dai_links_create(struct snd_soc_card *card)
 
 	dev_dbg(dev, "sdw %d, dmic %d", sdw_be_num, dmic_num);
 
-	codec_conf = devm_kcalloc(dev, num_confs, sizeof(*codec_conf), GFP_KERNEL);
+	codec_conf = devm_kzalloc_objs(dev, *codec_conf, num_confs);
 	if (!codec_conf)
 		return -ENOMEM;
 
 	/* allocate BE dailinks */
 	num_links = sdw_be_num + dmic_num;
-	dai_links = devm_kcalloc(dev, num_links, sizeof(*dai_links), GFP_KERNEL);
+	dai_links = devm_kzalloc_objs(dev, *dai_links, num_links);
 	if (!dai_links)
 		return -ENOMEM;
 
@@ -495,13 +537,13 @@ static int mc_probe(struct platform_device *pdev)
 	int amp_num = 0, i;
 	int ret;
 
-	amd_ctx = devm_kzalloc(&pdev->dev, sizeof(*amd_ctx), GFP_KERNEL);
+	amd_ctx = devm_kzalloc_obj(&pdev->dev, *amd_ctx);
 	if (!amd_ctx)
 		return -ENOMEM;
 
 	amd_ctx->acp_rev = mach->mach_params.subsystem_rev;
 	amd_ctx->max_sdw_links = ACP63_SDW_MAX_LINKS;
-	ctx = devm_kzalloc(&pdev->dev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(&pdev->dev, *ctx);
 	if (!ctx)
 		return -ENOMEM;
 	ctx->codec_info_list_count = asoc_sdw_get_codec_info_list_count();
@@ -521,15 +563,15 @@ static int mc_probe(struct platform_device *pdev)
 	dmi_check_system(soc_sdw_quirk_table);
 
 	if (quirk_override != -1) {
-		dev_info(card->dev, "Overriding quirk 0x%lx => 0x%x\n",
+		dev_info(&pdev->dev, "Overriding quirk 0x%lx => 0x%x\n",
 			 soc_sdw_quirk, quirk_override);
 		soc_sdw_quirk = quirk_override;
 	}
 
-	log_quirks(card->dev);
+	log_quirks(&pdev->dev);
 
 	ctx->mc_quirk = soc_sdw_quirk;
-	dev_dbg(card->dev, "legacy quirk 0x%lx\n", ctx->mc_quirk);
+	dev_dbg(&pdev->dev, "legacy quirk 0x%lx\n", ctx->mc_quirk);
 	/* reset amp_num to ensure amp_num++ starts from 0 in each probe */
 	for (i = 0; i < ctx->codec_info_list_count; i++)
 		codec_info_list[i].amp_num = 0;
@@ -546,12 +588,12 @@ static int mc_probe(struct platform_device *pdev)
 	for (i = 0; i < ctx->codec_info_list_count; i++)
 		amp_num += codec_info_list[i].amp_num;
 
-	card->components = devm_kasprintf(card->dev, GFP_KERNEL,
+	card->components = devm_kasprintf(&pdev->dev, GFP_KERNEL,
 					  " cfg-amp:%d", amp_num);
 	if (!card->components)
 		return -ENOMEM;
 	if (soc_sdw_quirk & ASOC_SDW_ACP_DMIC) {
-		card->components = devm_kasprintf(card->dev, GFP_KERNEL,
+		card->components = devm_kasprintf(&pdev->dev, GFP_KERNEL,
 						  "%s mic:acp-dmic cfg-mics:%d",
 						  card->components,
 						  1);
@@ -560,9 +602,9 @@ static int mc_probe(struct platform_device *pdev)
 	}
 
 	/* Register the card */
-	ret = devm_snd_soc_register_card(card->dev, card);
+	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret) {
-		dev_err_probe(card->dev, ret, "snd_soc_register_card failed %d\n", ret);
+		dev_err_probe(&pdev->dev, ret, "snd_soc_register_card failed %d\n", ret);
 		asoc_sdw_mc_dailink_exit_loop(card);
 		return ret;
 	}
@@ -580,8 +622,8 @@ static void mc_remove(struct platform_device *pdev)
 }
 
 static const struct platform_device_id mc_id_table[] = {
-	{ "amd_sdw", },
-	{}
+	{ .name = "amd_sdw" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, mc_id_table);
 

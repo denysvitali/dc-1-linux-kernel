@@ -113,7 +113,7 @@ static struct sk_buff *mlx5e_test_get_udp_skb(struct mlx5e_priv *priv)
 	/* Fill UDP header */
 	udph->source = htons(9);
 	udph->dest = htons(9); /* Discard Protocol */
-	udph->len = htons(sizeof(struct mlx5ehdr) + sizeof(struct udphdr));
+	udp_set_len_short(udph, sizeof(struct mlx5ehdr) + sizeof(struct udphdr));
 	udph->check = 0;
 
 	/* Fill IP header */
@@ -165,6 +165,10 @@ mlx5e_test_loopback_validate(struct sk_buff *skb,
 	struct ethhdr *ethh;
 	struct udphdr *udph;
 	struct iphdr *iph;
+
+	skb = skb_share_check(skb, GFP_ATOMIC);
+	if (!skb)
+		goto out;
 
 	if (skb_linearize(skb))
 		goto out;

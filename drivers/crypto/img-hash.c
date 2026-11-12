@@ -926,7 +926,7 @@ static int img_hash_probe(struct platform_device *pdev)
 	int	irq;
 	int err;
 
-	hdev = devm_kzalloc(dev, sizeof(*hdev), GFP_KERNEL);
+	hdev = devm_kzalloc_obj(dev, *hdev);
 	if (hdev == NULL)
 		return -ENOMEM;
 
@@ -966,10 +966,8 @@ static int img_hash_probe(struct platform_device *pdev)
 
 	err = devm_request_irq(dev, irq, img_irq_handler, 0,
 			       dev_name(dev), hdev);
-	if (err) {
-		dev_err(dev, "unable to request irq\n");
+	if (err)
 		goto res_err;
-	}
 	dev_dbg(dev, "using IRQ channel %d\n", irq);
 
 	hdev->hash_clk = devm_clk_get_enabled(&pdev->dev, "hash");

@@ -258,6 +258,7 @@ struct fib_table {
 	struct hlist_node	tb_hlist;
 	u32			tb_id;
 	int			tb_num_default;
+	struct net		*tb_net;
 	struct rcu_head		rcu;
 	unsigned long 		*tb_data;
 	unsigned long		__data[];
@@ -302,7 +303,8 @@ static inline struct fib_table *fib_get_table(struct net *net, u32 id)
 		&net->ipv4.fib_table_hash[TABLE_LOCAL_INDEX] :
 		&net->ipv4.fib_table_hash[TABLE_MAIN_INDEX];
 
-	tb_hlist = rcu_dereference_rtnl(hlist_first_rcu(ptr));
+	/* Only fib4_rules_init() adds fib_table. */
+	tb_hlist = rcu_dereference_protected(hlist_first_rcu(ptr), true);
 
 	return hlist_entry(tb_hlist, struct fib_table, tb_hlist);
 }
@@ -590,7 +592,8 @@ void fib_nh_common_release(struct fib_nh_common *nhc);
 /* Exported by fib_trie.c */
 void fib_alias_hw_flags_set(struct net *net, const struct fib_rt_info *fri);
 void fib_trie_init(void);
-struct fib_table *fib_trie_table(u32 id, struct fib_table *alias);
+struct fib_table *fib_trie_table(struct net *net, u32 id,
+				 struct fib_table *alias);
 bool fib_lookup_good_nhc(const struct fib_nh_common *nhc, int fib_flags,
 			 const struct flowi4 *flp);
 

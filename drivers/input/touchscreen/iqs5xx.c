@@ -785,7 +785,8 @@ static int iqs5xx_fw_file_parse(struct i2c_client *client,
 		switch (rec_type) {
 		case IQS5XX_REC_TYPE_DATA:
 			if (rec_addr < IQS5XX_CHKSM ||
-			    rec_addr > IQS5XX_PMAP_END) {
+			    rec_addr > IQS5XX_PMAP_END ||
+			    rec_len > IQS5XX_PMAP_END + 1 - rec_addr) {
 				dev_err(&client->dev,
 					"Invalid address at record %u\n",
 					rec_num);
@@ -1007,7 +1008,7 @@ static int iqs5xx_probe(struct i2c_client *client)
 	struct iqs5xx_private *iqs5xx;
 	int error;
 
-	iqs5xx = devm_kzalloc(&client->dev, sizeof(*iqs5xx), GFP_KERNEL);
+	iqs5xx = devm_kzalloc_obj(&client->dev, *iqs5xx);
 	if (!iqs5xx)
 		return -ENOMEM;
 

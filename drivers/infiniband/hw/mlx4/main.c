@@ -471,8 +471,6 @@ static int mlx4_ib_query_device(struct ib_device *ibdev,
 	if (err)
 		goto out;
 
-	memset(props, 0, sizeof *props);
-
 	have_ib_ports = num_ib_ports(dev->dev);
 
 	props->fw_ver = dev->dev->caps.fw_ver;
@@ -1170,6 +1168,10 @@ static int mlx4_ib_mmap(struct ib_ucontext *context, struct vm_area_struct *vma)
 	case 3: {
 		struct mlx4_clock_params params;
 		int ret;
+
+		if (vma->vm_flags & (VM_WRITE | VM_EXEC))
+			return -EPERM;
+		vm_flags_clear(vma, VM_MAYWRITE);
 
 		ret = mlx4_get_internal_clock_params(dev->dev, &params);
 		if (ret)
